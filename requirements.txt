@@ -1,0 +1,5 @@
+﻿textual>=0.50
+rich>=13
+requests>=2.31
+pandas>=2.0
+yfinance>=0.2.38
