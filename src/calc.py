@@ -90,6 +90,8 @@ def compute_rows(
                 "name": holding.name,
                 "shares": holding.shares,
                 "currency": holding.currency,
+                "avg_cost": holding.avg_cost,
+                "last_price": last_price,
                 "annual_div_ps": div_ps,
                 "annual_dividend_jpy": annual_dividend_jpy,
                 "annual_benefit_jpy": benefit_jpy,

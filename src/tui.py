@@ -4,7 +4,7 @@ from typing import Optional
 
 from textual.app import App, ComposeResult
 from textual.containers import VerticalScroll, Horizontal
-from textual.widgets import DataTable, Static, Footer, Header, Input, Button, Checkbox, Label
+from textual.widgets import DataTable, Static, Footer, Header, Input, Button, Checkbox, Label, TabbedContent, TabPane
 from textual.screen import ModalScreen
 from textual import events
 
@@ -73,6 +73,45 @@ class EditHoldingScreen(ModalScreen[Holding | None]):
 
 
 class DividendApp(App):
+    PRICE_COLUMNS = [
+        ("コード", "symbol"),
+        ("銘柄名", "name"),
+        ("株数", "shares"),
+        ("通貨", "currency"),
+        ("購入単価", "avg_cost"),
+        ("現在株価", "last_price"),
+        ("簿価(円)", "book_value_jpy"),
+        ("時価(円)", "market_value_jpy"),
+        ("損益(円)", "profit_jpy"),
+        ("損益率", "profit_rate"),
+    ]
+    INCOME_COLUMNS = [
+        ("コード", "symbol"),
+        ("銘柄名", "name"),
+        ("株数", "shares"),
+        ("通貨", "currency"),
+        ("配当/株", "annual_div_ps"),
+        ("年間配当(円)", "annual_dividend_jpy"),
+        ("優待(円)", "annual_benefit_jpy"),
+        ("簿価利回り", "yield_on_cost"),
+        ("時価利回り", "yield_on_value"),
+        ("配当更新日", "div_forecast_as_of"),
+    ]
+    NUMERIC_SORT_COLUMNS = {
+        "shares",
+        "avg_cost",
+        "last_price",
+        "annual_div_ps",
+        "annual_dividend_jpy",
+        "annual_benefit_jpy",
+        "book_value_jpy",
+        "market_value_jpy",
+        "yield_on_cost",
+        "yield_on_value",
+        "profit_jpy",
+        "profit_rate",
+    }
+
     CSS = """
     #title { text-align: center; padding: 1 0; }
     #summary { padding: 1; }
@@ -88,6 +127,9 @@ class DividendApp(App):
         ("u", "update_fx", "USDJPY更新"),
         ("n", "new_holding", "新規追加"),
         ("e", "edit", "銘柄編集"),
+        ("s", "sort_by_cursor", "現在列ソート"),
+        ("1", "show_price_tab", "株価タブ"),
+        ("2", "show_income_tab", "配当タブ"),
     ]
 
     def __init__(self) -> None:
@@ -98,12 +140,20 @@ class DividendApp(App):
         self.fx_rate = None
         self.market_source = None
         self.market_fetched_at = None
-        self.row_symbols: list[str] = []
+        self.row_symbols = {"price": [], "income": []}
+        self.sort_state = {
+            "price": {"column": "symbol", "reverse": False},
+            "income": {"column": "symbol", "reverse": False},
+        }
 
     def compose(self) -> ComposeResult:
         yield Header(show_clock=True)
         yield Static(id="summary")
-        yield DataTable(id="table", zebra_stripes=True)
+        with TabbedContent(initial="tab-price", id="tabs"):
+            with TabPane("株価関連", id="tab-price"):
+                yield DataTable(id="table_price", zebra_stripes=True)
+            with TabPane("配当関連", id="tab-income"):
+                yield DataTable(id="table_income", zebra_stripes=True)
         yield Static(id="footer")
         yield Footer()
 
@@ -113,22 +163,11 @@ class DividendApp(App):
         self._reload_all()
 
     def _setup_table(self) -> None:
-        table = self.query_one("#table", DataTable)
-        table.clear(columns=True)
-        table.add_column("コード")
-        table.add_column("銘柄名")
-        table.add_column("株数")
-        table.add_column("通貨")
-        table.add_column("配当/株")
-        table.add_column("年間配当(円)")
-        table.add_column("優待(円)")
-        table.add_column("簿価(円)")
-        table.add_column("時価(円)")
-        table.add_column("簿価利回り")
-        table.add_column("時価利回り")
-        table.add_column("損益(円)")
-        table.add_column("損益率")
-        table.add_column("配当更新日")
+        for table_id, columns in (("table_price", self.PRICE_COLUMNS), ("table_income", self.INCOME_COLUMNS)):
+            table = self.query_one(f"#{table_id}", DataTable)
+            table.clear(columns=True)
+            for label, key in columns:
+                table.add_column(label, key=key)
 
     def _reload_all(self) -> None:
         self.holdings = load_holdings()
@@ -144,27 +183,8 @@ class DividendApp(App):
 
     def _refresh_view(self) -> None:
         rows, summary = compute_rows(self.holdings, self.market_data_map, self.fx_rate, self.dividend_mode)
-        table = self.query_one("#table", DataTable)
-        table.clear()
-        self.row_symbols = []
-        for row in rows:
-            table.add_row(
-                row["symbol"],
-                row["name"],
-                rjust(fmt_number(row["shares"], 2), 10),
-                row["currency"],
-                rjust(fmt_number(row["annual_div_ps"], 2), 10),
-                rjust(fmt_number(row["annual_dividend_jpy"], 0), 12),
-                rjust(fmt_number(row["annual_benefit_jpy"], 0), 10),
-                rjust(fmt_number(row["book_value_jpy"], 0), 12),
-                rjust(fmt_number(row["market_value_jpy"], 0), 12),
-                rjust(fmt_percent(row["yield_on_cost"], 2), 9),
-                rjust(fmt_percent(row["yield_on_value"], 2), 9),
-                rjust(fmt_number(row["profit_jpy"], 0), 12),
-                rjust(fmt_percent(row["profit_rate"], 2), 9),
-                row["div_forecast_as_of"] or "",
-            )
-            self.row_symbols.append(str(row["symbol"]))
+        self._render_table("price", rows)
+        self._render_table("income", rows)
 
         summary_text = (
             f"税引モード: {'税引後' if self.dividend_mode == 'net' else '税引前'}  | "
@@ -181,7 +201,116 @@ class DividendApp(App):
             f"損益率: {fmt_percent(summary.profit_rate, 2)}"
         )
         self.query_one("#summary", Static).update(summary_text)
-        self.query_one("#footer", Static).update("n: 新規追加 / e: 銘柄編集 / p: 株価・配当更新 / u: USDJPY更新")
+        active_tab = self._active_tab_key()
+        sort_column = str(self.sort_state[active_tab]["column"])
+        sort_reverse = bool(self.sort_state[active_tab]["reverse"])
+        sort_label = dict(self._columns_for_tab(active_tab)).get(sort_column, "なし")
+        sort_order = "降順" if sort_reverse else "昇順"
+        active_tab_label = "株価関連" if active_tab == "price" else "配当関連"
+        self.query_one("#footer", Static).update(
+            f"1: 株価タブ / 2: 配当タブ / n: 新規追加 / e: 銘柄編集 / p: 株価・配当更新 / u: USDJPY更新 / s: 現在列ソート "
+            f"| タブ: {active_tab_label} | ソート: {sort_label}({sort_order})"
+        )
+
+    def _columns_for_tab(self, tab_key: str) -> list[tuple[str, str]]:
+        return self.PRICE_COLUMNS if tab_key == "price" else self.INCOME_COLUMNS
+
+    def _active_tab_key(self) -> str:
+        active = self.query_one("#tabs", TabbedContent).active
+        return "income" if active == "tab-income" else "price"
+
+    def _table_for_tab(self, tab_key: str) -> DataTable:
+        table_id = "table_income" if tab_key == "income" else "table_price"
+        return self.query_one(f"#{table_id}", DataTable)
+
+    def _format_cell(self, row: dict[str, float | str | None], key: str) -> str:
+        if key == "symbol":
+            return str(row["symbol"])
+        if key == "name":
+            return str(row["name"])
+        if key == "currency":
+            return str(row["currency"])
+        if key == "shares":
+            return rjust(fmt_number(row["shares"], 2), 10)
+        if key in {"avg_cost", "last_price", "annual_div_ps"}:
+            return rjust(fmt_number(row[key], 2), 10)
+        if key in {"annual_dividend_jpy", "annual_benefit_jpy", "book_value_jpy", "market_value_jpy", "profit_jpy"}:
+            return rjust(fmt_number(row[key], 0), 12)
+        if key in {"yield_on_cost", "yield_on_value", "profit_rate"}:
+            return rjust(fmt_percent(row[key], 2), 9)
+        if key == "div_forecast_as_of":
+            return str(row["div_forecast_as_of"] or "")
+        return str(row.get(key) or "")
+
+    def _sort_rows(self, tab_key: str, rows: list[dict[str, float | str | None]]) -> list[dict[str, float | str | None]]:
+        sort_column = str(self.sort_state[tab_key]["column"])
+        sort_reverse = bool(self.sort_state[tab_key]["reverse"])
+        if not sort_column:
+            return rows
+
+        present_rows = [row for row in rows if row.get(sort_column) not in (None, "")]
+        missing_rows = [row for row in rows if row.get(sort_column) in (None, "")]
+
+        if sort_column in self.NUMERIC_SORT_COLUMNS:
+            present_rows.sort(key=lambda row: float(row[sort_column]), reverse=sort_reverse)
+        else:
+            present_rows.sort(key=lambda row: str(row[sort_column]), reverse=sort_reverse)
+        return present_rows + missing_rows
+
+    def _render_table(self, tab_key: str, rows: list[dict[str, float | str | None]]) -> None:
+        table = self._table_for_tab(tab_key)
+        columns = self._columns_for_tab(tab_key)
+        sorted_rows = self._sort_rows(tab_key, rows)
+        cursor_row = table.cursor_row if table.cursor_row is not None else 0
+        cursor_column = table.cursor_column if table.cursor_column is not None else 0
+
+        table.clear()
+        symbols: list[str] = []
+        for row in sorted_rows:
+            table.add_row(*[self._format_cell(row, key) for _, key in columns])
+            symbols.append(str(row["symbol"]))
+        self.row_symbols[tab_key] = symbols
+        if table.row_count > 0:
+            target_row = min(max(cursor_row, 0), table.row_count - 1)
+            target_column = min(max(cursor_column, 0), len(columns) - 1)
+            table.move_cursor(row=target_row, column=target_column, scroll=False)
+
+    def _toggle_sort(self, tab_key: str, column_key: str) -> None:
+        if column_key not in {key for _, key in self._columns_for_tab(tab_key)}:
+            return
+        current_column = str(self.sort_state[tab_key]["column"])
+        if current_column == column_key:
+            self.sort_state[tab_key]["reverse"] = not bool(self.sort_state[tab_key]["reverse"])
+        else:
+            self.sort_state[tab_key]["column"] = column_key
+            self.sort_state[tab_key]["reverse"] = False
+        self._refresh_view()
+
+    def on_data_table_header_selected(self, event: DataTable.HeaderSelected) -> None:
+        tab_key = "income" if event.data_table.id == "table_income" else "price"
+        self._toggle_sort(tab_key, str(event.column_key))
+
+    def action_sort_by_cursor(self) -> None:
+        tab_key = self._active_tab_key()
+        table = self._table_for_tab(tab_key)
+        columns = self._columns_for_tab(tab_key)
+        if table.cursor_column is None:
+            return
+        if table.cursor_column >= len(columns):
+            return
+        _, column_key = columns[table.cursor_column]
+        self._toggle_sort(tab_key, column_key)
+
+    def action_show_price_tab(self) -> None:
+        self.query_one("#tabs", TabbedContent).active = "tab-price"
+        self._refresh_view()
+
+    def action_show_income_tab(self) -> None:
+        self.query_one("#tabs", TabbedContent).active = "tab-income"
+        self._refresh_view()
+
+    def on_tabbed_content_tab_activated(self, event: TabbedContent.TabActivated) -> None:
+        self._refresh_view()
 
     def action_reload(self) -> None:
         self._reload_all()
@@ -216,12 +345,14 @@ class DividendApp(App):
             self._refresh_view()
 
     def action_edit(self) -> None:
-        table = self.query_one("#table", DataTable)
+        tab_key = self._active_tab_key()
+        table = self._table_for_tab(tab_key)
+        symbols = self.row_symbols[tab_key]
         if table.row_count == 0 or table.cursor_row is None:
             return
-        if table.cursor_row >= len(self.row_symbols):
+        if table.cursor_row >= len(symbols):
             return
-        row_key = self.row_symbols[table.cursor_row]
+        row_key = symbols[table.cursor_row]
         holding = next((h for h in self.holdings if h.symbol == row_key), None)
         if not holding:
             return
