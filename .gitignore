@@ -1,0 +1,14 @@
+# Runtime data (local only)
+data/
+
+# Local backup snapshots
+backup_*/
+
+# Python cache / test cache
+__pycache__/
+*.py[cod]
+.pytest_cache/
+
+# Virtual environments
+.venv/
+venv/
