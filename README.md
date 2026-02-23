@@ -1,4 +1,4 @@
-﻿# 配当管理TUI
+﻿# dividend-tui
 
 ## セットアップ
 ```powershell
