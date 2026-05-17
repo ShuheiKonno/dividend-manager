@@ -2,8 +2,11 @@
 
 from dataclasses import dataclass
 from datetime import date, timedelta
+from typing import Callable, Optional
 
 import yfinance as yf
+
+ProgressCallback = Callable[[int, int, str], None]
 
 from .models import Holding, MarketData, FXRate
 from .utils import now_jst_iso, today_jst_str
@@ -66,6 +69,7 @@ def fetch_market_data(
     holdings: list[Holding],
     existing: dict[str, MarketData],
     force: bool = False,
+    progress_cb: Optional[ProgressCallback] = None,
 ) -> MarketFetchResult:
     fetched_at = now_jst_iso()
     source = "yfinance"
@@ -73,9 +77,12 @@ def fetch_market_data(
     results: list[MarketData] = []
     name_updates: dict[str, str] = {}
 
-    for holding in holdings:
-        if not holding.active:
-            continue
+    active = [h for h in holdings if h.active]
+    total = len(active)
+
+    for index, holding in enumerate(active):
+        if progress_cb:
+            progress_cb(index, total, f"取得中: {holding.symbol} ({index + 1}/{total})")
         cached = existing.get(holding.symbol)
         if not force and cached and cached.fetched_at and cached.fetched_at.startswith(today_jst_str()):
             results.append(cached)
@@ -118,6 +125,9 @@ def fetch_market_data(
                 fetched_at=fetched_at,
             )
         )
+
+    if progress_cb:
+        progress_cb(total, total, "完了")
 
     return MarketFetchResult(
         rows=results,
