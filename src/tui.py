@@ -403,6 +403,17 @@ class DividendApp(App):
             return "white on dark_blue"
         return "blue on grey15"
 
+    @staticmethod
+    def _border_style(tile_style: str) -> str:
+        """タイル背景はそのままに、罫線を明るい前景色で描くスタイル。"""
+        if " on " in tile_style:
+            bg = tile_style.split(" on ", 1)[1]
+        elif tile_style.startswith("on "):
+            bg = tile_style[3:]
+        else:
+            bg = "grey15"
+        return f"grey85 on {bg}"
+
     def _render_dashboard(self, rows: list[dict[str, float | str | None]], summary) -> None:
         summary_text = (
             "[b]ポートフォリオ サマリー[/b]\n\n"
@@ -450,28 +461,49 @@ class DividendApp(App):
             if y1 <= y0:
                 y1 = min(grid_h, y0 + 1)
             style = self._heatmap_style(tile.get("profit_rate"))
+            bstyle = self._border_style(style)
             for yy in range(y0, y1):
                 for xx in range(x0, x1):
                     cells[yy][xx] = (" ", style)
+            # 縁取り: 各タイルの上辺・左辺のみ描く（共有辺の二重線を防ぐ）
+            for xx in range(x0, x1):
+                cells[y0][xx] = ("─", bstyle)
+            for yy in range(y0, y1):
+                cells[yy][x0] = ("│", bstyle)
+            cells[y0][x0] = ("┌", bstyle)
 
-            cw, ch = x1 - x0, y1 - y0
+            # ラベルは罫線の内側に配置
+            ix0 = x0 + 1
+            iw = x1 - ix0
+            ih = y1 - (y0 + 1)
             symbol = str(tile["symbol"])
             pct = f"{weight * 100:.1f}%"
 
             def _put(text: str, ry_: int) -> None:
-                if not (0 <= ry_ < grid_h) or len(text) > cw:
+                if not (y0 < ry_ < grid_h) or len(text) > iw:
                     return
-                sx = x0 + (cw - len(text)) // 2
+                sx = ix0 + (iw - len(text)) // 2
                 for k, chr_ in enumerate(text):
-                    if 0 <= sx + k < grid_w:
+                    if ix0 <= sx + k < grid_w:
                         cells[ry_][sx + k] = (chr_, style)
 
-            if ch >= 2 and cw >= len(symbol):
-                mid = y0 + (ch - 2) // 2
+            if ih >= 2 and iw >= len(symbol):
+                mid = (y0 + 1) + (ih - 2) // 2
                 _put(symbol, mid)
                 _put(pct, mid + 1)
-            elif ch >= 1 and cw >= len(symbol):
-                _put(symbol, y0 + ch // 2)
+            elif ih >= 1 and iw >= len(symbol):
+                _put(symbol, (y0 + 1) + ih // 2)
+
+        # キャンバス外周（右辺・下辺）を閉じる
+        for yy in range(grid_h):
+            bs = self._border_style(cells[yy][grid_w - 1][1])
+            cells[yy][grid_w - 1] = ("│", bs)
+        for xx in range(grid_w):
+            bs = self._border_style(cells[grid_h - 1][xx][1])
+            cells[grid_h - 1][xx] = ("─", bs)
+        cells[0][grid_w - 1] = ("┐", self._border_style(cells[0][grid_w - 1][1]))
+        cells[grid_h - 1][0] = ("└", self._border_style(cells[grid_h - 1][0][1]))
+        cells[grid_h - 1][grid_w - 1] = ("┘", self._border_style(cells[grid_h - 1][grid_w - 1][1]))
 
         text = Text()
         for yy in range(grid_h):
