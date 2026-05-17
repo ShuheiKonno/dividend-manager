@@ -9,6 +9,7 @@ from textual.screen import ModalScreen
 from textual import events, work
 from rich.text import Text
 from rich.table import Table
+from rich import box
 
 from .io_csv import init_empty_files, load_holdings, save_holdings, load_market_data, save_market_data, load_fx, save_fx
 from .models import Holding
@@ -350,11 +351,15 @@ class DividendApp(App):
         return "blue on grey15"
 
     def _render_dashboard(self, rows: list[dict[str, float | str | None]], summary) -> None:
+        mv = fmt_number(summary.total_market_value_jpy, 0)
+        bv = fmt_number(summary.total_book_value_jpy, 0)
+        dv = fmt_number(summary.total_dividend_jpy, 0)
+        amt_w = max(len(mv), len(bv), len(dv))
         summary_text = (
             "[b]ポートフォリオ サマリー[/b]\n\n"
-            f"評価額計          : {fmt_number(summary.total_market_value_jpy, 0)} 円\n"
-            f"簿価計            : {fmt_number(summary.total_book_value_jpy, 0)} 円\n"
-            f"配当金計          : {fmt_number(summary.total_dividend_jpy, 0)} 円\n"
+            f"評価額計          : {rjust(mv, amt_w)} 円\n"
+            f"簿価計            : {rjust(bv, amt_w)} 円\n"
+            f"配当金計          : {rjust(dv, amt_w)} 円\n"
             f"配当利回り(簿価)  : {fmt_percent(summary.yield_on_cost, 2)}\n"
             f"配当利回り(評価額): {fmt_percent(summary.yield_on_value, 2)}"
         )
@@ -370,11 +375,21 @@ class DividendApp(App):
         tiles.sort(key=lambda row: float(row["market_value_jpy"]), reverse=True)
 
         width = self.size.width or 0
-        columns = max(3, min(8, (width - 4) // 10)) if width else 5
+        # 罫線・パディング分を考慮しつつ列数を算出（同サイズなので崩れにくい）
+        columns = max(3, min(7, (width - 4) // 12)) if width else 5
 
-        grid = Table.grid(padding=(0, 1))
+        grid = Table(
+            box=box.SQUARE,
+            show_header=False,
+            show_edge=True,
+            show_lines=True,
+            pad_edge=True,
+            padding=(0, 1),
+            border_style="grey50",
+            expand=False,
+        )
         for _ in range(columns):
-            grid.add_column()
+            grid.add_column(justify="center", no_wrap=True)
 
         cells: list[Text] = []
         for row in tiles:
@@ -386,7 +401,10 @@ class DividendApp(App):
             )
             cells.append(cell)
         for i in range(0, len(cells), columns):
-            grid.add_row(*cells[i:i + columns])
+            chunk = cells[i:i + columns]
+            if len(chunk) < columns:  # 最終行の不足分は空セルで埋め、罫線を揃える
+                chunk = chunk + [Text("")] * (columns - len(chunk))
+            grid.add_row(*chunk)
 
         heatmap.update(grid)
 
