@@ -4,15 +4,28 @@ from typing import Optional
 
 from textual.app import App, ComposeResult
 from textual.containers import VerticalScroll, Horizontal
-from textual.widgets import DataTable, Static, Footer, Header, Input, Button, Checkbox, Label, TabbedContent, TabPane
+from textual.widgets import DataTable, Static, Footer, Header, Input, Button, Checkbox, Label, TabbedContent, TabPane, ProgressBar
 from textual.screen import ModalScreen
-from textual import events
+from textual import events, work
+from rich.text import Text
 
 from .io_csv import init_empty_files, load_holdings, save_holdings, load_market_data, save_market_data, load_fx, save_fx
 from .models import Holding
 from .calc import compute_rows
 from .market_data import fetch_market_data, fetch_usdjpy
-from .utils import fmt_number, fmt_percent, rjust
+from .utils import fmt_number, fmt_percent, rjust, safe_float
+
+
+def profit_style(value: float | None) -> str:
+    """損益値に応じた表示色を返す（プラス=赤字 / マイナス=青字 / ゼロ・不明=色なし）。"""
+    num = safe_float(value)
+    if num is None:
+        return ""
+    if num > 0:
+        return "red"
+    if num < 0:
+        return "blue"
+    return ""
 
 
 class EditHoldingScreen(ModalScreen[Holding | None]):
@@ -117,6 +130,9 @@ class DividendApp(App):
     #summary { padding: 1; }
     #footer { padding: 1; }
     DataTable { height: 1fr; }
+    #progress_box { display: none; height: auto; padding: 0 1; background: $panel; }
+    #progress_label { width: auto; padding: 0 2 0 0; color: $warning; }
+    #progress_bar { width: 1fr; }
     """
 
     BINDINGS = [
@@ -149,6 +165,9 @@ class DividendApp(App):
     def compose(self) -> ComposeResult:
         yield Header(show_clock=True)
         yield Static(id="summary")
+        with Horizontal(id="progress_box"):
+            yield Static("", id="progress_label")
+            yield ProgressBar(id="progress_bar", show_eta=False)
         with TabbedContent(initial="tab-price", id="tabs"):
             with TabPane("株価関連", id="tab-price"):
                 yield DataTable(id="table_price", zebra_stripes=True)
@@ -186,6 +205,13 @@ class DividendApp(App):
         self._render_table("price", rows)
         self._render_table("income", rows)
 
+        def _md(text: str, value: float | None) -> str:
+            style = profit_style(value)
+            return f"[{style}]{text}[/{style}]" if style else text
+
+        profit_jpy_md = _md(fmt_number(summary.total_profit_jpy, 0), summary.total_profit_jpy)
+        profit_rate_md = _md(fmt_percent(summary.profit_rate, 2), summary.profit_rate)
+
         summary_text = (
             f"税引モード: {'税引後' if self.dividend_mode == 'net' else '税引前'}  | "
             f"USDJPY: {fmt_number(self.fx_rate, 4)}  | "
@@ -197,8 +223,8 @@ class DividendApp(App):
             f"合計: {fmt_number(summary.total_numerator_jpy, 0)}\n"
             f"簿価利回り: {fmt_percent(summary.yield_on_cost, 2)}  | "
             f"時価利回り: {fmt_percent(summary.yield_on_value, 2)}  | "
-            f"損益: {fmt_number(summary.total_profit_jpy, 0)}  | "
-            f"損益率: {fmt_percent(summary.profit_rate, 2)}"
+            f"損益: {profit_jpy_md}  | "
+            f"損益率: {profit_rate_md}"
         )
         self.query_one("#summary", Static).update(summary_text)
         active_tab = self._active_tab_key()
@@ -223,7 +249,7 @@ class DividendApp(App):
         table_id = "table_income" if tab_key == "income" else "table_price"
         return self.query_one(f"#{table_id}", DataTable)
 
-    def _format_cell(self, row: dict[str, float | str | None], key: str) -> str:
+    def _format_cell(self, row: dict[str, float | str | None], key: str) -> str | Text:
         if key == "symbol":
             return str(row["symbol"])
         if key == "name":
@@ -234,9 +260,17 @@ class DividendApp(App):
             return rjust(fmt_number(row["shares"], 2), 10)
         if key in {"avg_cost", "last_price", "annual_div_ps"}:
             return rjust(fmt_number(row[key], 2), 10)
-        if key in {"annual_dividend_jpy", "annual_benefit_jpy", "book_value_jpy", "market_value_jpy", "profit_jpy"}:
+        if key == "profit_jpy":
+            text = rjust(fmt_number(row[key], 0), 12)
+            style = profit_style(row[key])
+            return Text(text, style=style) if style else text
+        if key in {"annual_dividend_jpy", "annual_benefit_jpy", "book_value_jpy", "market_value_jpy"}:
             return rjust(fmt_number(row[key], 0), 12)
-        if key in {"yield_on_cost", "yield_on_value", "profit_rate"}:
+        if key == "profit_rate":
+            text = rjust(fmt_percent(row[key], 2), 9)
+            style = profit_style(row[key])
+            return Text(text, style=style) if style else text
+        if key in {"yield_on_cost", "yield_on_value"}:
             return rjust(fmt_percent(row[key], 2), 9)
         if key == "div_forecast_as_of":
             return str(row["div_forecast_as_of"] or "")
@@ -319,8 +353,51 @@ class DividendApp(App):
         self.dividend_mode = "net" if self.dividend_mode == "gross" else "gross"
         self._refresh_view()
 
+    # ---- 進捗表示ヘルパー ----
+    def _show_progress(self, label: str, indeterminate: bool = False) -> None:
+        self.query_one("#progress_box", Horizontal).display = True
+        self.query_one("#progress_label", Static).update(label)
+        bar = self.query_one("#progress_bar", ProgressBar)
+        if indeterminate:
+            bar.update(total=None)
+        else:
+            bar.update(total=100, progress=0)
+
+    def _set_progress(self, done: int, total: int, label: str) -> None:
+        if total > 0:
+            self.query_one("#progress_bar", ProgressBar).update(total=total, progress=done)
+        self.query_one("#progress_label", Static).update(label)
+
+    def _hide_progress(self) -> None:
+        self.query_one("#progress_box", Horizontal).display = False
+
+    def _notify_safe(self, message: str, severity: str = "information") -> None:
+        try:
+            self.notify(message, severity=severity, timeout=5)
+        except Exception:
+            pass
+
+    # ---- 株価・配当更新（バックグラウンド実行） ----
     def action_update_market(self) -> None:
-        result = fetch_market_data(self.holdings, self.market_data_map, force=True)
+        self._show_progress("株価・配当データを取得中...")
+        self._run_market_update()
+
+    @work(thread=True, exclusive=True, group="update")
+    def _run_market_update(self) -> None:
+        def cb(done: int, total: int, label: str) -> None:
+            self.call_from_thread(self._set_progress, done, total, label)
+
+        try:
+            result = fetch_market_data(
+                self.holdings, self.market_data_map, force=True, progress_cb=cb
+            )
+        except Exception as exc:
+            self.call_from_thread(self._hide_progress)
+            self.call_from_thread(self._notify_safe, f"更新に失敗しました: {exc}", "error")
+            return
+        self.call_from_thread(self._apply_market_result, result)
+
+    def _apply_market_result(self, result) -> None:
         save_market_data(result.rows)
         self.market_data_map = {row.symbol: row for row in result.rows}
         self.market_fetched_at = result.fetched_at
@@ -334,15 +411,38 @@ class DividendApp(App):
             if updated:
                 save_holdings(self.holdings)
         self._refresh_view()
+        self._hide_progress()
+        if result.errors:
+            self._notify_safe(f"一部の取得に失敗しました（{len(result.errors)}件）", "warning")
+        else:
+            self._notify_safe("株価・配当を更新しました")
 
+    # ---- USDJPY更新（バックグラウンド実行） ----
     def action_update_fx(self) -> None:
-        fx = fetch_usdjpy()
+        self._show_progress("USDJPYレートを取得中...", indeterminate=True)
+        self._run_fx_update()
+
+    @work(thread=True, exclusive=True, group="update")
+    def _run_fx_update(self) -> None:
+        try:
+            fx = fetch_usdjpy()
+        except Exception as exc:
+            self.call_from_thread(self._hide_progress)
+            self.call_from_thread(self._notify_safe, f"USDJPY更新に失敗しました: {exc}", "error")
+            return
+        self.call_from_thread(self._apply_fx_result, fx)
+
+    def _apply_fx_result(self, fx) -> None:
         if fx:
             rows = load_fx()
             rows.append(fx)
             save_fx(rows)
             self.fx_rate = fx.rate
             self._refresh_view()
+            self._notify_safe(f"USDJPY = {fx.rate:.4f} に更新しました")
+        else:
+            self._notify_safe("USDJPYレートを取得できませんでした", "warning")
+        self._hide_progress()
 
     def action_edit(self) -> None:
         tab_key = self._active_tab_key()
