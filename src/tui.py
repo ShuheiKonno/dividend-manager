@@ -8,6 +8,7 @@ from textual.widgets import DataTable, Static, Footer, Header, Input, Button, Ch
 from textual.screen import ModalScreen
 from textual import events, work
 from rich.text import Text
+from rich.table import Table
 
 from .io_csv import init_empty_files, load_holdings, save_holdings, load_market_data, save_market_data, load_fx, save_fx
 from .models import Holding
@@ -26,61 +27,6 @@ def profit_style(value: float | None) -> str:
     if num < 0:
         return "blue"
     return ""
-
-
-# ---- スクエアファイド・ツリーマップ（Bruls/Huizing/van Wijk 2000） ----
-# 面積を構成比に比例させ、各矩形がなるべく正方形になるよう配置する。
-# 戻り値の矩形は入力 sizes と同じ順序。
-
-
-def _tm_layout(sizes: list[float], x: float, y: float, dx: float, dy: float):
-    rects = []
-    covered = sum(sizes)
-    if dx >= dy:  # 行（横長領域）に縦積み
-        width = covered / dy if dy else 0.0
-        cy = y
-        for s in sizes:
-            h = s / width if width else 0.0
-            rects.append((x, cy, width, h))
-            cy += h
-    else:  # 列（縦長領域）に横並び
-        height = covered / dx if dx else 0.0
-        cx = x
-        for s in sizes:
-            w = s / height if height else 0.0
-            rects.append((cx, y, w, height))
-            cx += w
-    return rects
-
-
-def _tm_leftover(sizes: list[float], x: float, y: float, dx: float, dy: float):
-    covered = sum(sizes)
-    if dx >= dy:
-        width = covered / dy if dy else 0.0
-        return (x + width, y, dx - width, dy)
-    height = covered / dx if dx else 0.0
-    return (x, y + height, dx, dy - height)
-
-
-def _tm_worst(sizes: list[float], dx: float, dy: float) -> float:
-    rects = _tm_layout(sizes, 0.0, 0.0, dx, dy)
-    ratios = [max(w / h, h / w) for (_, _, w, h) in rects if w > 0 and h > 0]
-    return max(ratios) if ratios else float("inf")
-
-
-def _squarify(sizes: list[float], x: float, y: float, dx: float, dy: float):
-    sizes = [float(s) for s in sizes]
-    if not sizes:
-        return []
-    if len(sizes) == 1:
-        return _tm_layout(sizes, x, y, dx, dy)
-    i = 1
-    while i < len(sizes) and _tm_worst(sizes[:i], dx, dy) >= _tm_worst(sizes[: i + 1], dx, dy):
-        i += 1
-    current, remaining = sizes[:i], sizes[i:]
-    return _tm_layout(current, x, y, dx, dy) + _squarify(
-        remaining, *_tm_leftover(current, x, y, dx, dy)
-    )
 
 
 class EditHoldingScreen(ModalScreen[Holding | None]):
@@ -403,17 +349,6 @@ class DividendApp(App):
             return "white on dark_blue"
         return "blue on grey15"
 
-    @staticmethod
-    def _border_style(tile_style: str) -> str:
-        """タイル背景はそのままに、罫線を明るい前景色で描くスタイル。"""
-        if " on " in tile_style:
-            bg = tile_style.split(" on ", 1)[1]
-        elif tile_style.startswith("on "):
-            bg = tile_style[3:]
-        else:
-            bg = "grey15"
-        return f"grey85 on {bg}"
-
     def _render_dashboard(self, rows: list[dict[str, float | str | None]], summary) -> None:
         summary_text = (
             "[b]ポートフォリオ サマリー[/b]\n\n"
@@ -433,95 +368,27 @@ class DividendApp(App):
 
         tiles = [row for row in rows if row.get("market_value_jpy") is not None]
         tiles.sort(key=lambda row: float(row["market_value_jpy"]), reverse=True)
-        if not tiles:
-            heatmap.update("評価額のある銘柄がありません")
-            return
 
-        # キャンバスサイズ（横=端末幅-左右padding、縦=固定28行）
-        grid_w = max(40, (self.size.width or 100) - 2)
-        grid_h = 28
-        aspect = 2.0  # 端末セルは縦:横≈2:1 → 縦を2倍空間で最適化し正方形に見せる
-        canvas_h = grid_h * aspect
+        width = self.size.width or 0
+        columns = max(3, min(8, (width - 4) // 10)) if width else 5
 
-        weights = [float(r["market_value_jpy"]) / float(total) for r in tiles]
-        area = grid_w * canvas_h
-        sizes = [w * area for w in weights]
-        rects = _squarify(sizes, 0.0, 0.0, float(grid_w), canvas_h)
+        grid = Table.grid(padding=(0, 1))
+        for _ in range(columns):
+            grid.add_column()
 
-        neutral = "on grey15"
-        cells = [[(" ", neutral)] * grid_w for _ in range(grid_h)]
+        cells: list[Text] = []
+        for row in tiles:
+            weight = float(row["market_value_jpy"]) / float(total)
+            cell = Text(
+                f"{row['symbol']}\n{weight * 100:.1f}%",
+                justify="center",
+                style=self._heatmap_style(row.get("profit_rate")),
+            )
+            cells.append(cell)
+        for i in range(0, len(cells), columns):
+            grid.add_row(*cells[i:i + columns])
 
-        for tile, weight, (rx, ry, rw, rh) in zip(tiles, weights, rects):
-            x0 = max(0, min(grid_w, int(round(rx))))
-            x1 = max(0, min(grid_w, int(round(rx + rw))))
-            y0 = max(0, min(grid_h, int(round(ry / aspect))))
-            y1 = max(0, min(grid_h, int(round((ry + rh) / aspect))))
-            if x1 <= x0:  # 極小タイルでも最低1セルは見せる
-                x1 = min(grid_w, x0 + 1)
-            if y1 <= y0:
-                y1 = min(grid_h, y0 + 1)
-            style = self._heatmap_style(tile.get("profit_rate"))
-            bstyle = self._border_style(style)
-            for yy in range(y0, y1):
-                for xx in range(x0, x1):
-                    cells[yy][xx] = (" ", style)
-            # 縁取り: 各タイルの上辺・左辺のみ描く（共有辺の二重線を防ぐ）
-            for xx in range(x0, x1):
-                cells[y0][xx] = ("─", bstyle)
-            for yy in range(y0, y1):
-                cells[yy][x0] = ("│", bstyle)
-            cells[y0][x0] = ("┌", bstyle)
-
-            # ラベルは罫線の内側に配置
-            ix0 = x0 + 1
-            iw = x1 - ix0
-            ih = y1 - (y0 + 1)
-            symbol = str(tile["symbol"])
-            pct = f"{weight * 100:.1f}%"
-
-            def _put(text: str, ry_: int) -> None:
-                if not (y0 < ry_ < grid_h) or len(text) > iw:
-                    return
-                sx = ix0 + (iw - len(text)) // 2
-                for k, chr_ in enumerate(text):
-                    if ix0 <= sx + k < grid_w:
-                        cells[ry_][sx + k] = (chr_, style)
-
-            if ih >= 2 and iw >= len(symbol):
-                mid = (y0 + 1) + (ih - 2) // 2
-                _put(symbol, mid)
-                _put(pct, mid + 1)
-            elif ih >= 1 and iw >= len(symbol):
-                _put(symbol, (y0 + 1) + ih // 2)
-
-        # キャンバス外周（右辺・下辺）を閉じる
-        for yy in range(grid_h):
-            bs = self._border_style(cells[yy][grid_w - 1][1])
-            cells[yy][grid_w - 1] = ("│", bs)
-        for xx in range(grid_w):
-            bs = self._border_style(cells[grid_h - 1][xx][1])
-            cells[grid_h - 1][xx] = ("─", bs)
-        cells[0][grid_w - 1] = ("┐", self._border_style(cells[0][grid_w - 1][1]))
-        cells[grid_h - 1][0] = ("└", self._border_style(cells[grid_h - 1][0][1]))
-        cells[grid_h - 1][grid_w - 1] = ("┘", self._border_style(cells[grid_h - 1][grid_w - 1][1]))
-
-        text = Text()
-        for yy in range(grid_h):
-            run_chars: list[str] = []
-            run_style = cells[yy][0][1]
-            for xx in range(grid_w):
-                ch_, st_ = cells[yy][xx]
-                if st_ == run_style:
-                    run_chars.append(ch_)
-                else:
-                    text.append("".join(run_chars), style=run_style)
-                    run_chars = [ch_]
-                    run_style = st_
-            text.append("".join(run_chars), style=run_style)
-            if yy < grid_h - 1:
-                text.append("\n")
-
-        heatmap.update(text)
+        heatmap.update(grid)
 
     def _toggle_sort(self, tab_key: str, column_key: str) -> None:
         if column_key not in {key for _, key in self._columns_for_tab(tab_key)}:
@@ -565,13 +432,6 @@ class DividendApp(App):
 
     def on_tabbed_content_tab_activated(self, event: TabbedContent.TabActivated) -> None:
         self._refresh_view()
-
-    def on_resize(self, event: events.Resize) -> None:
-        # ツリーマップは端末幅依存のためリサイズで再描画
-        try:
-            self._refresh_view()
-        except Exception:
-            pass
 
     def action_reload(self) -> None:
         self._reload_all()
