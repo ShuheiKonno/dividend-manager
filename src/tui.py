@@ -8,6 +8,7 @@ from textual.widgets import DataTable, Static, Footer, Header, Input, Button, Ch
 from textual.screen import ModalScreen
 from textual import events, work
 from rich.text import Text
+from rich.table import Table
 
 from .io_csv import init_empty_files, load_holdings, save_holdings, load_market_data, save_market_data, load_fx, save_fx
 from .models import Holding
@@ -133,6 +134,9 @@ class DividendApp(App):
     #progress_box { display: none; height: auto; padding: 0 1; background: $panel; }
     #progress_label { width: auto; padding: 0 2 0 0; color: $warning; }
     #progress_bar { width: 1fr; }
+    #dashboard_scroll { height: 1fr; }
+    #dashboard_summary { padding: 1; }
+    #dashboard_heatmap { padding: 0 1 1 1; }
     """
 
     BINDINGS = [
@@ -144,8 +148,9 @@ class DividendApp(App):
         ("n", "new_holding", "新規追加"),
         ("e", "edit", "銘柄編集"),
         ("s", "sort_by_cursor", "現在列ソート"),
-        ("1", "show_price_tab", "株価タブ"),
-        ("2", "show_income_tab", "配当タブ"),
+        ("1", "show_dashboard_tab", "ダッシュボード"),
+        ("2", "show_price_tab", "株価タブ"),
+        ("3", "show_income_tab", "配当タブ"),
     ]
 
     def __init__(self) -> None:
@@ -168,7 +173,11 @@ class DividendApp(App):
         with Horizontal(id="progress_box"):
             yield Static("", id="progress_label")
             yield ProgressBar(id="progress_bar", show_eta=False)
-        with TabbedContent(initial="tab-price", id="tabs"):
+        with TabbedContent(initial="tab-dashboard", id="tabs"):
+            with TabPane("ダッシュボード", id="tab-dashboard"):
+                with VerticalScroll(id="dashboard_scroll"):
+                    yield Static(id="dashboard_summary")
+                    yield Static(id="dashboard_heatmap")
             with TabPane("株価関連", id="tab-price"):
                 yield DataTable(id="table_price", zebra_stripes=True)
             with TabPane("配当関連", id="tab-income"):
@@ -204,6 +213,7 @@ class DividendApp(App):
         rows, summary = compute_rows(self.holdings, self.market_data_map, self.fx_rate, self.dividend_mode)
         self._render_table("price", rows)
         self._render_table("income", rows)
+        self._render_dashboard(rows, summary)
 
         def _md(text: str, value: float | None) -> str:
             style = profit_style(value)
@@ -228,22 +238,33 @@ class DividendApp(App):
         )
         self.query_one("#summary", Static).update(summary_text)
         active_tab = self._active_tab_key()
-        sort_column = str(self.sort_state[active_tab]["column"])
-        sort_reverse = bool(self.sort_state[active_tab]["reverse"])
-        sort_label = dict(self._columns_for_tab(active_tab)).get(sort_column, "なし")
-        sort_order = "降順" if sort_reverse else "昇順"
-        active_tab_label = "株価関連" if active_tab == "price" else "配当関連"
-        self.query_one("#footer", Static).update(
-            f"1: 株価タブ / 2: 配当タブ / n: 新規追加 / e: 銘柄編集 / p: 株価・配当更新 / u: USDJPY更新 / s: 現在列ソート "
-            f"| タブ: {active_tab_label} | ソート: {sort_label}({sort_order})"
-        )
+        if active_tab == "dashboard":
+            self.query_one("#footer", Static).update(
+                "1: ダッシュボード / 2: 株価タブ / 3: 配当タブ / n: 新規追加 / "
+                "p: 株価・配当更新 / u: USDJPY更新 | タブ: ダッシュボード"
+            )
+        else:
+            sort_column = str(self.sort_state[active_tab]["column"])
+            sort_reverse = bool(self.sort_state[active_tab]["reverse"])
+            sort_label = dict(self._columns_for_tab(active_tab)).get(sort_column, "なし")
+            sort_order = "降順" if sort_reverse else "昇順"
+            active_tab_label = "株価関連" if active_tab == "price" else "配当関連"
+            self.query_one("#footer", Static).update(
+                f"1: ダッシュボード / 2: 株価タブ / 3: 配当タブ / n: 新規追加 / e: 銘柄編集 / "
+                f"p: 株価・配当更新 / u: USDJPY更新 / s: 現在列ソート "
+                f"| タブ: {active_tab_label} | ソート: {sort_label}({sort_order})"
+            )
 
     def _columns_for_tab(self, tab_key: str) -> list[tuple[str, str]]:
         return self.PRICE_COLUMNS if tab_key == "price" else self.INCOME_COLUMNS
 
     def _active_tab_key(self) -> str:
         active = self.query_one("#tabs", TabbedContent).active
-        return "income" if active == "tab-income" else "price"
+        if active == "tab-income":
+            return "income"
+        if active == "tab-dashboard":
+            return "dashboard"
+        return "price"
 
     def _table_for_tab(self, tab_key: str) -> DataTable:
         table_id = "table_income" if tab_key == "income" else "table_price"
@@ -309,6 +330,66 @@ class DividendApp(App):
             target_column = min(max(cursor_column, 0), len(columns) - 1)
             table.move_cursor(row=target_row, column=target_column, scroll=False)
 
+    @staticmethod
+    def _heatmap_style(profit_rate: float | None) -> str:
+        """損益率に応じたタイル背景色（日本式: プラス=赤 / マイナス=青）を3段階で返す。"""
+        rate = safe_float(profit_rate)
+        if rate is None or rate == 0:
+            return "white on grey23"
+        magnitude = abs(rate)
+        if rate > 0:
+            if magnitude >= 0.05:
+                return "white on red"
+            if magnitude >= 0.02:
+                return "white on dark_red"
+            return "red on grey15"
+        if magnitude >= 0.05:
+            return "white on blue"
+        if magnitude >= 0.02:
+            return "white on dark_blue"
+        return "blue on grey15"
+
+    def _render_dashboard(self, rows: list[dict[str, float | str | None]], summary) -> None:
+        summary_text = (
+            "[b]ポートフォリオ サマリー[/b]\n\n"
+            f"評価額計          : {fmt_number(summary.total_market_value_jpy, 0)} 円\n"
+            f"簿価計            : {fmt_number(summary.total_book_value_jpy, 0)} 円\n"
+            f"配当金計          : {fmt_number(summary.total_dividend_jpy, 0)} 円\n"
+            f"配当利回り(簿価)  : {fmt_percent(summary.yield_on_cost, 2)}\n"
+            f"配当利回り(評価額): {fmt_percent(summary.yield_on_value, 2)}"
+        )
+        self.query_one("#dashboard_summary", Static).update(summary_text)
+
+        heatmap = self.query_one("#dashboard_heatmap", Static)
+        total = summary.total_market_value_jpy
+        if not total:
+            heatmap.update("株価未取得 — 'p' で株価・配当を取得してください")
+            return
+
+        tiles = [row for row in rows if row.get("market_value_jpy") is not None]
+        tiles.sort(key=lambda row: float(row["market_value_jpy"]), reverse=True)
+
+        width = self.size.width or 0
+        columns = max(3, min(8, (width - 4) // 10)) if width else 5
+
+        grid = Table.grid(padding=(0, 1))
+        for _ in range(columns):
+            grid.add_column()
+
+        cells: list[Text] = []
+        for row in tiles:
+            weight = float(row["market_value_jpy"]) / float(total)
+            cell = Text(
+                f"{row['symbol']}\n{weight * 100:.1f}%",
+                justify="center",
+                style=self._heatmap_style(row.get("profit_rate")),
+            )
+            cells.append(cell)
+        for i in range(0, len(cells), columns):
+            grid.add_row(*cells[i:i + columns])
+
+        heatmap.update(grid)
+
     def _toggle_sort(self, tab_key: str, column_key: str) -> None:
         if column_key not in {key for _, key in self._columns_for_tab(tab_key)}:
             return
@@ -326,6 +407,8 @@ class DividendApp(App):
 
     def action_sort_by_cursor(self) -> None:
         tab_key = self._active_tab_key()
+        if tab_key == "dashboard":
+            return
         table = self._table_for_tab(tab_key)
         columns = self._columns_for_tab(tab_key)
         if table.cursor_column is None:
@@ -341,6 +424,10 @@ class DividendApp(App):
 
     def action_show_income_tab(self) -> None:
         self.query_one("#tabs", TabbedContent).active = "tab-income"
+        self._refresh_view()
+
+    def action_show_dashboard_tab(self) -> None:
+        self.query_one("#tabs", TabbedContent).active = "tab-dashboard"
         self._refresh_view()
 
     def on_tabbed_content_tab_activated(self, event: TabbedContent.TabActivated) -> None:
@@ -446,6 +533,8 @@ class DividendApp(App):
 
     def action_edit(self) -> None:
         tab_key = self._active_tab_key()
+        if tab_key == "dashboard":
+            return
         table = self._table_for_tab(tab_key)
         symbols = self.row_symbols[tab_key]
         if table.row_count == 0 or table.cursor_row is None:
