@@ -1,5 +1,4 @@
-﻿from src.tui import DividendApp
-
+﻿from src.gui import main
 
 if __name__ == "__main__":
-    DividendApp().run()
+    main()

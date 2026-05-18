@@ -12,3 +12,6 @@ __pycache__/
 # Virtual environments
 .venv/
 venv/
+
+# Local AI agent runtime state (absolute paths / session history — local only)
+.omc/
