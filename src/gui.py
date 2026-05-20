@@ -29,6 +29,7 @@ from PySide6.QtWidgets import (
     QProgressBar,
     QAbstractItemView,
     QHeaderView,
+    QDoubleSpinBox,
 )
 
 from .io_csv import (
@@ -380,9 +381,29 @@ class DividendWindow(QMainWindow):
         self._dash_sub = QTabWidget()
         self._dash_sub.tabBar().setExpanding(False)
         self._treemap = TreemapWidget()
-        self._piechart = PieChartWidget()
         self._dash_sub.addTab(self._treemap, "ヒートマップ")
-        self._dash_sub.addTab(self._piechart, "円グラフ")
+
+        # 円グラフタブ: 閾値スピンボックス + チャート
+        pie_container = QWidget()
+        pie_layout = QVBoxLayout(pie_container)
+        pie_layout.setContentsMargins(0, 4, 0, 0)
+        pie_layout.setSpacing(4)
+        threshold_row = QHBoxLayout()
+        threshold_row.addWidget(QLabel("その他にまとめる閾値:"))
+        self._pie_threshold = QDoubleSpinBox()
+        self._pie_threshold.setRange(0.0, 20.0)
+        self._pie_threshold.setValue(2.0)
+        self._pie_threshold.setSuffix(" %")
+        self._pie_threshold.setSingleStep(0.5)
+        self._pie_threshold.setDecimals(1)
+        self._pie_threshold.setFixedWidth(100)
+        threshold_row.addWidget(self._pie_threshold)
+        threshold_row.addStretch()
+        pie_layout.addLayout(threshold_row)
+        self._piechart = PieChartWidget()
+        pie_layout.addWidget(self._piechart, 1)
+        self._pie_threshold.valueChanged.connect(self._piechart.set_threshold)
+        self._dash_sub.addTab(pie_container, "円グラフ")
         dash_layout.addWidget(self._dash_sub, 1)
         self._tabs.addTab(dash, "ダッシュボード")
         # 株価 / 配当タブ

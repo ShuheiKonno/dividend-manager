@@ -253,6 +253,7 @@ class PieChartWidget(QWidget):
         super().__init__(parent)
         self._tiles: list[dict] = []
         self._total: float = 0.0
+        self._threshold_pct: float = 2.0  # この%未満のセグメントを「その他」に集約
         self._segments: list[tuple[float, float, dict]] = []  # (start_deg, span_deg, tile)
         self.setMinimumSize(420, 320)
         self.setMouseTracking(True)
@@ -265,6 +266,38 @@ class PieChartWidget(QWidget):
         self._total = sum(float(t["market_value_jpy"]) for t in tiles)
         self._segments = []
         self.update()
+
+    def set_threshold(self, pct: float) -> None:
+        """その他にまとめる閾値（%）を設定して再描画する。"""
+        self._threshold_pct = max(0.0, pct)
+        self.update()
+
+    def _build_display_tiles(self) -> list[dict]:
+        """閾値未満のセグメントを「その他」に集約した描画用リストを返す。"""
+        if self._total <= 0:
+            return list(self._tiles)
+        main: list[dict] = []
+        others: list[dict] = []
+        for tile in self._tiles:
+            pct = float(tile["market_value_jpy"]) / self._total * 100.0
+            if self._threshold_pct > 0 and pct < self._threshold_pct:
+                others.append(tile)
+            else:
+                main.append(tile)
+        if others:
+            other_mv = sum(float(t["market_value_jpy"]) for t in others)
+            pr_sum = sum(
+                float(t["market_value_jpy"]) * (safe_float(t.get("profit_rate")) or 0.0)
+                for t in others
+            )
+            other_pr = pr_sum / other_mv if other_mv > 0 else None
+            main.append({
+                "symbol": "その他",
+                "name": f"({len(others)}銘柄)",
+                "market_value_jpy": other_mv,
+                "profit_rate": other_pr,
+            })
+        return main
 
     def paintEvent(self, event) -> None:  # noqa: N802
         painter = QPainter(self)
@@ -282,6 +315,7 @@ class PieChartWidget(QWidget):
             painter.end()
             return
 
+        display_tiles = self._build_display_tiles()
         w = float(rect.width())
         h = float(rect.height())
         r = min(w, h) / 2.0 - 20.0
@@ -297,7 +331,7 @@ class PieChartWidget(QWidget):
         # 扇形描画: 90°（12時）から反時計回り
         self._segments = []
         current = 90.0
-        for tile in self._tiles:
+        for tile in display_tiles:
             span = float(tile["market_value_jpy"]) / self._total * 360.0
             bg, _ = profit_tile_colors(tile.get("profit_rate"))
             painter.setBrush(bg)
