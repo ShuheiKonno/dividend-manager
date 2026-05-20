@@ -44,7 +44,7 @@ from .models import Holding
 from .calc import compute_rows
 from .market_data import fetch_market_data, fetch_usdjpy
 from .utils import fmt_number, fmt_percent, safe_float
-from .widgets import TreemapWidget, KpiCard, profit_text_qcolor
+from .widgets import TreemapWidget, PieChartWidget, KpiCard, profit_text_qcolor
 
 
 PRICE_COLUMNS = [
@@ -372,12 +372,18 @@ class DividendWindow(QMainWindow):
         root.addWidget(kpi_bar)
 
         self._tabs = QTabWidget()
-        # ダッシュボード
+        # ダッシュボード（ヒートマップ / 円グラフ サブタブ）
         dash = QWidget()
         dash_layout = QVBoxLayout(dash)
-        self._treemap = TreemapWidget()
+        dash_layout.setContentsMargins(0, 0, 0, 0)
         dash_layout.addWidget(QLabel("ポートフォリオ構成（面積=評価額 / 色=損益率）"))
-        dash_layout.addWidget(self._treemap)
+        self._dash_sub = QTabWidget()
+        self._dash_sub.tabBar().setExpanding(False)
+        self._treemap = TreemapWidget()
+        self._piechart = PieChartWidget()
+        self._dash_sub.addTab(self._treemap, "ヒートマップ")
+        self._dash_sub.addTab(self._piechart, "円グラフ")
+        dash_layout.addWidget(self._dash_sub, 1)
         self._tabs.addTab(dash, "ダッシュボード")
         # 株価 / 配当タブ
         self._price_view, self._price_model, self._price_proxy = self._make_table(PRICE_COLUMNS)
@@ -451,6 +457,7 @@ class DividendWindow(QMainWindow):
         self._render_table("price", PRICE_COLUMNS, self._price_model, self._price_view, rows)
         self._render_table("income", INCOME_COLUMNS, self._income_model, self._income_view, rows)
         self._treemap.set_data(rows)
+        self._piechart.set_data(rows)
 
         self._info.setText(
             f"税引モード: {'税引後' if self.dividend_mode == 'net' else '税引前'}   |   "

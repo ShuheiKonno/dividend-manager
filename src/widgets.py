@@ -3,11 +3,13 @@
 - squarified treemap アルゴリズム（commit 3f4bb81 の純Python実装を移植・依存追加なし）
 - 損益に応じた配色ヘルパー（日本式: プラス=赤 / マイナス=青、3段階濃淡）
 - TreemapWidget: 面積比例ツリーマップ（面積 ∝ 評価額、色 = 損益率）
+- PieChartWidget: 円グラフ（面積 ∝ 評価額、色 = 損益率）
 - KpiCard: サマリー指標カード
 """
 
 from __future__ import annotations
 
+import math
 from typing import Optional
 
 from PySide6.QtCore import Qt, QRectF, QPoint
@@ -15,6 +17,15 @@ from PySide6.QtGui import QColor, QPainter, QPen, QFont
 from PySide6.QtWidgets import QWidget, QFrame, QLabel, QVBoxLayout, QToolTip
 
 from .utils import fmt_number, fmt_percent, safe_float
+
+
+def _fmt_compact(v: float) -> str:
+    """評価額を万/億単位で簡略表示する。"""
+    if v >= 1e8:
+        return f"{v / 1e8:.1f}億円"
+    if v >= 1e4:
+        return f"{v / 1e4:.0f}万円"
+    return f"{v:.0f}円"
 
 
 # ---- スクエアファイド・ツリーマップ（Bruls/Huizing/van Wijk 2000） ----
@@ -168,22 +179,46 @@ class TreemapWidget(QWidget):
             painter.drawRect(qrect.adjusted(0.5, 0.5, -0.5, -0.5))
 
             if rw >= 56 and rh >= 34:  # ラベルが収まる程度の矩形だけ描画
-                weight = float(tile["market_value_jpy"]) / self._total * 100.0
+                symbol = str(tile.get("symbol", ""))
+                name = str(tile.get("name") or "")
+                mv_str = _fmt_compact(float(tile["market_value_jpy"]))
                 painter.setPen(QPen(fg))
                 bold = QFont(small_font)
                 bold.setBold(True)
-                painter.setFont(bold)
-                painter.drawText(
-                    qrect.adjusted(2, 2, -2, -rh / 2),
-                    Qt.AlignmentFlag.AlignCenter,
-                    str(tile.get("symbol", "")),
-                )
-                painter.setFont(small_font)
-                painter.drawText(
-                    qrect.adjusted(2, rh / 2, -2, -2),
-                    Qt.AlignmentFlag.AlignCenter,
-                    f"{weight:.1f}%",
-                )
+                if rh >= 60 and name:
+                    # 3行: シンボル / 銘柄名 / 評価額
+                    third = rh / 3.0
+                    painter.setFont(bold)
+                    painter.drawText(
+                        qrect.adjusted(2, 2, -2, -(rh * 2.0 / 3.0)),
+                        Qt.AlignmentFlag.AlignCenter,
+                        symbol,
+                    )
+                    painter.setFont(small_font)
+                    painter.drawText(
+                        qrect.adjusted(2, third, -2, -third),
+                        Qt.AlignmentFlag.AlignCenter,
+                        name[:8] if len(name) > 8 else name,
+                    )
+                    painter.drawText(
+                        qrect.adjusted(2, rh * 2.0 / 3.0, -2, -2),
+                        Qt.AlignmentFlag.AlignCenter,
+                        mv_str,
+                    )
+                else:
+                    # 2行: シンボル / 評価額
+                    painter.setFont(bold)
+                    painter.drawText(
+                        qrect.adjusted(2, 2, -2, -rh / 2),
+                        Qt.AlignmentFlag.AlignCenter,
+                        symbol,
+                    )
+                    painter.setFont(small_font)
+                    painter.drawText(
+                        qrect.adjusted(2, rh / 2, -2, -2),
+                        Qt.AlignmentFlag.AlignCenter,
+                        mv_str,
+                    )
         painter.end()
 
     # ---- ホバー: ツールチップで詳細表示 ----
@@ -208,6 +243,177 @@ class TreemapWidget(QWidget):
         for qrect, tile in self._rects:
             if qrect.contains(pos):
                 return tile
+        return None
+
+
+class PieChartWidget(QWidget):
+    """評価額比率の円グラフ。面積 ∝ market_value_jpy、色 = 損益率。"""
+
+    def __init__(self, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self._tiles: list[dict] = []
+        self._total: float = 0.0
+        self._segments: list[tuple[float, float, dict]] = []  # (start_deg, span_deg, tile)
+        self.setMinimumSize(420, 320)
+        self.setMouseTracking(True)
+        self.setAutoFillBackground(True)
+
+    def set_data(self, rows: list[dict]) -> None:
+        tiles = [r for r in rows if safe_float(r.get("market_value_jpy")) is not None]
+        tiles.sort(key=lambda r: float(r["market_value_jpy"]), reverse=True)
+        self._tiles = tiles
+        self._total = sum(float(t["market_value_jpy"]) for t in tiles)
+        self._segments = []
+        self.update()
+
+    def paintEvent(self, event) -> None:  # noqa: N802
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+        rect = self.rect()
+        painter.fillRect(rect, QColor("#1c1c1c"))
+
+        if not self._tiles or self._total <= 0:
+            painter.setPen(QPen(QColor("#9e9e9e")))
+            painter.drawText(
+                rect,
+                Qt.AlignmentFlag.AlignCenter,
+                "株価未取得 — 'p' で株価・配当を取得してください",
+            )
+            painter.end()
+            return
+
+        w = float(rect.width())
+        h = float(rect.height())
+        r = min(w, h) / 2.0 - 20.0
+        cx = w / 2.0
+        cy = h / 2.0
+        pie_rect = QRectF(cx - r, cy - r, r * 2, r * 2)
+
+        small_font = QFont(self.font())
+        small_font.setPointSize(max(7, self.font().pointSize() - 1))
+        bold_font = QFont(small_font)
+        bold_font.setBold(True)
+
+        # 扇形描画: 90°（12時）から反時計回り
+        self._segments = []
+        current = 90.0
+        for tile in self._tiles:
+            span = float(tile["market_value_jpy"]) / self._total * 360.0
+            bg, _ = profit_tile_colors(tile.get("profit_rate"))
+            painter.setBrush(bg)
+            painter.setPen(QPen(QColor("#1c1c1c"), 1.5))
+            painter.drawPie(pie_rect, int(current * 16), int(span * 16))
+            self._segments.append((current, span, tile))
+            current += span
+
+        # ラベル描画
+        for start, span, tile in self._segments:
+            if span < 5.0:
+                continue
+            mid_rad = math.radians(start + span / 2.0)
+            label_r = r * 0.65
+            lx = cx + label_r * math.cos(mid_rad)
+            ly = cy - label_r * math.sin(mid_rad)
+
+            _, fg = profit_tile_colors(tile.get("profit_rate"))
+            painter.setPen(QPen(fg))
+
+            symbol = str(tile.get("symbol", ""))
+            name = str(tile.get("name") or "")
+            mv_str = _fmt_compact(float(tile["market_value_jpy"]))
+            pr_str = fmt_percent(tile.get("profit_rate"), 2)
+
+            if span >= 20.0:
+                painter.setFont(bold_font)
+                painter.drawText(
+                    QRectF(lx - 50, ly - 26, 100, 14),
+                    Qt.AlignmentFlag.AlignCenter,
+                    symbol,
+                )
+                painter.setFont(small_font)
+                painter.drawText(
+                    QRectF(lx - 50, ly - 13, 100, 13),
+                    Qt.AlignmentFlag.AlignCenter,
+                    name[:10] if len(name) > 10 else name,
+                )
+                painter.drawText(
+                    QRectF(lx - 50, ly, 100, 13),
+                    Qt.AlignmentFlag.AlignCenter,
+                    mv_str,
+                )
+                painter.drawText(
+                    QRectF(lx - 50, ly + 13, 100, 13),
+                    Qt.AlignmentFlag.AlignCenter,
+                    pr_str,
+                )
+            elif span >= 10.0:
+                painter.setFont(bold_font)
+                painter.drawText(
+                    QRectF(lx - 35, ly - 10, 70, 13),
+                    Qt.AlignmentFlag.AlignCenter,
+                    symbol,
+                )
+                painter.setFont(small_font)
+                painter.drawText(
+                    QRectF(lx - 35, ly + 3, 70, 13),
+                    Qt.AlignmentFlag.AlignCenter,
+                    mv_str,
+                )
+            else:
+                painter.setFont(small_font)
+                painter.drawText(
+                    QRectF(lx - 30, ly - 8, 60, 16),
+                    Qt.AlignmentFlag.AlignCenter,
+                    symbol,
+                )
+
+        painter.end()
+
+    def mouseMoveEvent(self, event) -> None:  # noqa: N802
+        pos = event.position().toPoint() if hasattr(event, "position") else event.pos()
+        tile = self._tile_at(pos)
+        if tile is None:
+            QToolTip.hideText()
+        else:
+            name = tile.get("name") or ""
+            mv = fmt_number(tile.get("market_value_jpy"), 0)
+            pr = fmt_percent(tile.get("profit_rate"), 2)
+            weight = float(tile["market_value_jpy"]) / self._total * 100.0 if self._total else 0
+            text = (
+                f"{tile.get('symbol', '')}  {name}\n"
+                f"評価額: {mv} 円（{weight:.1f}%）\n"
+                f"損益率: {pr}"
+            )
+            QToolTip.showText(event.globalPosition().toPoint(), text, self)
+        super().mouseMoveEvent(event)
+
+    def _tile_at(self, pos: QPoint) -> dict | None:
+        if not self._segments:
+            return None
+        w = float(self.rect().width())
+        h = float(self.rect().height())
+        r = min(w, h) / 2.0 - 20.0
+        cx = w / 2.0
+        cy = h / 2.0
+
+        dx = pos.x() - cx
+        dy = -(pos.y() - cy)  # Qt y軸反転
+        if math.sqrt(dx * dx + dy * dy) > r:
+            return None
+
+        angle = math.degrees(math.atan2(dy, dx))
+        if angle < 0:
+            angle += 360.0
+
+        for start, span, tile in self._segments:
+            s = start % 360.0
+            e = (start + span) % 360.0
+            if s < e:
+                if s <= angle < e:
+                    return tile
+            else:  # 360° をまたぐ扇形
+                if angle >= s or angle < e:
+                    return tile
         return None
 
 
