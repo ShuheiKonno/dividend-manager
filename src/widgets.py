@@ -28,6 +28,28 @@ def _fmt_compact(v: float) -> str:
     return f"{v:.0f}円"
 
 
+def _categorical_colors(tiles: list[dict]) -> list[QColor]:
+    """銘柄ごとに色相を等間隔に割り当てたカテゴリカル配色リストを返す。
+    「その他」はニュートラルグレー固定。"""
+    regular_count = sum(1 for t in tiles if t.get("symbol") != "その他")
+    colors: list[QColor] = []
+    reg_idx = 0
+    for tile in tiles:
+        if tile.get("symbol") == "その他":
+            colors.append(QColor("#757575"))
+        else:
+            hue = (reg_idx * 360 / max(regular_count, 1)) % 360
+            colors.append(QColor.fromHsvF(hue / 360.0, 0.55, 0.85))
+            reg_idx += 1
+    return colors
+
+
+def _text_color_for_bg(color: QColor) -> QColor:
+    """背景色の輝度に応じて読みやすいテキスト色（暗/白）を返す。"""
+    lum = 0.299 * color.redF() + 0.587 * color.greenF() + 0.114 * color.blueF()
+    return QColor("#1c1c1c") if lum > 0.55 else QColor("#f5f5f5")
+
+
 # ---- スクエアファイド・ツリーマップ（Bruls/Huizing/van Wijk 2000） ----
 # 面積を構成比に比例させ、各矩形がなるべく正方形になるよう配置する。
 # 戻り値の矩形は入力 sizes と同じ順序。入力 sizes の総和が dx*dy になるよう
@@ -247,7 +269,7 @@ class TreemapWidget(QWidget):
 
 
 class PieChartWidget(QWidget):
-    """評価額比率の円グラフ。面積 ∝ market_value_jpy、色 = 損益率。"""
+    """評価額比率の円グラフ。面積 ∝ market_value_jpy、色 = 銘柄ごと固有色（時計回り）。"""
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -328,57 +350,51 @@ class PieChartWidget(QWidget):
         bold_font = QFont(small_font)
         bold_font.setBold(True)
 
-        # 扇形描画: 90°（12時）から反時計回り
+        # 扇形描画: 90°（12時）から時計回り、銘柄ごとカテゴリカル配色
+        colors = _categorical_colors(display_tiles)
         self._segments = []
         current = 90.0
-        for tile in display_tiles:
+        for i, tile in enumerate(display_tiles):
             span = float(tile["market_value_jpy"]) / self._total * 360.0
-            bg, _ = profit_tile_colors(tile.get("profit_rate"))
-            painter.setBrush(bg)
+            painter.setBrush(colors[i])
             painter.setPen(QPen(QColor("#1c1c1c"), 1.5))
-            painter.drawPie(pie_rect, int(current * 16), int(span * 16))
+            painter.drawPie(pie_rect, int(current * 16), -int(span * 16))  # 負値 = 時計回り
             self._segments.append((current, span, tile))
-            current += span
+            current -= span  # 時計回り = 角度を減算
 
         # ラベル描画
-        for start, span, tile in self._segments:
+        for i, (start, span, tile) in enumerate(self._segments):
             if span < 5.0:
                 continue
-            mid_rad = math.radians(start + span / 2.0)
+            mid_rad = math.radians(start - span / 2.0)  # 時計回りの中点
             label_r = r * 0.65
             lx = cx + label_r * math.cos(mid_rad)
             ly = cy - label_r * math.sin(mid_rad)
 
-            _, fg = profit_tile_colors(tile.get("profit_rate"))
+            fg = _text_color_for_bg(colors[i])
             painter.setPen(QPen(fg))
 
             symbol = str(tile.get("symbol", ""))
             name = str(tile.get("name") or "")
             mv_str = _fmt_compact(float(tile["market_value_jpy"]))
-            pr_str = fmt_percent(tile.get("profit_rate"), 2)
 
             if span >= 20.0:
                 painter.setFont(bold_font)
                 painter.drawText(
-                    QRectF(lx - 50, ly - 26, 100, 14),
+                    QRectF(lx - 50, ly - 19, 100, 14),
                     Qt.AlignmentFlag.AlignCenter,
                     symbol,
                 )
                 painter.setFont(small_font)
                 painter.drawText(
-                    QRectF(lx - 50, ly - 13, 100, 13),
+                    QRectF(lx - 50, ly - 6, 100, 13),
                     Qt.AlignmentFlag.AlignCenter,
                     name[:10] if len(name) > 10 else name,
                 )
                 painter.drawText(
-                    QRectF(lx - 50, ly, 100, 13),
+                    QRectF(lx - 50, ly + 7, 100, 13),
                     Qt.AlignmentFlag.AlignCenter,
                     mv_str,
-                )
-                painter.drawText(
-                    QRectF(lx - 50, ly + 13, 100, 13),
-                    Qt.AlignmentFlag.AlignCenter,
-                    pr_str,
                 )
             elif span >= 10.0:
                 painter.setFont(bold_font)
@@ -411,12 +427,10 @@ class PieChartWidget(QWidget):
         else:
             name = tile.get("name") or ""
             mv = fmt_number(tile.get("market_value_jpy"), 0)
-            pr = fmt_percent(tile.get("profit_rate"), 2)
             weight = float(tile["market_value_jpy"]) / self._total * 100.0 if self._total else 0
             text = (
                 f"{tile.get('symbol', '')}  {name}\n"
-                f"評価額: {mv} 円（{weight:.1f}%）\n"
-                f"損益率: {pr}"
+                f"評価額: {mv} 円（{weight:.1f}%）"
             )
             QToolTip.showText(event.globalPosition().toPoint(), text, self)
         super().mouseMoveEvent(event)
@@ -440,13 +454,13 @@ class PieChartWidget(QWidget):
             angle += 360.0
 
         for start, span, tile in self._segments:
-            s = start % 360.0
-            e = (start + span) % 360.0
-            if s < e:
-                if s <= angle < e:
+            s = start % 360.0           # 扇形の開始角（時計回り起点）
+            e = (start - span) % 360.0  # 扇形の終了角（時計回り終点）
+            if e <= s:  # 通常ケース: 0°/360°をまたがない
+                if e <= angle <= s:
                     return tile
-            else:  # 360° をまたぐ扇形
-                if angle >= s or angle < e:
+            else:  # e > s: 0°/360°をまたぐ扇形
+                if angle >= e or angle <= s:
                     return tile
         return None
 
