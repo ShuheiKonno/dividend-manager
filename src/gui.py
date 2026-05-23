@@ -41,6 +41,8 @@ from .io_csv import (
     save_market_data,
     load_fx,
     save_fx,
+    load_settings,
+    save_settings,
 )
 from .models import Holding
 from .calc import compute_rows
@@ -373,8 +375,9 @@ class DividendWindow(QMainWindow):
         self.setWindowTitle("配当管理")
         self.resize(1180, 760)
 
-        self.dividend_mode = "gross"
-        self.withdrawal_mode: str | None = None  # None / "fixed" / "rate"
+        _saved = load_settings()
+        self.dividend_mode: str = _saved.get("dividend_mode", "gross")
+        self.withdrawal_mode: str | None = _saved.get("withdrawal_mode", None)
         self.holdings: list[Holding] = []
         self.market_data_map: dict = {}
         self.fx_rate: float | None = None
@@ -611,11 +614,13 @@ class DividendWindow(QMainWindow):
     # ---- アクション ----
     def action_toggle_mode(self) -> None:
         self.dividend_mode = "net" if self.dividend_mode == "gross" else "gross"
+        save_settings(self.dividend_mode, self.withdrawal_mode)
         self._refresh_view()
 
     def action_toggle_withdrawal(self) -> None:
         cycle: dict[str | None, str | None] = {None: "fixed", "fixed": "rate", "rate": None}
         self.withdrawal_mode = cycle[self.withdrawal_mode]
+        save_settings(self.dividend_mode, self.withdrawal_mode)
         self._refresh_view()
 
     def _active_tab_key(self) -> str:
