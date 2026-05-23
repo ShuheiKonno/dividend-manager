@@ -1,4 +1,4 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
 from dataclasses import dataclass
 from typing import Any
@@ -17,6 +17,8 @@ HOLDINGS_FIELDS = [
     "annual_div_ps_net_override",
     "div_forecast_as_of_override",
     "annual_benefit_jpy",
+    "withdrawal_fixed_jpy",
+    "withdrawal_rate",
     "active",
 ]
 
@@ -53,6 +55,8 @@ class Holding:
     annual_div_ps_net_override: float | None
     div_forecast_as_of_override: str | None
     annual_benefit_jpy: float
+    withdrawal_fixed_jpy: float | None
+    withdrawal_rate: float | None
     active: bool
 
     @classmethod
@@ -65,10 +69,18 @@ class Holding:
             shares=safe_float(row.get("shares")) or 0.0,
             avg_cost=safe_float(row.get("avg_cost")) or 0.0,
             account=str(row.get("account", "")).strip(),
-            annual_div_ps_gross_override=safe_float(row.get("annual_div_ps_gross_override")),
-            annual_div_ps_net_override=safe_float(row.get("annual_div_ps_net_override")),
-            div_forecast_as_of_override=safe_str(row.get("div_forecast_as_of_override")),
+            annual_div_ps_gross_override=safe_float(
+                row.get("annual_div_ps_gross_override")
+            ),
+            annual_div_ps_net_override=safe_float(
+                row.get("annual_div_ps_net_override")
+            ),
+            div_forecast_as_of_override=safe_str(
+                row.get("div_forecast_as_of_override")
+            ),
             annual_benefit_jpy=safe_float(row.get("annual_benefit_jpy")) or 0.0,
+            withdrawal_fixed_jpy=safe_float(row.get("withdrawal_fixed_jpy")),
+            withdrawal_rate=safe_float(row.get("withdrawal_rate")),
             active=str(row.get("active", "true")).strip().lower() != "false",
         )
 
@@ -85,6 +97,8 @@ class Holding:
             "annual_div_ps_net_override": self.annual_div_ps_net_override or "",
             "div_forecast_as_of_override": self.div_forecast_as_of_override or "",
             "annual_benefit_jpy": self.annual_benefit_jpy,
+            "withdrawal_fixed_jpy": self.withdrawal_fixed_jpy or "",
+            "withdrawal_rate": self.withdrawal_rate or "",
             "active": "true" if self.active else "false",
         }
 

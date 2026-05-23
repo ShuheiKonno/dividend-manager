@@ -192,6 +192,14 @@ class EditHoldingDialog(QDialog):
         )
         self._div_date = QLineEdit(holding.div_forecast_as_of_override or "")
         self._benefit = QLineEdit(str(holding.annual_benefit_jpy))
+        self._withdrawal_fixed = QLineEdit(
+            "" if holding.withdrawal_fixed_jpy is None
+            else str(holding.withdrawal_fixed_jpy)
+        )
+        self._withdrawal_rate = QLineEdit(
+            "" if holding.withdrawal_rate is None
+            else str(holding.withdrawal_rate)
+        )
         self._active = QCheckBox("有効")
         self._active.setChecked(holding.active)
 
@@ -202,6 +210,8 @@ class EditHoldingDialog(QDialog):
         form.addRow("配当(税引後) 上書き", self._div_net)
         form.addRow("配当予想更新日 (YYYY-MM-DD)", self._div_date)
         form.addRow("優待換算額(円/年)", self._benefit)
+        form.addRow("定額取崩額(円/年)", self._withdrawal_fixed)
+        form.addRow("定率取崩率(例: 0.04)", self._withdrawal_rate)
         form.addRow("", self._active)
 
         buttons = QDialogButtonBox()
@@ -223,6 +233,8 @@ class EditHoldingDialog(QDialog):
             div_net_text = self._div_net.text().strip()
             div_date = self._div_date.text().strip() or None
             benefit = float(self._benefit.text() or 0)
+            withdrawal_fixed_text = self._withdrawal_fixed.text().strip()
+            withdrawal_rate_text = self._withdrawal_rate.text().strip()
             active = self._active.isChecked()
         except ValueError:
             self.reject()
@@ -234,6 +246,8 @@ class EditHoldingDialog(QDialog):
         self.holding.annual_div_ps_net_override = float(div_net_text) if div_net_text else None
         self.holding.div_forecast_as_of_override = div_date
         self.holding.annual_benefit_jpy = max(benefit, 0)
+        self.holding.withdrawal_fixed_jpy = float(withdrawal_fixed_text) if withdrawal_fixed_text else None
+        self.holding.withdrawal_rate = float(withdrawal_rate_text) if withdrawal_rate_text else None
         self.holding.active = bool(active)
         self.result_holding = self.holding
         self.accept()
@@ -249,19 +263,25 @@ class NewHoldingDialog(QDialog):
         form = QFormLayout()
         self._symbol = QLineEdit(holding.symbol)
         self._name = QLineEdit(holding.name)
+        self._asset_type = QLineEdit(holding.asset_type)
         self._currency = QLineEdit(holding.currency)
         self._shares = QLineEdit(str(holding.shares))
         self._avg_cost = QLineEdit(str(holding.avg_cost))
         self._benefit = QLineEdit(str(holding.annual_benefit_jpy))
+        self._withdrawal_fixed = QLineEdit("")
+        self._withdrawal_rate = QLineEdit("")
         self._active = QCheckBox("有効")
         self._active.setChecked(holding.active)
 
         form.addRow("銘柄コード/ティッカー", self._symbol)
         form.addRow("銘柄名", self._name)
+        form.addRow("資産種別（stock/fund）", self._asset_type)
         form.addRow("通貨（JPY/USD）", self._currency)
         form.addRow("保有株数", self._shares)
         form.addRow("取得単価", self._avg_cost)
         form.addRow("優待換算額(円/年)", self._benefit)
+        form.addRow("定額取崩額(円/年)", self._withdrawal_fixed)
+        form.addRow("定率取崩率(例: 0.04)", self._withdrawal_rate)
         form.addRow("", self._active)
 
         buttons = QDialogButtonBox()
@@ -277,7 +297,10 @@ class NewHoldingDialog(QDialog):
     def _on_save(self) -> None:
         symbol = self._symbol.text().strip()
         name = self._name.text().strip()
+        asset_type = self._asset_type.text().strip().lower() or "stock"
         currency = self._currency.text().strip().upper() or "JPY"
+        withdrawal_fixed_text = self._withdrawal_fixed.text().strip()
+        withdrawal_rate_text = self._withdrawal_rate.text().strip()
         try:
             shares = float(self._shares.text() or 0)
             avg_cost = float(self._avg_cost.text() or 0)
@@ -291,10 +314,13 @@ class NewHoldingDialog(QDialog):
             return
         self.holding.symbol = symbol
         self.holding.name = name
+        self.holding.asset_type = asset_type if asset_type in ("stock", "fund") else "stock"
         self.holding.currency = currency if currency in ("JPY", "USD") else "JPY"
         self.holding.shares = max(shares, 0)
         self.holding.avg_cost = max(avg_cost, 0)
         self.holding.annual_benefit_jpy = max(benefit, 0)
+        self.holding.withdrawal_fixed_jpy = float(withdrawal_fixed_text) if withdrawal_fixed_text else None
+        self.holding.withdrawal_rate = float(withdrawal_rate_text) if withdrawal_rate_text else None
         self.holding.active = bool(active)
         self.result_holding = self.holding
         self.accept()
@@ -309,6 +335,7 @@ class DividendWindow(QMainWindow):
         self.resize(1180, 760)
 
         self.dividend_mode = "gross"
+        self.withdrawal_mode: str | None = None  # None / "fixed" / "rate"
         self.holdings: list[Holding] = []
         self.market_data_map: dict = {}
         self.fx_rate: float | None = None
@@ -446,6 +473,7 @@ class DividendWindow(QMainWindow):
             ("Q", self.close),
             ("R", self._reload_all),
             ("M", self.action_toggle_mode),
+            ("W", self.action_toggle_withdrawal),
             ("P", self.action_update_market),
             ("U", self.action_update_fx),
             ("N", self.action_new_holding),
@@ -473,20 +501,31 @@ class DividendWindow(QMainWindow):
 
     def _refresh_view(self) -> None:
         rows, summary = compute_rows(
-            self.holdings, self.market_data_map, self.fx_rate, self.dividend_mode
+            self.holdings, self.market_data_map, self.fx_rate, self.dividend_mode,
+            self.withdrawal_mode,
         )
         self._render_table("price", PRICE_COLUMNS, self._price_model, self._price_view, rows)
-        self._render_table("income", INCOME_COLUMNS, self._income_model, self._income_view, rows)
+        income_cols = list(INCOME_COLUMNS)
+        if self.withdrawal_mode is not None:
+            income_cols = [
+                ("年間収入(円)", key) if lbl == "年間配当(円)" else (lbl, key)
+                for lbl, key in income_cols
+            ]
+        self._income_model.setHorizontalHeaderLabels([lbl for lbl, _ in income_cols])
+        self._render_table("income", income_cols, self._income_model, self._income_view, rows)
         self._treemap.set_data(rows)
         self._piechart.set_data(rows)
 
+        withdrawal_label = {None: "配当", "fixed": "定額取崩", "rate": "定率取崩"}[self.withdrawal_mode]
         self._info.setText(
-            f"税引モード: {'税引後' if self.dividend_mode == 'net' else '税引前'}   |   "
+            f"税引: {'後' if self.dividend_mode == 'net' else '前'}  収入: {withdrawal_label}   |   "
             f"USDJPY: {fmt_number(self.fx_rate, 4)}   |   "
             f"株価・配当取得: {self.market_fetched_at or 'N/A'} "
             f"({self.market_source or 'N/A'})   |   "
-            f"r:再読込  m:税引前後  p:株価更新  u:USDJPY  n:新規  e:編集  s:列ソート"
+            f"r:再読込  m:税引前後  w:取崩切替  p:株価更新  u:USDJPY  n:新規  e:編集  s:列ソート"
         )
+        income_kpi_label = "年間収入" if self.withdrawal_mode is not None else "年間配当"
+        self._cards["年間配当"].set_title(income_kpi_label)
         self._cards["評価額計"].set_value(fmt_number(summary.total_market_value_jpy, 0))
         self._cards["簿価計"].set_value(fmt_number(summary.total_book_value_jpy, 0))
         self._cards["年間配当"].set_value(fmt_number(summary.total_dividend_jpy, 0))
@@ -532,6 +571,11 @@ class DividendWindow(QMainWindow):
     # ---- アクション ----
     def action_toggle_mode(self) -> None:
         self.dividend_mode = "net" if self.dividend_mode == "gross" else "gross"
+        self._refresh_view()
+
+    def action_toggle_withdrawal(self) -> None:
+        cycle: dict[str | None, str | None] = {None: "fixed", "fixed": "rate", "rate": None}
+        self.withdrawal_mode = cycle[self.withdrawal_mode]
         self._refresh_view()
 
     def _active_tab_key(self) -> str:
@@ -598,7 +642,8 @@ class DividendWindow(QMainWindow):
             symbol="", name="", asset_type="stock", currency="JPY",
             shares=0.0, avg_cost=0.0, account="",
             annual_div_ps_gross_override=None, annual_div_ps_net_override=None,
-            div_forecast_as_of_override=None, annual_benefit_jpy=0.0, active=True,
+            div_forecast_as_of_override=None, annual_benefit_jpy=0.0,
+            withdrawal_fixed_jpy=None, withdrawal_rate=None, active=True,
         )
         dlg = NewHoldingDialog(holding, self)
         if dlg.exec() == QDialog.DialogCode.Accepted and dlg.result_holding is not None:

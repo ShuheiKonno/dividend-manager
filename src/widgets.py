@@ -485,6 +485,9 @@ class KpiCard(QFrame):
         layout.addWidget(self._title)
         layout.addWidget(self._value)
 
+    def set_title(self, text: str) -> None:
+        self._title.setText(text)
+
     def set_value(self, text: str, color: QColor | None = None) -> None:
         self._value.setText(text)
         hex_color = color.name() if color is not None else "#f5f5f5"
