@@ -20,16 +20,28 @@ class Summary:
     profit_rate: float | None
 
 
+_DEFAULT_TAX_RATE = 0.20315  # 日本の源泉税率（所得税15.315% + 住民税5%）
+
+
 def _pick_div_ps(
     holding: Holding, market: MarketData | None, mode: str
 ) -> float | None:
     if mode == "net":
         override = holding.annual_div_ps_net_override
         market_value = market.annual_div_ps_net if market else None
+        result = override if override is not None else market_value
+        # override も market_data もない場合は gross から源泉税率で自動計算
+        if result is None:
+            gross = holding.annual_div_ps_gross_override or (
+                market.annual_div_ps_gross if market else None
+            )
+            if gross is not None:
+                rate = holding.tax_rate if holding.tax_rate is not None else _DEFAULT_TAX_RATE
+                result = gross * (1.0 - rate)
     else:
         override = holding.annual_div_ps_gross_override
         market_value = market.annual_div_ps_gross if market else None
-    result = override if override is not None else market_value
+        result = override if override is not None else market_value
     # 無分配ファンドは N/A ではなく 0 として扱う
     if result is None and holding.asset_type == "fund":
         return 0.0
