@@ -215,6 +215,11 @@ class EditHoldingDialog(QDialog):
             "" if holding.withdrawal_rate is None
             else str(holding.withdrawal_rate)
         )
+        self._tax_rate = QLineEdit(
+            "" if holding.tax_rate is None
+            else str(holding.tax_rate)
+        )
+        self._tax_rate.setPlaceholderText("未入力=20.315%（NISA口座は0）")
         self._active = QCheckBox("有効")
         self._active.setChecked(holding.active)
 
@@ -227,6 +232,7 @@ class EditHoldingDialog(QDialog):
         form.addRow("優待換算額(円/年)", self._benefit)
         form.addRow("定額取崩額(円/年)", self._withdrawal_fixed)
         form.addRow("定率取崩率(例: 0.04)", self._withdrawal_rate)
+        form.addRow("源泉税率(例: 0 でNISA)", self._tax_rate)
         form.addRow("", self._active)
 
         buttons = QDialogButtonBox()
@@ -254,6 +260,8 @@ class EditHoldingDialog(QDialog):
             div_net = _parse_num(div_net_text) if div_net_text else None
             withdrawal_fixed = _parse_num(withdrawal_fixed_text) if withdrawal_fixed_text else None
             withdrawal_rate = _parse_num(withdrawal_rate_text) if withdrawal_rate_text else None
+            tax_rate_text = self._tax_rate.text().strip()
+            tax_rate = _parse_num(tax_rate_text) if tax_rate_text else None
             active = self._active.isChecked()
         except ValueError:
             QMessageBox.warning(self, "入力エラー", "数値の入力が正しくありません。\n（カンマ区切りはそのまま入力できます）")
@@ -267,6 +275,7 @@ class EditHoldingDialog(QDialog):
         self.holding.annual_benefit_jpy = max(benefit, 0)
         self.holding.withdrawal_fixed_jpy = withdrawal_fixed
         self.holding.withdrawal_rate = withdrawal_rate
+        self.holding.tax_rate = tax_rate
         self.holding.active = bool(active)
         self.result_holding = self.holding
         self.accept()
@@ -292,6 +301,8 @@ class NewHoldingDialog(QDialog):
         self._benefit.setPlaceholderText("0")
         self._withdrawal_fixed = QLineEdit("")
         self._withdrawal_rate = QLineEdit("")
+        self._tax_rate = QLineEdit("")
+        self._tax_rate.setPlaceholderText("未入力=20.315%（NISA口座は0）")
         self._active = QCheckBox("有効")
         self._active.setChecked(holding.active)
 
@@ -304,6 +315,7 @@ class NewHoldingDialog(QDialog):
         form.addRow("優待換算額(円/年)", self._benefit)
         form.addRow("定額取崩額(円/年)", self._withdrawal_fixed)
         form.addRow("定率取崩率(例: 0.04)", self._withdrawal_rate)
+        form.addRow("源泉税率(例: 0 でNISA)", self._tax_rate)
         form.addRow("", self._active)
 
         buttons = QDialogButtonBox()
@@ -332,6 +344,8 @@ class NewHoldingDialog(QDialog):
             withdrawal_rate_text = self._withdrawal_rate.text().strip()
             withdrawal_fixed = _parse_num(withdrawal_fixed_text) if withdrawal_fixed_text else None
             withdrawal_rate = _parse_num(withdrawal_rate_text) if withdrawal_rate_text else None
+            tax_rate_text = self._tax_rate.text().strip()
+            tax_rate = _parse_num(tax_rate_text) if tax_rate_text else None
             active = self._active.isChecked()
         except ValueError:
             QMessageBox.warning(self, "入力エラー", "数値の入力が正しくありません。\n（カンマ区切りはそのまま入力できます）")
@@ -345,6 +359,7 @@ class NewHoldingDialog(QDialog):
         self.holding.annual_benefit_jpy = max(benefit, 0)
         self.holding.withdrawal_fixed_jpy = withdrawal_fixed
         self.holding.withdrawal_rate = withdrawal_rate
+        self.holding.tax_rate = tax_rate
         self.holding.active = bool(active)
         self.result_holding = self.holding
         self.accept()
@@ -665,7 +680,7 @@ class DividendWindow(QMainWindow):
             shares=0.0, avg_cost=0.0, account="",
             annual_div_ps_gross_override=None, annual_div_ps_net_override=None,
             div_forecast_as_of_override=None, annual_benefit_jpy=0.0,
-            withdrawal_fixed_jpy=None, withdrawal_rate=None, active=True,
+            withdrawal_fixed_jpy=None, withdrawal_rate=None, tax_rate=None, active=True,
         )
         dlg = NewHoldingDialog(holding, self)
         if dlg.exec() == QDialog.DialogCode.Accepted and dlg.result_holding is not None:

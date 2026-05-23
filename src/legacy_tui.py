@@ -588,6 +588,9 @@ class DividendApp(App):
             annual_div_ps_net_override=None,
             div_forecast_as_of_override=None,
             annual_benefit_jpy=0.0,
+            withdrawal_fixed_jpy=None,
+            withdrawal_rate=None,
+            tax_rate=None,
             active=True,
         )
         self.push_screen(NewHoldingScreen(holding), self._on_new_done)

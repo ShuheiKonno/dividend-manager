@@ -19,6 +19,7 @@ HOLDINGS_FIELDS = [
     "annual_benefit_jpy",
     "withdrawal_fixed_jpy",
     "withdrawal_rate",
+    "tax_rate",
     "active",
 ]
 
@@ -57,6 +58,7 @@ class Holding:
     annual_benefit_jpy: float
     withdrawal_fixed_jpy: float | None
     withdrawal_rate: float | None
+    tax_rate: float | None
     active: bool
 
     @classmethod
@@ -81,6 +83,7 @@ class Holding:
             annual_benefit_jpy=safe_float(row.get("annual_benefit_jpy")) or 0.0,
             withdrawal_fixed_jpy=safe_float(row.get("withdrawal_fixed_jpy")),
             withdrawal_rate=safe_float(row.get("withdrawal_rate")),
+            tax_rate=safe_float(row.get("tax_rate")),
             active=str(row.get("active", "true")).strip().lower() != "false",
         )
 
@@ -99,6 +102,7 @@ class Holding:
             "annual_benefit_jpy": self.annual_benefit_jpy,
             "withdrawal_fixed_jpy": self.withdrawal_fixed_jpy or "",
             "withdrawal_rate": self.withdrawal_rate or "",
+            "tax_rate": self.tax_rate if self.tax_rate is not None else "",
             "active": "true" if self.active else "false",
         }
 
