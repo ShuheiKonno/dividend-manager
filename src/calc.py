@@ -1,4 +1,4 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
 from dataclasses import dataclass
 from typing import Iterable
@@ -20,14 +20,20 @@ class Summary:
     profit_rate: float | None
 
 
-def _pick_div_ps(holding: Holding, market: MarketData | None, mode: str) -> float | None:
+def _pick_div_ps(
+    holding: Holding, market: MarketData | None, mode: str
+) -> float | None:
     if mode == "net":
         override = holding.annual_div_ps_net_override
         market_value = market.annual_div_ps_net if market else None
     else:
         override = holding.annual_div_ps_gross_override
         market_value = market.annual_div_ps_gross if market else None
-    return override if override is not None else market_value
+    result = override if override is not None else market_value
+    # 無分配ファンドは N/A ではなく 0 として扱う
+    if result is None and holding.asset_type == "fund":
+        return 0.0
+    return result
 
 
 def _to_jpy(value: float | None, currency: str, fx_rate: float | None) -> float | None:
@@ -45,6 +51,7 @@ def compute_rows(
     market_map: dict[str, MarketData],
     fx_rate: float | None,
     mode: str,
+    withdrawal_mode: str | None = None,
 ) -> tuple[list[dict[str, float | str | None]], Summary]:
     rows: list[dict[str, float | str | None]] = []
     sum_book = 0.0
@@ -65,8 +72,26 @@ def compute_rows(
         book_value_jpy = _to_jpy(book_value_ccy, holding.currency, fx_rate)
 
         last_price = market.last_price if market else None
-        market_value_ccy = holding.shares * last_price if last_price is not None else None
+        market_value_ccy = (
+            holding.shares * last_price if last_price is not None else None
+        )
         market_value_jpy = _to_jpy(market_value_ccy, holding.currency, fx_rate)
+
+        is_fund = holding.asset_type == "fund"
+        # yfinance で価格が取れないファンドは取得単価をフォールバック価格として使用
+        if is_fund and last_price is None:
+            market_value_jpy = _to_jpy(
+                holding.shares * holding.avg_cost, holding.currency, fx_rate
+            )
+
+        # 取り崩しモード：ファンド銘柄の annual_dividend_jpy を取り崩し額で上書き
+        if is_fund and withdrawal_mode == "fixed":
+            annual_dividend_jpy = holding.withdrawal_fixed_jpy or 0.0
+        elif is_fund and withdrawal_mode == "rate":
+            if market_value_jpy is not None and holding.withdrawal_rate is not None:
+                annual_dividend_jpy = market_value_jpy * holding.withdrawal_rate
+            else:
+                annual_dividend_jpy = None
 
         benefit_jpy = holding.annual_benefit_jpy
         numerator_jpy = None
@@ -75,8 +100,16 @@ def compute_rows(
         elif benefit_jpy:
             numerator_jpy = benefit_jpy
 
-        yield_on_cost = numerator_jpy / book_value_jpy if numerator_jpy is not None and book_value_jpy else None
-        yield_on_value = numerator_jpy / market_value_jpy if numerator_jpy is not None and market_value_jpy else None
+        yield_on_cost = (
+            numerator_jpy / book_value_jpy
+            if numerator_jpy is not None and book_value_jpy
+            else None
+        )
+        yield_on_value = (
+            numerator_jpy / market_value_jpy
+            if numerator_jpy is not None and market_value_jpy
+            else None
+        )
         profit_jpy = None
         profit_rate = None
         if market_value_jpy is not None and book_value_jpy is not None:
@@ -101,7 +134,8 @@ def compute_rows(
                 "yield_on_value": yield_on_value,
                 "profit_jpy": profit_jpy,
                 "profit_rate": profit_rate,
-                "div_forecast_as_of": holding.div_forecast_as_of_override or (market.div_forecast_as_of if market else None),
+                "div_forecast_as_of": holding.div_forecast_as_of_override
+                or (market.div_forecast_as_of if market else None),
             }
         )
 
@@ -122,10 +156,20 @@ def compute_rows(
     total_numerator = None
     if total_dividend is not None or total_benefit is not None:
         total_numerator = (total_dividend or 0.0) + (total_benefit or 0.0)
-    yield_on_cost = total_numerator / total_book if total_numerator is not None and total_book else None
-    yield_on_value = total_numerator / total_market if total_numerator is not None and total_market else None
+    yield_on_cost = (
+        total_numerator / total_book
+        if total_numerator is not None and total_book
+        else None
+    )
+    yield_on_value = (
+        total_numerator / total_market
+        if total_numerator is not None and total_market
+        else None
+    )
     total_profit = sum_profit if sum_profit != 0 else None
-    profit_rate = total_profit / total_book if total_profit is not None and total_book else None
+    profit_rate = (
+        total_profit / total_book if total_profit is not None and total_book else None
+    )
 
     summary = Summary(
         total_book_value_jpy=total_book,
