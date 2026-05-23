@@ -5,6 +5,7 @@ PySide6>=6.6
 requests>=2.31
 pandas>=2.0
 yfinance>=0.2.38
+ToushinReader  # 日本の投資信託（ISIN コード）の基準価額取得
 
 # レガシー TUI 専用（src/legacy_tui.py のみが使用。GUI 移行に伴い将来削除可）
 textual>=0.50

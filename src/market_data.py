@@ -1,10 +1,18 @@
 ﻿from __future__ import annotations
 
+import re
 from dataclasses import dataclass
 from datetime import date, timedelta
 from typing import Callable, Optional
 
 import yfinance as yf
+
+try:
+    from ToushinReader.core import Fund as _ToushinFund
+
+    _TOUSHIN_AVAILABLE = True
+except Exception:
+    _TOUSHIN_AVAILABLE = False
 
 ProgressCallback = Callable[[int, int, str], None]
 
@@ -58,6 +66,27 @@ def _parse_yfinance_dividends(series) -> tuple[float | None, str | None]:
     return (total if total > 0 else None), latest_date
 
 
+def _is_isin(symbol: str) -> bool:
+    """12 文字・先頭 2 文字英字・残り英数字の ISIN コードかどうか判定"""
+    return bool(re.fullmatch(r"[A-Z]{2}[A-Z0-9]{10}", symbol))
+
+
+def _fetch_toushin(isin: str) -> tuple[float | None, str | None]:
+    """ToushinReader で基準価額と日付を取得。(price, date_iso) を返す。"""
+    if not _TOUSHIN_AVAILABLE:
+        return None, None
+    try:
+        fund = _ToushinFund(isin)
+        price_str = fund.basic_price
+        date_str = fund.as_of_date
+        price = float(price_str.replace(",", "").replace("，", ""))
+        m = re.match(r"(\d{4})年(\d{2})月(\d{2})日", date_str)
+        date_iso = f"{m.group(1)}-{m.group(2)}-{m.group(3)}" if m else None
+        return price, date_iso
+    except Exception:
+        return None, None
+
+
 def _yfinance_symbol(holding: Holding) -> str:
     symbol = holding.symbol
     if holding.currency == "JPY" and "." not in symbol:
@@ -88,29 +117,35 @@ def fetch_market_data(
             results.append(cached)
             continue
 
-        yf_symbol = _yfinance_symbol(holding)
         price, price_date = None, None
         div_ps, div_date = None, None
 
-        try:
-            ticker = yf.Ticker(yf_symbol)
-            history = ticker.history(period="10d")
-            if not history.empty:
-                price = float(history["Close"].iloc[-1])
-                price_date = history.index[-1].date().isoformat()
-        except Exception as exc:
-            errors.append(f"株価取得失敗: {holding.symbol} ({exc})")
+        if holding.asset_type == "fund" and _is_isin(holding.symbol):
+            # 投資信託 ISIN → ToushinReader で基準価額を取得
+            price, price_date = _fetch_toushin(holding.symbol)
+            if price is None:
+                errors.append(f"基準価額取得失敗: {holding.symbol} (ToushinReader)")
+        else:
+            yf_symbol = _yfinance_symbol(holding)
+            try:
+                ticker = yf.Ticker(yf_symbol)
+                history = ticker.history(period="10d")
+                if not history.empty:
+                    price = float(history["Close"].iloc[-1])
+                    price_date = history.index[-1].date().isoformat()
+            except Exception as exc:
+                errors.append(f"株価取得失敗: {holding.symbol} ({exc})")
 
-        try:
-            series = ticker.dividends
-            div_ps, div_date = _parse_yfinance_dividends(series)
-        except Exception as exc:
-            errors.append(f"配当取得失敗: {holding.symbol} ({exc})")
+            try:
+                series = ticker.dividends
+                div_ps, div_date = _parse_yfinance_dividends(series)
+            except Exception as exc:
+                errors.append(f"配当取得失敗: {holding.symbol} ({exc})")
 
-        if not holding.name:
-            name = _yfinance_company_name(yf_symbol)
-            if name:
-                name_updates[holding.symbol] = name
+            if not holding.name:
+                name = _yfinance_company_name(yf_symbol)
+                if name:
+                    name_updates[holding.symbol] = name
 
         results.append(
             MarketData(
