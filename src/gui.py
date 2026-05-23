@@ -30,6 +30,7 @@ from PySide6.QtWidgets import (
     QAbstractItemView,
     QHeaderView,
     QDoubleSpinBox,
+    QMessageBox,
 )
 
 from .io_csv import (
@@ -169,6 +170,20 @@ class FxWorker(QObject):
         self.finished.emit(fx)
 
 
+# ---- ダイアログ共通ヘルパー ----
+
+def _parse_num(text: str) -> float:
+    """カンマ・全角数字・円記号を除去して float に変換。空文字は 0.0 を返す。"""
+    cleaned = (
+        text.replace(",", "")
+        .replace("，", "")
+        .replace("¥", "")
+        .replace("円", "")
+        .strip()
+    )
+    return float(cleaned) if cleaned else 0.0
+
+
 # ---- 編集 / 新規ダイアログ ----
 
 class EditHoldingDialog(QDialog):
@@ -227,27 +242,31 @@ class EditHoldingDialog(QDialog):
     def _on_save(self) -> None:
         try:
             name = self._name.text().strip()
-            shares = float(self._shares.text() or 0)
-            avg_cost = float(self._avg_cost.text() or 0)
+            shares = _parse_num(self._shares.text())
+            avg_cost = _parse_num(self._avg_cost.text())
             div_gross_text = self._div_gross.text().strip()
             div_net_text = self._div_net.text().strip()
             div_date = self._div_date.text().strip() or None
-            benefit = float(self._benefit.text() or 0)
+            benefit = _parse_num(self._benefit.text())
             withdrawal_fixed_text = self._withdrawal_fixed.text().strip()
             withdrawal_rate_text = self._withdrawal_rate.text().strip()
+            div_gross = _parse_num(div_gross_text) if div_gross_text else None
+            div_net = _parse_num(div_net_text) if div_net_text else None
+            withdrawal_fixed = _parse_num(withdrawal_fixed_text) if withdrawal_fixed_text else None
+            withdrawal_rate = _parse_num(withdrawal_rate_text) if withdrawal_rate_text else None
             active = self._active.isChecked()
         except ValueError:
-            self.reject()
+            QMessageBox.warning(self, "入力エラー", "数値の入力が正しくありません。\n（カンマ区切りはそのまま入力できます）")
             return
         self.holding.name = name
         self.holding.shares = max(shares, 0)
         self.holding.avg_cost = max(avg_cost, 0)
-        self.holding.annual_div_ps_gross_override = float(div_gross_text) if div_gross_text else None
-        self.holding.annual_div_ps_net_override = float(div_net_text) if div_net_text else None
+        self.holding.annual_div_ps_gross_override = div_gross
+        self.holding.annual_div_ps_net_override = div_net
         self.holding.div_forecast_as_of_override = div_date
         self.holding.annual_benefit_jpy = max(benefit, 0)
-        self.holding.withdrawal_fixed_jpy = float(withdrawal_fixed_text) if withdrawal_fixed_text else None
-        self.holding.withdrawal_rate = float(withdrawal_rate_text) if withdrawal_rate_text else None
+        self.holding.withdrawal_fixed_jpy = withdrawal_fixed
+        self.holding.withdrawal_rate = withdrawal_rate
         self.holding.active = bool(active)
         self.result_holding = self.holding
         self.accept()
@@ -302,18 +321,20 @@ class NewHoldingDialog(QDialog):
         name = self._name.text().strip()
         asset_type = self._asset_type.text().strip().lower() or "stock"
         currency = self._currency.text().strip().upper() or "JPY"
-        withdrawal_fixed_text = self._withdrawal_fixed.text().strip()
-        withdrawal_rate_text = self._withdrawal_rate.text().strip()
+        if not symbol:
+            QMessageBox.warning(self, "入力エラー", "銘柄コードを入力してください。")
+            return
         try:
-            shares = float(self._shares.text() or 0)
-            avg_cost = float(self._avg_cost.text() or 0)
-            benefit = float(self._benefit.text() or 0)
+            shares = _parse_num(self._shares.text())
+            avg_cost = _parse_num(self._avg_cost.text())
+            benefit = _parse_num(self._benefit.text())
+            withdrawal_fixed_text = self._withdrawal_fixed.text().strip()
+            withdrawal_rate_text = self._withdrawal_rate.text().strip()
+            withdrawal_fixed = _parse_num(withdrawal_fixed_text) if withdrawal_fixed_text else None
+            withdrawal_rate = _parse_num(withdrawal_rate_text) if withdrawal_rate_text else None
             active = self._active.isChecked()
         except ValueError:
-            self.reject()
-            return
-        if not symbol:
-            self.reject()
+            QMessageBox.warning(self, "入力エラー", "数値の入力が正しくありません。\n（カンマ区切りはそのまま入力できます）")
             return
         self.holding.symbol = symbol
         self.holding.name = name
@@ -322,8 +343,8 @@ class NewHoldingDialog(QDialog):
         self.holding.shares = max(shares, 0)
         self.holding.avg_cost = max(avg_cost, 0)
         self.holding.annual_benefit_jpy = max(benefit, 0)
-        self.holding.withdrawal_fixed_jpy = float(withdrawal_fixed_text) if withdrawal_fixed_text else None
-        self.holding.withdrawal_rate = float(withdrawal_rate_text) if withdrawal_rate_text else None
+        self.holding.withdrawal_fixed_jpy = withdrawal_fixed
+        self.holding.withdrawal_rate = withdrawal_rate
         self.holding.active = bool(active)
         self.result_holding = self.holding
         self.accept()
