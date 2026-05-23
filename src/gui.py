@@ -365,7 +365,7 @@ class DividendWindow(QMainWindow):
         self.fx_rate: float | None = None
         self.market_source: str | None = None
         self.market_fetched_at: str | None = None
-        self.row_symbols: dict[str, list[str]] = {"price": [], "income": []}
+        self.row_holding_indices: dict[str, list[int]] = {"price": [], "income": []}
         self._busy = False
         self._thread: QThread | None = None
         self._worker: QObject | None = None
@@ -528,7 +528,8 @@ class DividendWindow(QMainWindow):
             self.holdings, self.market_data_map, self.fx_rate, self.dividend_mode,
             self.withdrawal_mode,
         )
-        self._render_table("price", PRICE_COLUMNS, self._price_model, self._price_view, rows)
+        active_indices = [i for i, h in enumerate(self.holdings) if h.active]
+        self._render_table("price", PRICE_COLUMNS, self._price_model, self._price_view, rows, active_indices)
         income_cols = list(INCOME_COLUMNS)
         if self.withdrawal_mode is not None:
             income_cols = [
@@ -536,7 +537,7 @@ class DividendWindow(QMainWindow):
                 for lbl, key in income_cols
             ]
         self._income_model.setHorizontalHeaderLabels([lbl for lbl, _ in income_cols])
-        self._render_table("income", income_cols, self._income_model, self._income_view, rows)
+        self._render_table("income", income_cols, self._income_model, self._income_view, rows, active_indices)
         self._treemap.set_data(rows)
         self._piechart.set_data(rows)
 
@@ -566,14 +567,14 @@ class DividendWindow(QMainWindow):
             profit_text_qcolor(summary.profit_rate),
         )
 
-    def _render_table(self, tab_key, columns, model, view, rows) -> None:
+    def _render_table(self, tab_key, columns, model, view, rows, holding_indices: list[int] | None = None) -> None:
         header = view.horizontalHeader()
         sort_col = header.sortIndicatorSection()
         sort_order = header.sortIndicatorOrder()
 
         model.setRowCount(0)
-        symbols: list[str] = []
-        for row in rows:
+        stored_indices: list[int] = []
+        for i, row in enumerate(rows):
             items: list[QStandardItem] = []
             for _, key in columns:
                 text, color = _format_cell(row, key)
@@ -587,8 +588,8 @@ class DividendWindow(QMainWindow):
                     item.setForeground(color)
                 items.append(item)
             model.appendRow(items)
-            symbols.append(str(row["symbol"]))
-        self.row_symbols[tab_key] = symbols
+            stored_indices.append(holding_indices[i] if holding_indices is not None else i)
+        self.row_holding_indices[tab_key] = stored_indices
         view.sortByColumn(sort_col, sort_order)
         view.resizeColumnsToContents()
 
@@ -644,19 +645,16 @@ class DividendWindow(QMainWindow):
         if not idx.isValid():
             return
         src_row = proxy.mapToSource(idx).row()
-        symbols = self.row_symbols[tab_key]
-        if src_row < 0 or src_row >= len(symbols):
+        indices = self.row_holding_indices[tab_key]
+        if src_row < 0 or src_row >= len(indices):
             return
-        symbol = symbols[src_row]
-        holding = next((h for h in self.holdings if h.symbol == symbol), None)
-        if not holding:
+        holding_idx = indices[src_row]
+        if holding_idx < 0 or holding_idx >= len(self.holdings):
             return
+        holding = self.holdings[holding_idx]
         dlg = EditHoldingDialog(holding, self)
         if dlg.exec() == QDialog.DialogCode.Accepted and dlg.result_holding is not None:
-            for i, h in enumerate(self.holdings):
-                if h.symbol == dlg.result_holding.symbol:
-                    self.holdings[i] = dlg.result_holding
-                    break
+            self.holdings[holding_idx] = dlg.result_holding
             save_holdings(self.holdings)
             self._reload_all()
             self._notify("銘柄を更新しました")
@@ -672,9 +670,6 @@ class DividendWindow(QMainWindow):
         dlg = NewHoldingDialog(holding, self)
         if dlg.exec() == QDialog.DialogCode.Accepted and dlg.result_holding is not None:
             result = dlg.result_holding
-            if any(h.symbol == result.symbol for h in self.holdings):
-                self._notify("同じコードの銘柄が既に存在します", error=True)
-                return
             self.holdings.append(result)
             save_holdings(self.holdings)
             self._reload_all()
