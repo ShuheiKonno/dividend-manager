@@ -46,7 +46,8 @@ from .io_csv import (
 )
 from .models import Holding
 from .calc import compute_rows
-from .market_data import fetch_market_data, fetch_usdjpy
+# market_data は yfinance / ToushinReader / pandas を芋づる式に読み込み起動を数秒遅らせる。
+# 取得は p / u キーのワーカースレッドでしか走らないため、import を run() 内へ遅延させる。
 from .utils import fmt_number, fmt_percent, safe_float
 from .widgets import TreemapWidget, PieChartWidget, KpiCard, profit_text_qcolor
 
@@ -146,6 +147,7 @@ class MarketWorker(QObject):
         self._market_map = market_map
 
     def run(self) -> None:
+        from .market_data import fetch_market_data
         try:
             result = fetch_market_data(
                 self._holdings,
@@ -164,6 +166,7 @@ class FxWorker(QObject):
     error = Signal(str)
 
     def run(self) -> None:
+        from .market_data import fetch_usdjpy
         try:
             fx = fetch_usdjpy()
         except Exception as exc:  # noqa: BLE001

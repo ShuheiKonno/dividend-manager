@@ -5,14 +5,33 @@ from dataclasses import dataclass
 from datetime import date, timedelta
 from typing import Callable, Optional
 
-import yfinance as yf
+# yfinance / ToushinReader は import に数秒かかる重量級依存。実際に取得を行う関数が
+# 呼ばれるまでロードしないことで、GUI/TUI の起動を即時化する（取得は QThread ワーカー上）。
+_yf_module = None
+_ToushinFund = None
+_TOUSHIN_AVAILABLE: bool | None = None  # None = 未プローブ
 
-try:
-    from ToushinReader.core import Fund as _ToushinFund
 
-    _TOUSHIN_AVAILABLE = True
-except Exception:
-    _TOUSHIN_AVAILABLE = False
+def _yf():
+    global _yf_module
+    if _yf_module is None:
+        import yfinance as yf
+        _yf_module = yf
+    return _yf_module
+
+
+def _toushin_fund_cls():
+    """ToushinReader.core.Fund を遅延ロード。未インストールなら None を返す。"""
+    global _ToushinFund, _TOUSHIN_AVAILABLE
+    if _TOUSHIN_AVAILABLE is None:
+        try:
+            from ToushinReader.core import Fund
+            _ToushinFund = Fund
+            _TOUSHIN_AVAILABLE = True
+        except Exception:
+            _TOUSHIN_AVAILABLE = False
+    return _ToushinFund if _TOUSHIN_AVAILABLE else None
+
 
 ProgressCallback = Callable[[int, int, str], None]
 
@@ -31,7 +50,7 @@ class MarketFetchResult:
 
 def _yfinance_company_name(symbol: str) -> str | None:
     try:
-        ticker = yf.Ticker(symbol)
+        ticker = _yf().Ticker(symbol)
         info = {}
         try:
             info = ticker.info or {}
@@ -73,10 +92,11 @@ def _is_isin(symbol: str) -> bool:
 
 def _fetch_toushin(isin: str) -> tuple[float | None, str | None]:
     """ToushinReader で基準価額と日付を取得。(price, date_iso) を返す。"""
-    if not _TOUSHIN_AVAILABLE:
+    fund_cls = _toushin_fund_cls()
+    if fund_cls is None:
         return None, None
     try:
-        fund = _ToushinFund(isin)
+        fund = fund_cls(isin)
         price_str = fund.basic_price
         date_str = fund.as_of_date
         price = float(price_str.replace(",", "").replace("，", ""))
@@ -128,7 +148,7 @@ def fetch_market_data(
         else:
             yf_symbol = _yfinance_symbol(holding)
             try:
-                ticker = yf.Ticker(yf_symbol)
+                ticker = _yf().Ticker(yf_symbol)
                 history = ticker.history(period="10d")
                 if not history.empty:
                     price = float(history["Close"].iloc[-1])
@@ -175,7 +195,7 @@ def fetch_market_data(
 
 def fetch_usdjpy() -> FXRate | None:
     try:
-        ticker = yf.Ticker("USDJPY=X")
+        ticker = _yf().Ticker("USDJPY=X")
         history = ticker.history(period="10d")
         if history.empty:
             return None
