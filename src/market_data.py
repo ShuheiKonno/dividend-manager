@@ -150,9 +150,12 @@ def fetch_market_data(
             try:
                 ticker = _yf().Ticker(yf_symbol)
                 history = ticker.history(period="10d")
-                if not history.empty:
-                    price = float(history["Close"].iloc[-1])
-                    price_date = history.index[-1].date().isoformat()
+                # 最終行の Close が NaN（最新バー未確定）の銘柄があるため、
+                # 最後の非 NaN 終値を採用する。
+                close = history["Close"].dropna()
+                if not close.empty:
+                    price = float(close.iloc[-1])
+                    price_date = close.index[-1].date().isoformat()
             except Exception as exc:
                 errors.append(f"株価取得失敗: {holding.symbol} ({exc})")
 
@@ -197,9 +200,10 @@ def fetch_usdjpy() -> FXRate | None:
     try:
         ticker = _yf().Ticker("USDJPY=X")
         history = ticker.history(period="10d")
-        if history.empty:
+        close = history["Close"].dropna()
+        if close.empty:
             return None
-        rate = float(history["Close"].iloc[-1])
+        rate = float(close.iloc[-1])
         return FXRate(timestamp=now_jst_iso(), pair="USDJPY", rate=rate, source="yfinance")
     except Exception:
         return None
