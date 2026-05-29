@@ -2,8 +2,8 @@
 
 - squarified treemap アルゴリズム（commit 3f4bb81 の純Python実装を移植・依存追加なし）
 - 損益に応じた配色ヘルパー（日本式: プラス=赤 / マイナス=青、3段階濃淡）
-- TreemapWidget: 面積比例ツリーマップ（面積 ∝ 評価額、色 = 損益率）
-- PieChartWidget: 円グラフ（面積 ∝ 評価額、色 = 損益率）
+- TreemapWidget: 面積比例ツリーマップ（面積 ∝ 指定額[既定=評価額]、色 = 損益率）
+- PieChartWidget: 円グラフ（面積 ∝ 指定額[既定=評価額]、色 = 損益率）
 - KpiCard: サマリー指標カード
 """
 
@@ -17,6 +17,9 @@ from PySide6.QtGui import QColor, QPainter, QPen, QFont
 from PySide6.QtWidgets import QWidget, QFrame, QLabel, QVBoxLayout, QToolTip
 
 from .utils import fmt_number, fmt_percent, safe_float
+
+# 株価未取得時などチャートが空のときに中央表示する既定メッセージ
+_EMPTY_MESSAGE = "株価未取得 — 'p' で株価・配当を取得してください"
 
 
 def _fmt_compact(v: float) -> str:
@@ -144,23 +147,42 @@ def profit_text_qcolor(value: float | None) -> Optional[QColor]:
 
 
 class TreemapWidget(QWidget):
-    """面積比例ツリーマップ。面積 ∝ market_value_jpy、色 = profit_rate。"""
+    """面積比例ツリーマップ。面積 ∝ value_key（既定=market_value_jpy）、色 = profit_rate。"""
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
         self._tiles: list[dict] = []
         self._total: float = 0.0
         self._rects: list[tuple[QRectF, dict]] = []
+        self._value_key: str = "market_value_jpy"
+        self._value_label: str = "評価額"
+        self._empty_message: str = _EMPTY_MESSAGE
         self.setMinimumSize(420, 320)
         self.setMouseTracking(True)
         self.setAutoFillBackground(True)
 
-    def set_data(self, rows: list[dict]) -> None:
-        """compute_rows の行から評価額が判明している銘柄を抽出して保持する。"""
-        tiles = [r for r in rows if safe_float(r.get("market_value_jpy")) is not None]
-        tiles.sort(key=lambda r: float(r["market_value_jpy"]), reverse=True)
+    def set_data(
+        self,
+        rows: list[dict],
+        value_key: str = "market_value_jpy",
+        value_label: str = "評価額",
+        empty_message: str | None = None,
+    ) -> None:
+        """compute_rows の行から value_key が正の銘柄を抽出して保持する。
+
+        面積は value_key（既定=評価額）に比例。色は損益率（profit_rate）。
+        """
+        self._value_key = value_key
+        self._value_label = value_label
+        self._empty_message = empty_message or _EMPTY_MESSAGE
+        tiles = []
+        for r in rows:
+            v = safe_float(r.get(value_key))
+            if v is not None and v > 0:
+                tiles.append(r)
+        tiles.sort(key=lambda r: float(r[value_key]), reverse=True)
         self._tiles = tiles
-        self._total = sum(float(t["market_value_jpy"]) for t in tiles)
+        self._total = sum(float(t[value_key]) for t in tiles)
         self._rects = []
         self.update()
 
@@ -176,7 +198,7 @@ class TreemapWidget(QWidget):
             painter.drawText(
                 rect,
                 Qt.AlignmentFlag.AlignCenter,
-                "株価未取得 — 'p' で株価・配当を取得してください",
+                self._empty_message,
             )
             painter.end()
             return
@@ -184,7 +206,7 @@ class TreemapWidget(QWidget):
         w = float(rect.width())
         h = float(rect.height())
         area = w * h
-        scaled = [float(t["market_value_jpy"]) / self._total * area for t in self._tiles]
+        scaled = [float(t[self._value_key]) / self._total * area for t in self._tiles]
         layout = _squarify(scaled, 0.0, 0.0, w, h)
 
         self._rects = []
@@ -203,7 +225,7 @@ class TreemapWidget(QWidget):
             if rw >= 56 and rh >= 34:  # ラベルが収まる程度の矩形だけ描画
                 symbol = str(tile.get("symbol", ""))
                 name = str(tile.get("name") or "")
-                mv_str = _fmt_compact(float(tile["market_value_jpy"]))
+                mv_str = _fmt_compact(float(tile[self._value_key]))
                 painter.setPen(QPen(fg))
                 bold = QFont(small_font)
                 bold.setBold(True)
@@ -254,11 +276,11 @@ class TreemapWidget(QWidget):
             QToolTip.hideText()
         else:
             name = tile.get("name") or ""
-            mv = fmt_number(tile.get("market_value_jpy"), 0)
+            mv = fmt_number(tile.get(self._value_key), 0)
             pr = fmt_percent(tile.get("profit_rate"), 2)
             text = (
                 f"{tile.get('symbol', '')}  {name}\n"
-                f"評価額: {mv} 円\n"
+                f"{self._value_label}: {mv} 円\n"
                 f"損益率: {pr}"
             )
             QToolTip.showText(event.globalPosition().toPoint(), text, self)
@@ -272,7 +294,7 @@ class TreemapWidget(QWidget):
 
 
 class PieChartWidget(QWidget):
-    """評価額比率の円グラフ。面積 ∝ market_value_jpy、色 = 銘柄ごと固有色（時計回り）。"""
+    """構成比の円グラフ。面積 ∝ value_key（既定=market_value_jpy）、色 = 銘柄ごと固有色（時計回り）。"""
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -280,15 +302,31 @@ class PieChartWidget(QWidget):
         self._total: float = 0.0
         self._threshold_pct: float = 2.0  # この%未満のセグメントを「その他」に集約
         self._segments: list[tuple[float, float, dict]] = []  # (start_deg, span_deg, tile)
+        self._value_key: str = "market_value_jpy"
+        self._value_label: str = "評価額"
+        self._empty_message: str = _EMPTY_MESSAGE
         self.setMinimumSize(420, 320)
         self.setMouseTracking(True)
         self.setAutoFillBackground(True)
 
-    def set_data(self, rows: list[dict]) -> None:
-        tiles = [r for r in rows if safe_float(r.get("market_value_jpy")) is not None]
-        tiles.sort(key=lambda r: float(r["market_value_jpy"]), reverse=True)
+    def set_data(
+        self,
+        rows: list[dict],
+        value_key: str = "market_value_jpy",
+        value_label: str = "評価額",
+        empty_message: str | None = None,
+    ) -> None:
+        self._value_key = value_key
+        self._value_label = value_label
+        self._empty_message = empty_message or _EMPTY_MESSAGE
+        tiles = []
+        for r in rows:
+            v = safe_float(r.get(value_key))
+            if v is not None and v > 0:
+                tiles.append(r)
+        tiles.sort(key=lambda r: float(r[value_key]), reverse=True)
         self._tiles = tiles
-        self._total = sum(float(t["market_value_jpy"]) for t in tiles)
+        self._total = sum(float(t[value_key]) for t in tiles)
         self._segments = []
         self.update()
 
@@ -304,22 +342,22 @@ class PieChartWidget(QWidget):
         main: list[dict] = []
         others: list[dict] = []
         for tile in self._tiles:
-            pct = float(tile["market_value_jpy"]) / self._total * 100.0
+            pct = float(tile[self._value_key]) / self._total * 100.0
             if self._threshold_pct > 0 and pct < self._threshold_pct:
                 others.append(tile)
             else:
                 main.append(tile)
         if others:
-            other_mv = sum(float(t["market_value_jpy"]) for t in others)
+            other_mv = sum(float(t[self._value_key]) for t in others)
             pr_sum = sum(
-                float(t["market_value_jpy"]) * (safe_float(t.get("profit_rate")) or 0.0)
+                float(t[self._value_key]) * (safe_float(t.get("profit_rate")) or 0.0)
                 for t in others
             )
             other_pr = pr_sum / other_mv if other_mv > 0 else None
             main.append({
                 "symbol": "その他",
                 "name": f"({len(others)}銘柄)",
-                "market_value_jpy": other_mv,
+                self._value_key: other_mv,
                 "profit_rate": other_pr,
             })
         return main
@@ -335,7 +373,7 @@ class PieChartWidget(QWidget):
             painter.drawText(
                 rect,
                 Qt.AlignmentFlag.AlignCenter,
-                "株価未取得 — 'p' で株価・配当を取得してください",
+                self._empty_message,
             )
             painter.end()
             return
@@ -358,7 +396,7 @@ class PieChartWidget(QWidget):
         self._segments = []
         current = 90.0
         for i, tile in enumerate(display_tiles):
-            span = float(tile["market_value_jpy"]) / self._total * 360.0
+            span = float(tile[self._value_key]) / self._total * 360.0
             painter.setBrush(colors[i])
             painter.setPen(QPen(QColor("#1c1c1c"), 1.5))
             painter.drawPie(pie_rect, int(current * 16), -int(span * 16))  # 負値 = 時計回り
@@ -379,7 +417,7 @@ class PieChartWidget(QWidget):
 
             symbol = str(tile.get("symbol", ""))
             name = str(tile.get("name") or "")
-            mv_str = _fmt_compact(float(tile["market_value_jpy"]))
+            mv_str = _fmt_compact(float(tile[self._value_key]))
 
             if span >= 20.0:
                 painter.setFont(bold_font)
@@ -430,11 +468,11 @@ class PieChartWidget(QWidget):
             QToolTip.hideText()
         else:
             name = tile.get("name") or ""
-            mv = fmt_number(tile.get("market_value_jpy"), 0)
-            weight = float(tile["market_value_jpy"]) / self._total * 100.0 if self._total else 0
+            mv = fmt_number(tile.get(self._value_key), 0)
+            weight = float(tile[self._value_key]) / self._total * 100.0 if self._total else 0
             text = (
                 f"{tile.get('symbol', '')}  {name}\n"
-                f"評価額: {mv} 円（{weight:.1f}%）"
+                f"{self._value_label}: {mv} 円（{weight:.1f}%）"
             )
             QToolTip.showText(event.globalPosition().toPoint(), text, self)
         super().mouseMoveEvent(event)

@@ -445,37 +445,23 @@ class DividendWindow(QMainWindow):
         root.addWidget(kpi_bar)
 
         self._tabs = QTabWidget()
-        # ダッシュボード（ヒートマップ / 円グラフ サブタブ）
+        # ダッシュボード（評価額 / 配当額 × ヒートマップ / 円グラフ の4サブタブ）
         dash = QWidget()
         dash_layout = QVBoxLayout(dash)
         dash_layout.setContentsMargins(0, 0, 0, 0)
-        dash_layout.addWidget(QLabel("ポートフォリオ構成（面積=評価額 / 色=損益率）"))
+        dash_layout.addWidget(QLabel("ポートフォリオ構成（色=損益率 / 面積はタブで切替）"))
         self._dash_sub = QTabWidget()
         self._dash_sub.tabBar().setExpanding(False)
+        # 評価額ベース（面積 = 評価額）
         self._treemap = TreemapWidget()
-        self._dash_sub.addTab(self._treemap, "ヒートマップ")
-
-        # 円グラフタブ: 閾値スピンボックス + チャート
-        pie_container = QWidget()
-        pie_layout = QVBoxLayout(pie_container)
-        pie_layout.setContentsMargins(0, 4, 0, 0)
-        pie_layout.setSpacing(4)
-        threshold_row = QHBoxLayout()
-        threshold_row.addWidget(QLabel("その他にまとめる閾値:"))
-        self._pie_threshold = QDoubleSpinBox()
-        self._pie_threshold.setRange(0.0, 20.0)
-        self._pie_threshold.setValue(2.0)
-        self._pie_threshold.setSuffix(" %")
-        self._pie_threshold.setSingleStep(0.5)
-        self._pie_threshold.setDecimals(1)
-        self._pie_threshold.setFixedWidth(100)
-        threshold_row.addWidget(self._pie_threshold)
-        threshold_row.addStretch()
-        pie_layout.addLayout(threshold_row)
+        self._dash_sub.addTab(self._treemap, "評価額ヒートマップ")
         self._piechart = PieChartWidget()
-        pie_layout.addWidget(self._piechart, 1)
-        self._pie_threshold.valueChanged.connect(self._piechart.set_threshold)
-        self._dash_sub.addTab(pie_container, "円グラフ")
+        self._dash_sub.addTab(self._make_pie_tab(self._piechart), "評価額円グラフ")
+        # 配当額ベース（面積 = 年間配当）
+        self._treemap_div = TreemapWidget()
+        self._dash_sub.addTab(self._treemap_div, "配当ヒートマップ")
+        self._piechart_div = PieChartWidget()
+        self._dash_sub.addTab(self._make_pie_tab(self._piechart_div), "配当円グラフ")
         dash_layout.addWidget(self._dash_sub, 1)
         self._tabs.addTab(dash, "ダッシュボード")
         # 株価 / 配当タブ
@@ -512,6 +498,32 @@ class DividendWindow(QMainWindow):
         view.sortByColumn(0, Qt.SortOrder.AscendingOrder)
         view.doubleClicked.connect(lambda _idx: self.action_edit())
         return view, model, proxy
+
+    def _make_pie_tab(self, piechart: PieChartWidget) -> QWidget:
+        """閾値スピンボックス付きの円グラフコンテナを生成して返す。
+
+        スピンボックスの値変更を piechart.set_threshold に接続する。評価額用・
+        配当用それぞれが独立した閾値を持てるよう、チャート単位で生成する。
+        """
+        container = QWidget()
+        layout = QVBoxLayout(container)
+        layout.setContentsMargins(0, 4, 0, 0)
+        layout.setSpacing(4)
+        row = QHBoxLayout()
+        row.addWidget(QLabel("その他にまとめる閾値:"))
+        spin = QDoubleSpinBox()
+        spin.setRange(0.0, 20.0)
+        spin.setValue(2.0)
+        spin.setSuffix(" %")
+        spin.setSingleStep(0.5)
+        spin.setDecimals(1)
+        spin.setFixedWidth(100)
+        row.addWidget(spin)
+        row.addStretch()
+        layout.addLayout(row)
+        layout.addWidget(piechart, 1)
+        spin.valueChanged.connect(piechart.set_threshold)
+        return container
 
     def _register_shortcuts(self) -> None:
         binds = [
@@ -561,6 +573,17 @@ class DividendWindow(QMainWindow):
         self._render_table("income", income_cols, self._income_model, self._income_view, rows, active_indices)
         self._treemap.set_data(rows)
         self._piechart.set_data(rows)
+        # 配当額ベース: 面積 = 年間配当（取崩モード時は「年間収入」に上書きされた額）
+        div_label = "年間収入" if self.withdrawal_mode is not None else "年間配当"
+        div_empty = f"{div_label}データがありません（'p' で取得 / 配当のある銘柄が必要です）"
+        self._treemap_div.set_data(
+            rows, value_key="annual_dividend_jpy", value_label=div_label,
+            empty_message=div_empty,
+        )
+        self._piechart_div.set_data(
+            rows, value_key="annual_dividend_jpy", value_label=div_label,
+            empty_message=div_empty,
+        )
 
         withdrawal_label = {None: "配当", "fixed": "定額取崩", "rate": "定率取崩"}[self.withdrawal_mode]
         self._info.setText(
