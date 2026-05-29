@@ -217,10 +217,13 @@ class TreemapWidget(QWidget):
                         symbol,
                     )
                     painter.setFont(small_font)
+                    name_rect = qrect.adjusted(2, third, -2, -third)
+                    # タイル幅に収まれば全文表示、超える場合のみ末尾を「…」省略する
+                    elided_name = painter.fontMetrics().elidedText(
+                        name, Qt.TextElideMode.ElideRight, int(name_rect.width())
+                    )
                     painter.drawText(
-                        qrect.adjusted(2, third, -2, -third),
-                        Qt.AlignmentFlag.AlignCenter,
-                        name[:8] if len(name) > 8 else name,
+                        name_rect, Qt.AlignmentFlag.AlignCenter, elided_name
                     )
                     painter.drawText(
                         qrect.adjusted(2, rh * 2.0 / 3.0, -2, -2),
@@ -386,11 +389,12 @@ class PieChartWidget(QWidget):
                     symbol,
                 )
                 painter.setFont(small_font)
-                painter.drawText(
-                    QRectF(lx - 50, ly - 6, 100, 13),
-                    Qt.AlignmentFlag.AlignCenter,
-                    name[:10] if len(name) > 10 else name,
+                name_rect = QRectF(lx - 50, ly - 6, 100, 13)
+                # ラベル枠に収まれば全文表示、超える場合のみ末尾を「…」省略する
+                elided_name = painter.fontMetrics().elidedText(
+                    name, Qt.TextElideMode.ElideRight, int(name_rect.width())
                 )
+                painter.drawText(name_rect, Qt.AlignmentFlag.AlignCenter, elided_name)
                 painter.drawText(
                     QRectF(lx - 50, ly + 7, 100, 13),
                     Qt.AlignmentFlag.AlignCenter,
