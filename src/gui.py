@@ -31,6 +31,7 @@ from PySide6.QtWidgets import (
     QHeaderView,
     QDoubleSpinBox,
     QMessageBox,
+    QAbstractSpinBox,
 )
 
 from .io_csv import (
@@ -119,6 +120,23 @@ class NumericSortProxy(QSortFilterProxyModel):
     def __init__(self, numeric_columns: set[int], parent=None) -> None:
         super().__init__(parent)
         self._numeric_columns = numeric_columns
+        self._filter_text = ""
+
+    def set_filter_text(self, text: str) -> None:
+        """コード(col0)・銘柄名(col1)に対する部分一致フィルタ語を設定して再評価する。"""
+        self._filter_text = (text or "").strip().lower()
+        self.invalidateFilter()
+
+    def filterAcceptsRow(self, source_row, source_parent) -> bool:  # noqa: N802 (Qt API)
+        if not self._filter_text:
+            return True
+        model = self.sourceModel()
+        for col in (0, 1):  # symbol / name（両テーブル共通の並び）
+            idx = model.index(source_row, col, source_parent)
+            value = model.data(idx, Qt.ItemDataRole.DisplayRole) or ""
+            if self._filter_text in str(value).lower():
+                return True
+        return False
 
     def lessThan(self, left, right) -> bool:  # noqa: N802 (Qt API)
         if left.column() in self._numeric_columns:
@@ -200,6 +218,7 @@ class EditHoldingDialog(QDialog):
 
         form = QFormLayout()
         self._name = QLineEdit(holding.name)
+        self._account = QLineEdit(holding.account)
         self._shares = QLineEdit(str(holding.shares))
         self._avg_cost = QLineEdit(str(holding.avg_cost))
         self._div_gross = QLineEdit(
@@ -229,6 +248,7 @@ class EditHoldingDialog(QDialog):
         self._active.setChecked(holding.active)
 
         form.addRow("銘柄名", self._name)
+        form.addRow("口座（NISA等）", self._account)
         form.addRow("保有株数", self._shares)
         form.addRow("取得単価", self._avg_cost)
         form.addRow("配当(税引前) 上書き", self._div_gross)
@@ -272,6 +292,7 @@ class EditHoldingDialog(QDialog):
             QMessageBox.warning(self, "入力エラー", "数値の入力が正しくありません。\n（カンマ区切りはそのまま入力できます）")
             return
         self.holding.name = name
+        self.holding.account = self._account.text().strip()
         self.holding.shares = max(shares, 0)
         self.holding.avg_cost = max(avg_cost, 0)
         self.holding.annual_div_ps_gross_override = div_gross
@@ -295,11 +316,13 @@ class NewHoldingDialog(QDialog):
 
         form = QFormLayout()
         self._symbol = QLineEdit(holding.symbol)
+        self._symbol.setPlaceholderText("JPY株は .T 不要 / 投信は ISIN 可")
         self._name = QLineEdit(holding.name)
+        self._account = QLineEdit(holding.account)
         self._asset_type = QLineEdit(holding.asset_type)
         self._currency = QLineEdit(holding.currency)
         self._shares = QLineEdit("")
-        self._shares.setPlaceholderText("0")
+        self._shares.setPlaceholderText("投信は口数÷10,000")
         self._avg_cost = QLineEdit("")
         self._avg_cost.setPlaceholderText("0")
         self._benefit = QLineEdit("")
@@ -313,6 +336,7 @@ class NewHoldingDialog(QDialog):
 
         form.addRow("銘柄コード/ティッカー", self._symbol)
         form.addRow("銘柄名", self._name)
+        form.addRow("口座（NISA等）", self._account)
         form.addRow("資産種別（stock/fund）", self._asset_type)
         form.addRow("通貨（JPY/USD）", self._currency)
         form.addRow("保有株数", self._shares)
@@ -329,13 +353,22 @@ class NewHoldingDialog(QDialog):
         buttons.accepted.connect(self._on_save)
         buttons.rejected.connect(self.reject)
 
+        note = QLabel(
+            "投信(fund)は基準価額が1万口単位。保有株数には「口数÷10,000」を入力してください。\n"
+            "投信の ISIN コードは基準価額を自動取得します。"
+        )
+        note.setWordWrap(True)
+        note.setStyleSheet("color: #9e9e9e; font-size: 11px;")
+
         layout = QVBoxLayout(self)
+        layout.addWidget(note)
         layout.addLayout(form)
         layout.addWidget(buttons)
 
     def _on_save(self) -> None:
         symbol = self._symbol.text().strip()
         name = self._name.text().strip()
+        account = self._account.text().strip()
         asset_type = self._asset_type.text().strip().lower() or "stock"
         currency = self._currency.text().strip().upper() or "JPY"
         if not symbol:
@@ -357,6 +390,7 @@ class NewHoldingDialog(QDialog):
             return
         self.holding.symbol = symbol
         self.holding.name = name
+        self.holding.account = account
         self.holding.asset_type = asset_type if asset_type in ("stock", "fund") else "stock"
         self.holding.currency = currency if currency in ("JPY", "USD") else "JPY"
         self.holding.shares = max(shares, 0)
@@ -444,6 +478,18 @@ class DividendWindow(QMainWindow):
             grid.addWidget(card, idx // 5, idx % 5)
         root.addWidget(kpi_bar)
 
+        filter_row = QHBoxLayout()
+        filter_row.addWidget(QLabel("絞り込み:"))
+        self._filter = QLineEdit()
+        self._filter.setPlaceholderText("コード/銘柄名で絞り込み")
+        self._filter.setClearButtonEnabled(True)
+        self._filter.setMaximumWidth(320)
+        # proxy は後段で生成されるが、textChanged は実行時にしか発火しないため接続順は問題ない。
+        self._filter.textChanged.connect(self._on_filter_changed)
+        filter_row.addWidget(self._filter)
+        filter_row.addStretch()
+        root.addLayout(filter_row)
+
         self._tabs = QTabWidget()
         # ダッシュボード（評価額 / 配当額 × ヒートマップ / 円グラフ の4サブタブ）
         dash = QWidget()
@@ -525,6 +571,10 @@ class DividendWindow(QMainWindow):
         spin.valueChanged.connect(piechart.set_threshold)
         return container
 
+    def _on_filter_changed(self, text: str) -> None:
+        self._price_proxy.set_filter_text(text)
+        self._income_proxy.set_filter_text(text)
+
     def _register_shortcuts(self) -> None:
         binds = [
             ("Q", self.close),
@@ -535,13 +585,27 @@ class DividendWindow(QMainWindow):
             ("U", self.action_update_fx),
             ("N", self.action_new_holding),
             ("E", self.action_edit),
+            ("D", self.action_delete),
             ("S", self.action_sort_by_cursor),
             ("1", lambda: self._tabs.setCurrentIndex(0)),
             ("2", lambda: self._tabs.setCurrentIndex(1)),
             ("3", lambda: self._tabs.setCurrentIndex(2)),
         ]
         for key, slot in binds:
-            QShortcut(QKeySequence(key), self, activated=slot)
+            QShortcut(QKeySequence(key), self, activated=self._guard_shortcut(slot))
+
+    def _guard_shortcut(self, slot):
+        """テキスト/数値入力中は単一キーショートカットを無効化するラッパを返す。
+
+        絞り込みボックスや閾値スピンボックスに「7203」「Apple」等を入力する際、
+        1/2/3（タブ切替）や p/n/e/d 等の一文字アクションが誤発火するのを防ぐ。
+        """
+        def wrapper() -> None:
+            focus = QApplication.focusWidget()
+            if isinstance(focus, (QLineEdit, QAbstractSpinBox)):
+                return
+            slot()
+        return wrapper
 
     # ---- データ読み込み / 再描画（legacy DividendApp から移植） ----
     def _reload_all(self) -> None:
@@ -591,7 +655,7 @@ class DividendWindow(QMainWindow):
             f"USDJPY: {fmt_number(self.fx_rate, 4)}   |   "
             f"株価・配当取得: {self.market_fetched_at or 'N/A'} "
             f"({self.market_source or 'N/A'})   |   "
-            f"r:再読込  m:税引前後  w:取崩切替  p:株価更新  u:USDJPY  n:新規  e:編集  s:列ソート"
+            f"r:再読込  m:税引前後  w:取崩切替  p:株価更新  u:USDJPY  n:新規  e:編集  d:削除  s:列ソート"
         )
         income_kpi_label = "年間収入" if self.withdrawal_mode is not None else "年間配当"
         self._cards["年間配当"].set_title(income_kpi_label)
@@ -704,6 +768,38 @@ class DividendWindow(QMainWindow):
             save_holdings(self.holdings)
             self._reload_all()
             self._notify("銘柄を更新しました")
+
+    def action_delete(self) -> None:
+        tab_key = self._active_tab_key()
+        if tab_key == "dashboard":
+            return
+        view = self._view_for_tab(tab_key)
+        proxy = self._proxy_for_tab(tab_key)
+        idx = view.currentIndex()
+        if not idx.isValid():
+            return
+        src_row = proxy.mapToSource(idx).row()
+        indices = self.row_holding_indices[tab_key]
+        if src_row < 0 or src_row >= len(indices):
+            return
+        holding_idx = indices[src_row]
+        if holding_idx < 0 or holding_idx >= len(self.holdings):
+            return
+        holding = self.holdings[holding_idx]
+        label = holding.name or holding.symbol or "(無名)"
+        reply = QMessageBox.question(
+            self,
+            "銘柄削除",
+            f"「{label}」を削除しますか？\nこの操作は元に戻せません（CSV は自動バックアップされます）。",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No,
+        )
+        if reply != QMessageBox.StandardButton.Yes:
+            return
+        del self.holdings[holding_idx]
+        save_holdings(self.holdings)
+        self._reload_all()
+        self._notify("銘柄を削除しました")
 
     def action_new_holding(self) -> None:
         holding = Holding(
@@ -823,7 +919,10 @@ class DividendWindow(QMainWindow):
             self._notify("USDJPYレートを取得できませんでした", error=True)
 
     def _notify(self, message: str, error: bool = False) -> None:
-        self.statusBar().showMessage(message, 6000)
+        # エラーは警告色＋⚠ で差別化。通常通知のたびに既定色へ戻す。
+        color = "#ff8a80" if error else "#cfcfcf"
+        self.statusBar().setStyleSheet(f"QStatusBar {{ background: #2a2a2a; color: {color}; }}")
+        self.statusBar().showMessage(f"⚠ {message}" if error else message, 6000)
 
 
 def build_window() -> DividendWindow:
