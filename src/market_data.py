@@ -1,6 +1,7 @@
 ﻿from __future__ import annotations
 
 import re
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 from datetime import date, timedelta
 from typing import Callable, Optional
@@ -114,6 +115,64 @@ def _yfinance_symbol(holding: Holding) -> str:
     return symbol
 
 
+def _fetch_one(
+    holding: Holding, fetched_at: str | None, source: str
+) -> tuple[MarketData, list[str], tuple[str, str] | None]:
+    """1 銘柄分の取得を行う。(MarketData, エラー一覧, 銘柄名更新|None) を返す。
+
+    純粋に取得のみを行い共有状態を変更しないため、スレッドプールから安全に呼べる。
+    """
+    errors: list[str] = []
+    name_update: tuple[str, str] | None = None
+    price, price_date = None, None
+    div_ps, div_date = None, None
+
+    if holding.asset_type == "fund" and _is_isin(holding.symbol):
+        # 投資信託 ISIN → ToushinReader で基準価額を取得
+        price, price_date = _fetch_toushin(holding.symbol)
+        if price is None:
+            errors.append(f"基準価額取得失敗: {holding.symbol} (ToushinReader)")
+    else:
+        yf_symbol = _yfinance_symbol(holding)
+        ticker = None
+        try:
+            ticker = _yf().Ticker(yf_symbol)
+            history = ticker.history(period="10d")
+            # 最終行の Close が NaN（最新バー未確定）の銘柄があるため、
+            # 最後の非 NaN 終値を採用する。
+            close = history["Close"].dropna()
+            if not close.empty:
+                price = float(close.iloc[-1])
+                price_date = close.index[-1].date().isoformat()
+        except Exception as exc:
+            errors.append(f"株価取得失敗: {holding.symbol} ({exc})")
+
+        if ticker is not None:
+            try:
+                series = ticker.dividends
+                div_ps, div_date = _parse_yfinance_dividends(series)
+            except Exception as exc:
+                errors.append(f"配当取得失敗: {holding.symbol} ({exc})")
+
+        if not holding.name:
+            name = _yfinance_company_name(yf_symbol)
+            if name:
+                name_update = (holding.symbol, name)
+
+    md = MarketData(
+        symbol=holding.symbol,
+        currency=holding.currency,
+        last_price=price,
+        price_as_of=price_date,
+        annual_div_ps_gross=div_ps,
+        annual_div_ps_net=None,
+        div_forecast_as_of=div_date,
+        source=source,
+        fetched_at=fetched_at,
+    )
+    return md, errors, name_update
+
+
 def fetch_market_data(
     holdings: list[Holding],
     existing: dict[str, MarketData],
@@ -123,72 +182,70 @@ def fetch_market_data(
     fetched_at = now_jst_iso()
     source = "yfinance"
     errors: list[str] = []
-    results: list[MarketData] = []
     name_updates: dict[str, str] = {}
 
     active = [h for h in holdings if h.active]
     total = len(active)
 
+    # 当日取得済みキャッシュと要取得を分離。結果配列は入力順を保持する。
+    results: list[Optional[MarketData]] = [None] * total
+    to_fetch: list[tuple[int, Holding]] = []
     for index, holding in enumerate(active):
-        if progress_cb:
-            progress_cb(index, total, f"取得中: {holding.symbol} ({index + 1}/{total})")
         cached = existing.get(holding.symbol)
         if not force and cached and cached.fetched_at and cached.fetched_at.startswith(today_jst_str()):
-            results.append(cached)
-            continue
-
-        price, price_date = None, None
-        div_ps, div_date = None, None
-
-        if holding.asset_type == "fund" and _is_isin(holding.symbol):
-            # 投資信託 ISIN → ToushinReader で基準価額を取得
-            price, price_date = _fetch_toushin(holding.symbol)
-            if price is None:
-                errors.append(f"基準価額取得失敗: {holding.symbol} (ToushinReader)")
+            results[index] = cached
         else:
-            yf_symbol = _yfinance_symbol(holding)
-            try:
-                ticker = _yf().Ticker(yf_symbol)
-                history = ticker.history(period="10d")
-                # 最終行の Close が NaN（最新バー未確定）の銘柄があるため、
-                # 最後の非 NaN 終値を採用する。
-                close = history["Close"].dropna()
-                if not close.empty:
-                    price = float(close.iloc[-1])
-                    price_date = close.index[-1].date().isoformat()
-            except Exception as exc:
-                errors.append(f"株価取得失敗: {holding.symbol} ({exc})")
+            to_fetch.append((index, holding))
 
-            try:
-                series = ticker.dividends
-                div_ps, div_date = _parse_yfinance_dividends(series)
-            except Exception as exc:
-                errors.append(f"配当取得失敗: {holding.symbol} ({exc})")
+    done = total - len(to_fetch)  # キャッシュ済みは完了済みとして算入
+    if progress_cb:
+        progress_cb(done, total, "取得中..." if to_fetch else "完了")
 
-            if not holding.name:
-                name = _yfinance_company_name(yf_symbol)
-                if name:
-                    name_updates[holding.symbol] = name
-
-        results.append(
-            MarketData(
-                symbol=holding.symbol,
-                currency=holding.currency,
-                last_price=price,
-                price_as_of=price_date,
-                annual_div_ps_gross=div_ps,
-                annual_div_ps_net=None,
-                div_forecast_as_of=div_date,
-                source=source,
-                fetched_at=fetched_at,
-            )
-        )
+    if to_fetch:
+        # yfinance を事前ロードし、各プールスレッドでの初回 import 競合を避ける。
+        try:
+            _yf()
+        except Exception:
+            pass
+        # 取得は I/O 待ちが支配的なため ThreadPoolExecutor で並列化（最大8並列）。
+        # プールスレッドは _fetch_one（共有状態に触れない）のみ実行し、結果集約と
+        # progress_cb 呼び出しはこの呼び出し元スレッド（QThread ワーカー）で行う。
+        with ThreadPoolExecutor(max_workers=min(8, len(to_fetch))) as executor:
+            future_map = {
+                executor.submit(_fetch_one, holding, fetched_at, source): (index, holding)
+                for index, holding in to_fetch
+            }
+            for future in as_completed(future_map):
+                index, holding = future_map[future]
+                try:
+                    md, errs, name_update = future.result()
+                except Exception as exc:  # noqa: BLE001 — 1銘柄の失敗で全体を止めない
+                    md = MarketData(
+                        symbol=holding.symbol,
+                        currency=holding.currency,
+                        last_price=None,
+                        price_as_of=None,
+                        annual_div_ps_gross=None,
+                        annual_div_ps_net=None,
+                        div_forecast_as_of=None,
+                        source=source,
+                        fetched_at=fetched_at,
+                    )
+                    errs = [f"取得失敗: {holding.symbol} ({exc})"]
+                    name_update = None
+                results[index] = md
+                errors.extend(errs)
+                if name_update:
+                    name_updates[name_update[0]] = name_update[1]
+                done += 1
+                if progress_cb:
+                    progress_cb(done, total, f"取得中: {holding.symbol} ({done}/{total})")
 
     if progress_cb:
         progress_cb(total, total, "完了")
 
     return MarketFetchResult(
-        rows=results,
+        rows=[r for r in results if r is not None],
         fetched_at=fetched_at,
         source=source,
         errors=errors,

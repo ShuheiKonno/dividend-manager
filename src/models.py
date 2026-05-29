@@ -5,6 +5,12 @@ from typing import Any
 
 from .utils import safe_float, safe_str
 
+
+def _csv_num(value: float | None) -> float | str:
+    """CSV へ書き出す数値。None のみ空文字にし、0.0 はそのまま保持する。"""
+    return value if value is not None else ""
+
+
 HOLDINGS_FIELDS = [
     "symbol",
     "name",
@@ -96,13 +102,14 @@ class Holding:
             "shares": self.shares,
             "avg_cost": self.avg_cost,
             "account": self.account,
-            "annual_div_ps_gross_override": self.annual_div_ps_gross_override or "",
-            "annual_div_ps_net_override": self.annual_div_ps_net_override or "",
+            # 0.0 を空文字に潰さないよう None 判定で書き出す（0 の明示上書きを保持）。
+            "annual_div_ps_gross_override": _csv_num(self.annual_div_ps_gross_override),
+            "annual_div_ps_net_override": _csv_num(self.annual_div_ps_net_override),
             "div_forecast_as_of_override": self.div_forecast_as_of_override or "",
             "annual_benefit_jpy": self.annual_benefit_jpy,
-            "withdrawal_fixed_jpy": self.withdrawal_fixed_jpy or "",
-            "withdrawal_rate": self.withdrawal_rate or "",
-            "tax_rate": self.tax_rate if self.tax_rate is not None else "",
+            "withdrawal_fixed_jpy": _csv_num(self.withdrawal_fixed_jpy),
+            "withdrawal_rate": _csv_num(self.withdrawal_rate),
+            "tax_rate": _csv_num(self.tax_rate),
             "active": "true" if self.active else "false",
         }
 

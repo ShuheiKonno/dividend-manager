@@ -32,9 +32,10 @@ def _pick_div_ps(
         result = override if override is not None else market_value
         # override も market_data もない場合は gross から源泉税率で自動計算
         if result is None:
-            gross = holding.annual_div_ps_gross_override or (
-                market.annual_div_ps_gross if market else None
-            )
+            # 0.0 の明示上書きを尊重するため None 判定でフォールバックする。
+            gross = holding.annual_div_ps_gross_override
+            if gross is None:
+                gross = market.annual_div_ps_gross if market else None
             if gross is not None:
                 rate = holding.tax_rate if holding.tax_rate is not None else _DEFAULT_TAX_RATE
                 result = gross * (1.0 - rate)
