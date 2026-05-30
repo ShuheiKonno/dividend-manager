@@ -33,10 +33,10 @@ from PySide6.QtWidgets import (
     QMessageBox,
     QAbstractSpinBox,
     QPushButton,
-    QButtonGroup,
     QStackedWidget,
     QSplitter,
     QFileDialog,
+    QComboBox,
 )
 
 from .io_csv import (
@@ -54,7 +54,7 @@ from .io_csv import (
 )
 from .models import Holding, HistoryRecord
 from .calc import compute_rows
-from .history import upsert_record, merge_records, load_android_backup
+from .history import upsert_record, merge_records, load_android_backup, combine_income
 # market_data は yfinance / ToushinReader / pandas を芋づる式に読み込み起動を数秒遅らせる。
 # 取得は p / u キーのワーカースレッドでしか走らないため、import を run() 内へ遅延させる。
 from .utils import fmt_number, fmt_percent, safe_float, today_jst_str
@@ -91,15 +91,13 @@ INCOME_COLUMNS = [
     ("時価利回り", "yield_on_value"),
     ("配当更新日", "div_forecast_as_of"),
 ]
-# 推移グラフの系列定義 (ラベル, history キー, 線色)。set_data に渡す。
+# 評価額タブの推移系列 (ラベル, history キー, 線色)。評価額＋簿価の2本固定。
 ASSET_TREND_SERIES = [
     ("評価額", "total_market_value_jpy", QColor("#42a5f5")),
     ("簿価", "total_book_value_jpy", QColor("#9e9e9e")),
 ]
-INCOME_TREND_SERIES = [
-    ("年間配当", "total_dividend_jpy", QColor("#66bb6a")),
-    ("優待", "total_benefit_jpy", QColor("#ffa726")),
-]
+# 配当タブの推移は優待/取崩の選択で合成した単一系列（_refresh_trend で構築）。
+INCOME_TREND_COLOR = QColor("#66bb6a")
 NUMERIC_SORT_COLUMNS = {
     "shares",
     "avg_cost",
@@ -440,13 +438,19 @@ class DividendWindow(QMainWindow):
         self.withdrawal_mode: str | None = _saved.get("withdrawal_mode", None)
         self.asset_chart_type: str = _saved.get("asset_chart_type", "treemap")
         self.income_chart_type: str = _saved.get("income_chart_type", "treemap")
+        self.asset_trend_period: str = _saved.get("asset_trend_period", "all")
+        self.income_trend_period: str = _saved.get("income_trend_period", "all")
+        self.asset_trend_baseline: str = _saved.get("asset_trend_baseline", "zero")
+        self.income_trend_baseline: str = _saved.get("income_trend_baseline", "zero")
+        # 配当推移グラフの系列選択（優待込み / 取崩込み）。既定は配当のみ。
+        self.income_benefit: str = _saved.get("income_benefit", "without")
+        self.income_withdrawal: str = _saved.get("income_withdrawal", "without")
         self.holdings: list[Holding] = []
         self.market_data_map: dict = {}
         self.fx_rate: float | None = None
         self.market_source: str | None = None
         self.market_fetched_at: str | None = None
         self.history: list[HistoryRecord] = []
-        self._last_summary = None
         self.row_holding_indices: dict[str, list[int]] = {"price": [], "income": []}
         self._busy = False
         self._thread: QThread | None = None
@@ -630,6 +634,26 @@ class DividendWindow(QMainWindow):
         layout.addStretch()
         root.addWidget(bar)
 
+    def _make_combo(
+        self, defs: list[tuple[str, str]], current_key: str, on_select
+    ) -> QComboBox:
+        """(キー, ラベル) のリストからドロップダウンを生成する。
+
+        初期選択は current_key に合わせる。activated（ユーザー操作時のみ発火・
+        setCurrentIndex では発火しない）で on_select(キー) を呼ぶため、初期化時の
+        誤った保存・再描画が起きない。
+        """
+        combo = QComboBox()
+        combo.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        selected = 0
+        for i, (key, label) in enumerate(defs):
+            combo.addItem(label, key)
+            if key == current_key:
+                selected = i
+        combo.setCurrentIndex(selected)
+        combo.activated.connect(lambda _i: on_select(combo.currentData()))
+        return combo
+
     def _make_dashboard_tab(
         self,
         kind: str,
@@ -647,25 +671,32 @@ class DividendWindow(QMainWindow):
         outer.setContentsMargins(0, 4, 0, 0)
         outer.setSpacing(4)
 
-        # 切替ツールバー（構成グラフの種別）
-        bar = QHBoxLayout()
-        bar.addWidget(QLabel("構成グラフ:"))
-        heat_btn = QPushButton("ヒートマップ")
-        pie_btn = QPushButton("円グラフ")
-        group = QButtonGroup(tab)
-        for b in (heat_btn, pie_btn):
-            b.setCheckable(True)
-            b.setFocusPolicy(Qt.FocusPolicy.NoFocus)
-            group.addButton(b)
-        bar.addWidget(heat_btn)
-        bar.addWidget(pie_btn)
-        bar.addStretch()
-        outer.addLayout(bar)
-
-        # 構成グラフ（QStackedWidget でヒートマップ/円グラフを切替）と推移グラフを左右分割
+        # 構成グラフ（QStackedWidget でヒートマップ/円グラフを切替）
         stack = QStackedWidget()
         stack.addWidget(treemap)                       # index 0 = ヒートマップ
         stack.addWidget(self._make_pie_tab(piechart))  # index 1 = 円グラフ（閾値付き）
+        chart_type = self.asset_chart_type if kind == "asset" else self.income_chart_type
+        stack.setCurrentIndex(1 if chart_type == "pie" else 0)
+
+        def on_chart(key: str) -> None:
+            stack.setCurrentIndex(1 if key == "pie" else 0)
+            if kind == "asset":
+                self.asset_chart_type = key
+                save_settings(asset_chart_type=key)
+            else:
+                self.income_chart_type = key
+                save_settings(income_chart_type=key)
+
+        # 切替ツールバー（構成グラフの種別＝ドロップダウン）
+        bar = QHBoxLayout()
+        bar.addWidget(QLabel("構成グラフ:"))
+        bar.addWidget(self._make_combo(
+            [("treemap", "ヒートマップ"), ("pie", "円グラフ")], chart_type, on_chart
+        ))
+        bar.addStretch()
+        outer.addLayout(bar)
+
+        # 構成グラフと推移グラフを左右分割
         split = QSplitter(Qt.Orientation.Horizontal)
         left = QWidget()
         left_v = QVBoxLayout(left)
@@ -675,35 +706,89 @@ class DividendWindow(QMainWindow):
         right = QWidget()
         right_v = QVBoxLayout(right)
         right_v.setContentsMargins(0, 0, 0, 0)
-        right_v.addWidget(QLabel("推移"))
+        right_v.addWidget(self._make_trend_controls(kind, line_chart))
         right_v.addWidget(line_chart, 1)
         split.addWidget(left)
         split.addWidget(right)
         split.setSizes([500, 500])
         outer.addWidget(split, 1)
-
-        # 初期状態を設定から復元
-        chart_type = self.asset_chart_type if kind == "asset" else self.income_chart_type
-        (pie_btn if chart_type == "pie" else heat_btn).setChecked(True)
-        stack.setCurrentIndex(1 if chart_type == "pie" else 0)
-
-        def on_changed(to_pie: bool) -> None:
-            stack.setCurrentIndex(1 if to_pie else 0)
-            new_type = "pie" if to_pie else "treemap"
-            if kind == "asset":
-                self.asset_chart_type = new_type
-            else:
-                self.income_chart_type = new_type
-            save_settings(
-                self.dividend_mode,
-                self.withdrawal_mode,
-                self.asset_chart_type,
-                self.income_chart_type,
-            )
-
-        heat_btn.clicked.connect(lambda _checked=False: on_changed(False))
-        pie_btn.clicked.connect(lambda _checked=False: on_changed(True))
         return tab
+
+    def _make_trend_controls(self, kind: str, line_chart: LineChartWidget) -> QWidget:
+        """推移グラフ上部の操作行（期間・Y軸下限、配当タブは優待・取崩）を生成する。
+
+        全てドロップダウン。期間/底辺は self.{asset,income}_trend_{period,baseline}、
+        配当の優待/取崩は self.income_{benefit,withdrawal} に保持し設定へ永続化する。
+        """
+        period = self.asset_trend_period if kind == "asset" else self.income_trend_period
+        baseline = (
+            self.asset_trend_baseline if kind == "asset" else self.income_trend_baseline
+        )
+
+        bar = QWidget()
+        row = QHBoxLayout(bar)
+        row.setContentsMargins(0, 0, 0, 0)
+        row.setSpacing(4)
+
+        row.addWidget(QLabel("推移  期間:"))
+        row.addWidget(self._make_combo(
+            [("all", "全期間"), ("10y", "10年"), ("5y", "5年"),
+             ("3y", "3年"), ("1y", "1年")],
+            period, lambda k: self._on_trend_period(kind, line_chart, k),
+        ))
+        row.addWidget(QLabel("底辺:"))
+        row.addWidget(self._make_combo(
+            [("zero", "0から"), ("min", "最低値")],
+            baseline, lambda k: self._on_trend_baseline(kind, line_chart, k),
+        ))
+
+        # 配当タブのみ: 系列の優待込み・取崩込みをドロップダウンで切替
+        if kind == "income":
+            row.addWidget(QLabel("優待:"))
+            row.addWidget(self._make_combo(
+                [("without", "含まない"), ("with", "含む")],
+                self.income_benefit, lambda k: self._on_income_option("benefit", k),
+            ))
+            row.addWidget(QLabel("取崩:"))
+            row.addWidget(self._make_combo(
+                [("without", "無し"), ("with", "込み")],
+                self.income_withdrawal,
+                lambda k: self._on_income_option("withdrawal", k),
+            ))
+        row.addStretch()
+
+        # 設定値をウィジェットへ初期反映（既定 all/zero と保存値が異なる場合）。
+        line_chart.set_period(period)
+        line_chart.set_baseline(baseline)
+        return bar
+
+    def _on_trend_period(self, kind: str, line_chart: LineChartWidget, key: str) -> None:
+        line_chart.set_period(key)
+        if kind == "asset":
+            self.asset_trend_period = key
+            save_settings(asset_trend_period=key)
+        else:
+            self.income_trend_period = key
+            save_settings(income_trend_period=key)
+
+    def _on_trend_baseline(self, kind: str, line_chart: LineChartWidget, key: str) -> None:
+        line_chart.set_baseline(key)
+        if kind == "asset":
+            self.asset_trend_baseline = key
+            save_settings(asset_trend_baseline=key)
+        else:
+            self.income_trend_baseline = key
+            save_settings(income_trend_baseline=key)
+
+    def _on_income_option(self, which: str, key: str) -> None:
+        """配当推移グラフの優待/取崩選択を更新し、系列を再合成して再描画する。"""
+        if which == "benefit":
+            self.income_benefit = key
+            save_settings(income_benefit=key)
+        else:
+            self.income_withdrawal = key
+            save_settings(income_withdrawal=key)
+        self._refresh_trend()
 
     def _on_filter_changed(self, text: str) -> None:
         self._price_proxy.set_filter_text(text)
@@ -764,7 +849,6 @@ class DividendWindow(QMainWindow):
             self.holdings, self.market_data_map, self.fx_rate, self.dividend_mode,
             self.withdrawal_mode,
         )
-        self._last_summary = summary
         active_indices = [i for i, h in enumerate(self.holdings) if h.active]
         self._render_table("price", PRICE_COLUMNS, self._price_model, self._price_view, rows, active_indices)
         income_cols = list(INCOME_COLUMNS)
@@ -819,16 +903,33 @@ class DividendWindow(QMainWindow):
 
     # ---- 履歴（推移グラフ） ----
     def _refresh_trend(self) -> None:
-        """推移グラフ 2 種へ最新の履歴を反映する。"""
+        """推移グラフ 2 種へ最新の履歴を反映する。
+
+        評価額タブ＝評価額・簿価の2系列。配当タブ＝優待/取崩の選択に応じて
+        combine_income で合成した単一系列。
+        """
         hist_dicts = self._history_as_dicts()
         self._asset_line.set_data(
             hist_dicts, ASSET_TREND_SERIES,
             empty_message="評価額の履歴がありません（株価更新か『履歴取込』で記録されます）",
         )
+        with_benefit = self.income_benefit == "with"
+        with_withdrawal = self.income_withdrawal == "with"
+        income_dicts = [
+            {"date": rec["date"],
+             "income_value": combine_income(rec, with_benefit, with_withdrawal)}
+            for rec in hist_dicts
+        ]
+        label = self._income_trend_label(with_benefit, with_withdrawal)
         self._income_line.set_data(
-            hist_dicts, INCOME_TREND_SERIES,
+            income_dicts, [(label, "income_value", INCOME_TREND_COLOR)],
             empty_message="配当の履歴がありません（株価更新か『履歴取込』で記録されます）",
         )
+
+    @staticmethod
+    def _income_trend_label(with_benefit: bool, with_withdrawal: bool) -> str:
+        base = "取崩収入" if with_withdrawal else "配当"
+        return f"{base}＋優待" if with_benefit else base
 
     def _history_as_dicts(self) -> list[dict]:
         """LineChartWidget.set_data 用に履歴を dict 列へ変換（record_date 昇順）。"""
@@ -842,28 +943,40 @@ class DividendWindow(QMainWindow):
                     "total_dividend_jpy": rec.total_dividend_jpy,
                     "total_benefit_jpy": rec.total_benefit_jpy,
                     "total_profit_jpy": rec.total_profit_jpy,
+                    "total_withdrawal_income_jpy": rec.total_withdrawal_income_jpy,
                 }
             )
         return result
 
     def _record_history_snapshot(self) -> None:
-        """当日のサマリーを履歴へ upsert して保存する（評価額/配当が無ければ記録しない）。"""
-        summary = self._last_summary
-        if summary is None:
-            return
-        market = summary.total_market_value_jpy
-        dividend = summary.total_dividend_jpy
-        benefit = summary.total_benefit_jpy
-        # 全て None（株価未取得かつ配当・優待なし）の起動直後は記録をスキップ。
+        """当日のスナップショットを履歴へ upsert して保存する。
+
+        表示モードに依存させないため、配当・評価額等は取崩無し（withdrawal_mode=None）
+        で再計算する。取崩収入は常に定率（"rate"）で別途計算し、取崩込み系列の値とする。
+        評価額・配当・優待が全て None（起動直後で株価未取得）の場合は記録しない。
+        """
+        _, base = compute_rows(
+            self.holdings, self.market_data_map, self.fx_rate,
+            self.dividend_mode, None,
+        )
+        market = base.total_market_value_jpy
+        dividend = base.total_dividend_jpy
+        benefit = base.total_benefit_jpy
         if market is None and dividend is None and benefit is None:
             return
+        # 取崩込み収入（投信を時価×rate に置換）＝常に定率で決定的に記録。
+        _, wd = compute_rows(
+            self.holdings, self.market_data_map, self.fx_rate,
+            self.dividend_mode, "rate",
+        )
         record = HistoryRecord(
             record_date=today_jst_str(),
             total_market_value_jpy=market,
-            total_book_value_jpy=summary.total_book_value_jpy,
+            total_book_value_jpy=base.total_book_value_jpy,
             total_dividend_jpy=dividend,
             total_benefit_jpy=benefit,
-            total_profit_jpy=summary.total_profit_jpy,
+            total_profit_jpy=base.total_profit_jpy,
+            total_withdrawal_income_jpy=wd.total_dividend_jpy,
             source="app",
         )
         self.history = upsert_record(self.history, record)
@@ -923,13 +1036,13 @@ class DividendWindow(QMainWindow):
     # ---- アクション ----
     def action_toggle_mode(self) -> None:
         self.dividend_mode = "net" if self.dividend_mode == "gross" else "gross"
-        save_settings(self.dividend_mode, self.withdrawal_mode)
+        save_settings(dividend_mode=self.dividend_mode)
         self._refresh_view()
 
     def action_toggle_withdrawal(self) -> None:
         cycle: dict[str | None, str | None] = {None: "fixed", "fixed": "rate", "rate": None}
         self.withdrawal_mode = cycle[self.withdrawal_mode]
-        save_settings(self.dividend_mode, self.withdrawal_mode)
+        save_settings(withdrawal_mode=self.withdrawal_mode)
         self._refresh_view()
 
     def _active_tab_key(self) -> str:

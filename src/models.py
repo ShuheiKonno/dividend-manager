@@ -50,7 +50,9 @@ FX_FIELDS = [
 
 # 資産・配当の日次スナップショット履歴（推移グラフ用）。
 # record_date は ISO 日付 "YYYY-MM-DD"（1日1レコード）。
-# Android バックアップ取込分は簿価・損益を持たない（None）。
+# total_dividend_jpy は「取崩無しの通常配当」（記録時の表示モードに依存させない）。
+# total_withdrawal_income_jpy は「投信を定率取崩した収入」（fund を時価×rate に置換）。
+# Android バックアップ取込分は簿価・損益・取崩収入を持たない（None）。
 HISTORY_FIELDS = [
     "record_date",
     "total_market_value_jpy",
@@ -58,6 +60,7 @@ HISTORY_FIELDS = [
     "total_dividend_jpy",
     "total_benefit_jpy",
     "total_profit_jpy",
+    "total_withdrawal_income_jpy",
     "source",
 ]
 
@@ -177,6 +180,7 @@ class HistoryRecord:
     total_dividend_jpy: float | None
     total_benefit_jpy: float | None
     total_profit_jpy: float | None
+    total_withdrawal_income_jpy: float | None
     source: str | None
 
     @classmethod
@@ -188,6 +192,9 @@ class HistoryRecord:
             total_dividend_jpy=safe_float(row.get("total_dividend_jpy")),
             total_benefit_jpy=safe_float(row.get("total_benefit_jpy")),
             total_profit_jpy=safe_float(row.get("total_profit_jpy")),
+            total_withdrawal_income_jpy=safe_float(
+                row.get("total_withdrawal_income_jpy")
+            ),
             source=safe_str(row.get("source")),
         )
 
@@ -200,6 +207,7 @@ class HistoryRecord:
             "total_dividend_jpy": _csv_num(self.total_dividend_jpy),
             "total_benefit_jpy": _csv_num(self.total_benefit_jpy),
             "total_profit_jpy": _csv_num(self.total_profit_jpy),
+            "total_withdrawal_income_jpy": _csv_num(self.total_withdrawal_income_jpy),
             "source": self.source or "",
         }
 

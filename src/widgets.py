@@ -16,7 +16,14 @@ from PySide6.QtCore import Qt, QRectF, QPoint
 from PySide6.QtGui import QColor, QPainter, QPen, QFont
 from PySide6.QtWidgets import QWidget, QFrame, QLabel, QVBoxLayout, QToolTip
 
-from .utils import fmt_number, fmt_percent, safe_float
+from .utils import (
+    fmt_number,
+    fmt_percent,
+    safe_float,
+    filter_by_period,
+    axis_bounds,
+    spread_labels,
+)
 
 # 株価未取得時などチャートが空のときに中央表示する既定メッセージ
 _EMPTY_MESSAGE = "株価未取得 — 'p' で株価・配当を取得してください"
@@ -45,12 +52,6 @@ def _categorical_colors(tiles: list[dict]) -> list[QColor]:
             colors.append(QColor.fromHsvF(hue / 360.0, 0.55, 0.85))
             reg_idx += 1
     return colors
-
-
-def _text_color_for_bg(color: QColor) -> QColor:
-    """背景色の輝度に応じて読みやすいテキスト色（暗/白）を返す。"""
-    lum = 0.299 * color.redF() + 0.587 * color.greenF() + 0.114 * color.blueF()
-    return QColor("#1c1c1c") if lum > 0.55 else QColor("#f5f5f5")
 
 
 # ---- スクエアファイド・ツリーマップ（Bruls/Huizing/van Wijk 2000） ----
@@ -381,15 +382,14 @@ class PieChartWidget(QWidget):
         display_tiles = self._build_display_tiles()
         w = float(rect.width())
         h = float(rect.height())
-        r = min(w, h) / 2.0 - 20.0
+        # ラベルを扇外に引き出すため左右に帯を確保しつつ、円は大きめ（約0.82倍）に
+        # 描く。帯は銘柄名を表示できるよう広めに取る。
+        _LABEL_BAND = 175.0
+        base_r = min(w / 2.0 - _LABEL_BAND, h / 2.0 - 16.0)
+        r = max(30.0, base_r * 0.82)
         cx = w / 2.0
         cy = h / 2.0
         pie_rect = QRectF(cx - r, cy - r, r * 2, r * 2)
-
-        small_font = QFont(self.font())
-        small_font.setPointSize(max(7, self.font().pointSize() - 1))
-        bold_font = QFont(small_font)
-        bold_font.setBold(True)
 
         # 扇形描画: 90°（12時）から時計回り、銘柄ごとカテゴリカル配色
         colors = _categorical_colors(display_tiles)
@@ -403,60 +403,81 @@ class PieChartWidget(QWidget):
             self._segments.append((current, span, tile))
             current -= span  # 時計回り = 角度を減算
 
-        # ラベル描画
+        # ラベル描画: 扇の中点から引き出し線を伸ばし、円外（左右）にテキストを置く。
+        # 縦の重なりは spread_labels で回避する（同サイド内は引き出し線が交差しない）。
+        # 多数のラベルが縦に並ぶため本文より小さいフォント＋詰めた行ピッチで高さを抑える。
+        lbl_font = QFont(self.font())
+        lbl_font.setPointSize(max(7, self.font().pointSize() - 2))
+        lbl_bold = QFont(lbl_font)
+        lbl_bold.setBold(True)
+        painter.setFont(lbl_font)
+        line_h = float(painter.fontMetrics().height())
+        row_h = max(9.0, line_h - 2.0)   # 行ピッチ（やや詰める）
+        block_h = row_h * 3.0            # コード / 銘柄名 / 金額(％) の3行
+        min_gap = block_h + 2.0
+        label_w = 150.0
+
+        # 各扇の中点から円周上の起点と左右サイドを求める
+        entries = []  # (i, tile, x_in, y_in, side)
         for i, (start, span, tile) in enumerate(self._segments):
-            if span < 5.0:
+            if span <= 0.8:  # 0.8°未満の極小スライスはラベル省略
                 continue
-            mid_rad = math.radians(start - span / 2.0)  # 時計回りの中点
-            label_r = r * 0.65
-            lx = cx + label_r * math.cos(mid_rad)
-            ly = cy - label_r * math.sin(mid_rad)
+            mid_rad = math.radians(start - span / 2.0)
+            cosm = math.cos(mid_rad)
+            sinm = math.sin(mid_rad)
+            x_in = cx + r * cosm
+            y_in = cy - r * sinm
+            side = "right" if cosm >= 0 else "left"
+            entries.append((i, tile, x_in, y_in, side))
 
-            fg = _text_color_for_bg(colors[i])
-            painter.setPen(QPen(fg))
+        for side in ("left", "right"):
+            grp = [e for e in entries if e[4] == side]
+            grp.sort(key=lambda e: e[3])  # 円周上の y 昇順（交差防止）
+            placed = spread_labels(
+                [e[3] for e in grp], min_gap, top=line_h, bottom=h - line_h
+            )
+            sign = 1.0 if side == "right" else -1.0
+            elbow_x = cx + sign * (r + 14.0)
+            text_x = elbow_x + sign * 6.0
+            for (i, tile, x_in, y_in, _side), y_lbl in zip(grp, placed):
+                color = colors[i]
+                # 引き出し線（扇色）: 円周点 → 肘 → 水平
+                painter.setPen(QPen(color, 1.2))
+                painter.drawLine(int(x_in), int(y_in), int(elbow_x), int(y_lbl))
+                painter.drawLine(int(elbow_x), int(y_lbl), int(text_x), int(y_lbl))
 
-            symbol = str(tile.get("symbol", ""))
-            name = str(tile.get("name") or "")
-            mv_str = _fmt_compact(float(tile[self._value_key]))
-
-            if span >= 20.0:
-                painter.setFont(bold_font)
+                symbol = str(tile.get("symbol", ""))
+                name = str(tile.get("name") or "")
+                pct = float(tile[self._value_key]) / self._total * 100.0
+                mv_str = f"{_fmt_compact(float(tile[self._value_key]))} ({pct:.0f}%)"
+                if side == "right":
+                    box_x = text_x + 2.0
+                    align = Qt.AlignmentFlag.AlignLeft
+                else:
+                    box_x = text_x - 2.0 - label_w
+                    align = Qt.AlignmentFlag.AlignRight
+                top = y_lbl - block_h / 2.0
+                code_rect = QRectF(box_x, top, label_w, row_h)
+                name_rect = QRectF(box_x, top + row_h, label_w, row_h)
+                amount_rect = QRectF(box_x, top + row_h * 2.0, label_w, row_h)
+                # 1行目: コード（扇色・太字）
+                painter.setFont(lbl_bold)
+                painter.setPen(QPen(color))
                 painter.drawText(
-                    QRectF(lx - 50, ly - 19, 100, 14),
-                    Qt.AlignmentFlag.AlignCenter,
-                    symbol,
+                    code_rect, align | Qt.AlignmentFlag.AlignVCenter, symbol
                 )
-                painter.setFont(small_font)
-                name_rect = QRectF(lx - 50, ly - 6, 100, 13)
-                # ラベル枠に収まれば全文表示、超える場合のみ末尾を「…」省略する
+                # 2行目: 銘柄名（幅に収まらなければ末尾省略）
+                painter.setFont(lbl_font)
+                painter.setPen(QPen(QColor("#cfcfcf")))
                 elided_name = painter.fontMetrics().elidedText(
-                    name, Qt.TextElideMode.ElideRight, int(name_rect.width())
+                    name, Qt.TextElideMode.ElideRight, int(label_w)
                 )
-                painter.drawText(name_rect, Qt.AlignmentFlag.AlignCenter, elided_name)
                 painter.drawText(
-                    QRectF(lx - 50, ly + 7, 100, 13),
-                    Qt.AlignmentFlag.AlignCenter,
-                    mv_str,
+                    name_rect, align | Qt.AlignmentFlag.AlignVCenter, elided_name
                 )
-            elif span >= 10.0:
-                painter.setFont(bold_font)
+                # 3行目: 金額(％)
                 painter.drawText(
-                    QRectF(lx - 35, ly - 10, 70, 13),
-                    Qt.AlignmentFlag.AlignCenter,
-                    symbol,
-                )
-                painter.setFont(small_font)
-                painter.drawText(
-                    QRectF(lx - 35, ly + 3, 70, 13),
-                    Qt.AlignmentFlag.AlignCenter,
-                    mv_str,
-                )
-            else:
-                painter.setFont(small_font)
-                painter.drawText(
-                    QRectF(lx - 30, ly - 8, 60, 16),
-                    Qt.AlignmentFlag.AlignCenter,
-                    symbol,
+                    amount_rect, align | Qt.AlignmentFlag.AlignVCenter, mv_str
                 )
 
         painter.end()
@@ -526,10 +547,14 @@ class LineChartWidget(QWidget):
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
-        self._records: list[dict] = []
+        self._records: list[dict] = []      # 全期間の元データ
         self._series: list[tuple[str, str, QColor]] = []
         self._empty_message: str = "履歴データがありません（株価を更新すると記録されます）"
-        self._max_value: float = 0.0
+        self._period: str = "all"           # 表示期間 all/10y/5y/3y/1y
+        self._baseline: str = "zero"        # Y 軸下限 zero/min
+        self._visible: list[dict] = []      # 期間フィルタ後の描画対象
+        self._floor: float = 0.0            # Y 軸下限値
+        self._top: float = 1.0              # Y 軸上限値
         self._hover_idx: int | None = None
         self.setMinimumSize(420, 320)
         self.setMouseTracking(True)
@@ -541,19 +566,38 @@ class LineChartWidget(QWidget):
         series: list[tuple[str, str, QColor]],
         empty_message: str | None = None,
     ) -> None:
+        # 期間・底辺モードは保持し、データのみ差し替える（再描画時に再計算）。
         self._records = list(records)
         self._series = list(series)
         if empty_message is not None:
             self._empty_message = empty_message
-        max_v = 0.0
-        for rec in self._records:
-            for _, key, _c in self._series:
-                v = safe_float(rec.get(key))
-                if v is not None and v > max_v:
-                    max_v = v
-        self._max_value = max_v
         self._hover_idx = None
+        self._recompute()
         self.update()
+
+    def set_period(self, period_key: str) -> None:
+        """表示期間（all/10y/5y/3y/1y）を設定して再描画する。"""
+        self._period = period_key
+        self._hover_idx = None
+        self._recompute()
+        self.update()
+
+    def set_baseline(self, mode: str) -> None:
+        """Y 軸下限モード（zero/min）を設定して再描画する。"""
+        self._baseline = mode
+        self._recompute()
+        self.update()
+
+    def _recompute(self) -> None:
+        """期間フィルタと Y 軸範囲（_visible / _floor / _top）を再計算する。"""
+        self._visible = filter_by_period(self._records, self._period)
+        values: list[float | None] = []
+        for rec in self._visible:
+            for _label, key, _color in self._series:
+                values.append(safe_float(rec.get(key)))
+        self._floor, self._top = axis_bounds(values, self._baseline)
+        if self._hover_idx is not None and self._hover_idx >= len(self._visible):
+            self._hover_idx = None
 
     # ---- 座標変換 ----
     def _plot_rect(self) -> QRectF:
@@ -566,14 +610,16 @@ class LineChartWidget(QWidget):
         )
 
     def _x_for(self, idx: int, plot: QRectF) -> float:
-        n = len(self._records)
+        n = len(self._visible)
         if n <= 1:
             return plot.left() + plot.width() / 2.0
         return plot.left() + plot.width() * idx / (n - 1)
 
     def _y_for(self, value: float, plot: QRectF) -> float:
-        top = self._max_value * 1.08 if self._max_value > 0 else 1.0
-        return plot.bottom() - plot.height() * (value / top)
+        span = self._top - self._floor
+        if span <= 0:
+            return plot.bottom()
+        return plot.bottom() - plot.height() * ((value - self._floor) / span)
 
     # ---- 描画 ----
     def paintEvent(self, event) -> None:  # noqa: N802 (Qt API)
@@ -582,7 +628,7 @@ class LineChartWidget(QWidget):
         rect = self.rect()
         painter.fillRect(rect, QColor("#1c1c1c"))
 
-        if not self._records or not self._series or self._max_value <= 0:
+        if not self._visible or not self._series or self._top <= self._floor:
             painter.setPen(QPen(QColor("#9e9e9e")))
             painter.drawText(rect, Qt.AlignmentFlag.AlignCenter, self._empty_message)
             painter.end()
@@ -592,8 +638,7 @@ class LineChartWidget(QWidget):
         small_font = QFont(self.font())
         small_font.setPointSize(max(7, self.font().pointSize() - 1))
 
-        # 横グリッド線 + Y 軸ラベル（0 〜 上限を 4 分割）
-        top_value = self._max_value * 1.08
+        # 横グリッド線 + Y 軸ラベル（下限 〜 上限を 4 分割）
         painter.setFont(small_font)
         for i in range(5):
             frac = i / 4.0
@@ -604,30 +649,30 @@ class LineChartWidget(QWidget):
             painter.drawText(
                 QRectF(0, y - 8, self._MARGIN_LEFT - 6, 16),
                 Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter,
-                _fmt_compact(top_value * frac),
+                _fmt_compact(self._floor + (self._top - self._floor) * frac),
             )
 
         # X 軸ラベル（最大 5 点の日付を等間隔に）
-        n = len(self._records)
+        n = len(self._visible)
         painter.setPen(QPen(QColor("#9e9e9e")))
         label_count = min(5, n)
         for j in range(label_count):
             idx = 0 if label_count == 1 else round(j * (n - 1) / (label_count - 1))
             x = self._x_for(idx, plot)
-            date = str(self._records[idx].get("date", ""))
+            date = str(self._visible[idx].get("date", ""))
             painter.drawText(
                 QRectF(x - 44, plot.bottom() + 4, 88, 16),
                 Qt.AlignmentFlag.AlignCenter,
                 date,
             )
 
-        # 各系列の折れ線（None 点で分断）
+        # 各系列の折れ線（None 点で分断）。前後が None の孤立点はマーカーで可視化
+        # （例: 取崩収入は当初 1 点のみで線が引けないため点を描く）。
         for label, key, color in self._series:
-            pen = QPen(color, 2)
-            painter.setPen(pen)
+            painter.setPen(QPen(color, 2))
+            vals = [safe_float(rec.get(key)) for rec in self._visible]
             prev: tuple[float, float] | None = None
-            for idx, rec in enumerate(self._records):
-                v = safe_float(rec.get(key))
+            for idx, v in enumerate(vals):
                 if v is None:
                     prev = None
                     continue
@@ -635,6 +680,11 @@ class LineChartWidget(QWidget):
                 y = self._y_for(v, plot)
                 if prev is not None:
                     painter.drawLine(int(prev[0]), int(prev[1]), int(x), int(y))
+                else:
+                    nxt = vals[idx + 1] if idx + 1 < len(vals) else None
+                    if nxt is None:  # 前後とも繋がらない孤立点
+                        painter.setBrush(color)
+                        painter.drawEllipse(QRectF(x - 2.5, y - 2.5, 5, 5))
                 prev = (x, y)
 
         # ホバー: 縦カーソル線 + 該当点マーカー
@@ -642,7 +692,7 @@ class LineChartWidget(QWidget):
             hx = self._x_for(self._hover_idx, plot)
             painter.setPen(QPen(QColor("#6f6f6f"), 1, Qt.PenStyle.DashLine))
             painter.drawLine(int(hx), int(plot.top()), int(hx), int(plot.bottom()))
-            rec = self._records[self._hover_idx]
+            rec = self._visible[self._hover_idx]
             for _label, key, color in self._series:
                 v = safe_float(rec.get(key))
                 if v is None:
@@ -687,7 +737,7 @@ class LineChartWidget(QWidget):
         if idx != self._hover_idx:
             self._hover_idx = idx
             self.update()
-        rec = self._records[idx]
+        rec = self._visible[idx]
         lines = [str(rec.get("date", ""))]
         for label, key, _color in self._series:
             v = safe_float(rec.get(key))
@@ -697,12 +747,12 @@ class LineChartWidget(QWidget):
         super().mouseMoveEvent(event)
 
     def _index_at(self, px: float) -> int | None:
-        if not self._records:
+        if not self._visible:
             return None
         plot = self._plot_rect()
         if px < plot.left() - 12 or px > plot.right() + 12:
             return None
-        n = len(self._records)
+        n = len(self._visible)
         if n <= 1:
             return 0
         frac = (px - plot.left()) / plot.width()
