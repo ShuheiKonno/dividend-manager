@@ -6,7 +6,7 @@ from textual.app import App, ComposeResult
 from textual.containers import VerticalScroll, Horizontal
 from textual.widgets import DataTable, Static, Footer, Header, Input, Button, Checkbox, Label, TabbedContent, TabPane, ProgressBar
 from textual.screen import ModalScreen
-from textual import events, work
+from textual import work
 from rich.text import Text
 from rich.table import Table
 from rich import box

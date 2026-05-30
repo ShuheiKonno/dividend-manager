@@ -6,6 +6,9 @@ from dataclasses import dataclass
 from datetime import date, timedelta
 from typing import Callable, Optional
 
+from .models import Holding, MarketData, FXRate
+from .utils import now_jst_iso, today_jst_str
+
 # yfinance / ToushinReader は import に数秒かかる重量級依存。実際に取得を行う関数が
 # 呼ばれるまでロードしないことで、GUI/TUI の起動を即時化する（取得は QThread ワーカー上）。
 _yf_module = None
@@ -35,9 +38,6 @@ def _toushin_fund_cls():
 
 
 ProgressCallback = Callable[[int, int, str], None]
-
-from .models import Holding, MarketData, FXRate
-from .utils import now_jst_iso, today_jst_str
 
 
 @dataclass
@@ -144,6 +144,8 @@ def _fetch_one(
             if not close.empty:
                 price = float(close.iloc[-1])
                 price_date = close.index[-1].date().isoformat()
+            else:
+                errors.append(f"株価取得失敗: {holding.symbol} (終値データなし)")
         except Exception as exc:
             errors.append(f"株価取得失敗: {holding.symbol} ({exc})")
 
@@ -184,18 +186,23 @@ def fetch_market_data(
     errors: list[str] = []
     name_updates: dict[str, str] = {}
 
-    active = [h for h in holdings if h.active]
+    # 複数口座で同じ銘柄を保有していても、市場データは symbol 単位で一度だけ取得する。
+    active_by_symbol: dict[str, Holding] = {}
+    for holding in holdings:
+        if holding.active and holding.symbol not in active_by_symbol:
+            active_by_symbol[holding.symbol] = holding
+    active = list(active_by_symbol.values())
     total = len(active)
+    result_by_symbol = dict(existing)
 
     # 当日取得済みキャッシュと要取得を分離。結果配列は入力順を保持する。
-    results: list[Optional[MarketData]] = [None] * total
-    to_fetch: list[tuple[int, Holding]] = []
-    for index, holding in enumerate(active):
+    to_fetch: list[Holding] = []
+    for holding in active:
         cached = existing.get(holding.symbol)
         if not force and cached and cached.fetched_at and cached.fetched_at.startswith(today_jst_str()):
-            results[index] = cached
+            result_by_symbol[holding.symbol] = cached
         else:
-            to_fetch.append((index, holding))
+            to_fetch.append(holding)
 
     done = total - len(to_fetch)  # キャッシュ済みは完了済みとして算入
     if progress_cb:
@@ -212,11 +219,11 @@ def fetch_market_data(
         # progress_cb 呼び出しはこの呼び出し元スレッド（QThread ワーカー）で行う。
         with ThreadPoolExecutor(max_workers=min(8, len(to_fetch))) as executor:
             future_map = {
-                executor.submit(_fetch_one, holding, fetched_at, source): (index, holding)
-                for index, holding in to_fetch
+                executor.submit(_fetch_one, holding, fetched_at, source): holding
+                for holding in to_fetch
             }
             for future in as_completed(future_map):
-                index, holding = future_map[future]
+                holding = future_map[future]
                 try:
                     md, errs, name_update = future.result()
                 except Exception as exc:  # noqa: BLE001 — 1銘柄の失敗で全体を止めない
@@ -233,7 +240,14 @@ def fetch_market_data(
                     )
                     errs = [f"取得失敗: {holding.symbol} ({exc})"]
                     name_update = None
-                results[index] = md
+                # 一時的な通信失敗で直前の正常キャッシュを消さない。
+                cached = existing.get(holding.symbol)
+                if errs and cached:
+                    result_by_symbol[holding.symbol] = cached
+                else:
+                    if errs:
+                        md.fetched_at = None  # force=False の次回更新で再取得できるようにする。
+                    result_by_symbol[holding.symbol] = md
                 errors.extend(errs)
                 if name_update:
                     name_updates[name_update[0]] = name_update[1]
@@ -244,8 +258,11 @@ def fetch_market_data(
     if progress_cb:
         progress_cb(total, total, "完了")
 
+    active_symbols = set(active_by_symbol)
+    rows = [result_by_symbol[h.symbol] for h in active if h.symbol in result_by_symbol]
+    rows.extend(row for symbol, row in result_by_symbol.items() if symbol not in active_symbols)
     return MarketFetchResult(
-        rows=[r for r in results if r is not None],
+        rows=rows,
         fetched_at=fetched_at,
         source=source,
         errors=errors,
@@ -253,14 +270,14 @@ def fetch_market_data(
     )
 
 
-def fetch_usdjpy() -> FXRate | None:
+def fetch_usdjpy() -> FXRate:
     try:
         ticker = _yf().Ticker("USDJPY=X")
         history = ticker.history(period="10d")
         close = history["Close"].dropna()
         if close.empty:
-            return None
+            raise RuntimeError("終値データなし")
         rate = float(close.iloc[-1])
         return FXRate(timestamp=now_jst_iso(), pair="USDJPY", rate=rate, source="yfinance")
-    except Exception:
-        return None
+    except Exception as exc:
+        raise RuntimeError(f"USDJPY取得失敗: {exc}") from exc

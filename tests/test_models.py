@@ -83,3 +83,19 @@ def test_market_data_roundtrip():
     )
     restored = MarketData.from_dict(m.to_dict())
     assert restored == m
+
+
+def test_market_data_zero_values_are_preserved():
+    m = MarketData(
+        symbol="ZERO",
+        currency="JPY",
+        last_price=0.0,
+        price_as_of="2026-05-30",
+        annual_div_ps_gross=0.0,
+        annual_div_ps_net=0.0,
+        div_forecast_as_of="2026-05-30",
+        source="test",
+        fetched_at="2026-05-30T09:00:00+09:00",
+    )
+    restored = MarketData.from_dict(m.to_dict())
+    assert restored == m

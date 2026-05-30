@@ -6,8 +6,9 @@
 ## セットアップ
 
 ```powershell
-pip install -r requirements.txt
-python app.py
+python -m venv .venv
+.venv\Scripts\python.exe -m pip install -r requirements.txt
+.venv\Scripts\python.exe app.py
 ```
 
 または `run.bat` をダブルクリックで起動。
@@ -24,7 +25,7 @@ python app.py
 | `W` | 収入モード切替: 配当 → 定額取崩 → 定率取崩 → 配当 |
 | `R` | データを再読込 |
 | `S` | カーソル列でソート |
-| `1` / `2` / `3` | タブ切替（ダッシュボード / 株価関連 / 配当関連） |
+| `1` / `2` / `3` / `4` | タブ切替（評価額 / 配当金 / 株価関連 / 配当関連） |
 | `Q` | 終了 |
 
 ## データ取得
@@ -66,3 +67,11 @@ python app.py
 | `data/backup/` | 書込み前の自動バックアップ |
 
 `data/` ディレクトリは `.gitignore` 済み（ローカル専用）。
+
+## レガシー TUI
+
+旧 Textual TUI を実行する場合のみ、追加依存をインストールしてください。
+
+```powershell
+.venv\Scripts\python.exe -m pip install -r requirements-legacy.txt
+```

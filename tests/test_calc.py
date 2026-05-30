@@ -84,6 +84,18 @@ def test_usd_without_fx_rate_yields_none():
     assert rows[0]["book_value_jpy"] is None
 
 
+def test_summary_is_none_when_any_market_value_is_missing():
+    holdings = [
+        _holding(symbol="KNOWN"),
+        _holding(symbol="MISSING"),
+    ]
+    market = {"KNOWN": _market(symbol="KNOWN")}
+    _, summary = compute_rows(holdings, market, 150.0, "gross")
+    assert summary.total_market_value_jpy is None
+    assert summary.total_profit_jpy is None
+    assert summary.missing_market_value_count == 1
+
+
 # ---- compute_rows: net モードの源泉税自動計算 ----
 
 def test_net_mode_auto_tax_default():
@@ -159,3 +171,11 @@ def test_pick_div_ps_fund_fallback_zero():
 def test_pick_div_ps_stock_no_data_is_none():
     h = _holding()
     assert _pick_div_ps(h, None, "gross") is None
+
+
+def test_summary_preserves_known_zero_values():
+    h = _holding(avg_cost=2500.0, annual_div_ps_gross_override=0.0)
+    _, summary = compute_rows([h], {"7203": _market(last_price=2500.0)}, 150.0, "gross")
+    assert summary.total_dividend_jpy == 0.0
+    assert summary.total_profit_jpy == 0.0
+    assert summary.profit_rate == 0.0

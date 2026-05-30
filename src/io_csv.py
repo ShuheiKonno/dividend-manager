@@ -2,9 +2,10 @@ from __future__ import annotations
 
 import csv
 import json
+import time
 from pathlib import Path
 from shutil import copy2
-from typing import Iterable
+from typing import Callable, Iterable, TypeVar
 
 from .models import (
     HOLDINGS_FIELDS,
@@ -16,10 +17,14 @@ from .models import (
     FXRate,
     HistoryRecord,
 )
-from .utils import now_jst_iso
+from .utils import now_jst
 
 DATA_DIR = Path(__file__).resolve().parents[1] / "data"
 BACKUP_DIR = DATA_DIR / "backup"
+_WRITE_RETRIES = 3
+_WRITE_RETRY_DELAY_SECONDS = 0.2
+_BACKUP_KEEP_PER_FILE = 30
+_T = TypeVar("_T")
 
 
 def _ensure_dirs() -> None:
@@ -35,6 +40,29 @@ def _read_csv(path: Path) -> list[dict[str, str]]:
         return [dict(row) for row in reader]
 
 
+def _retry_on_permission_error(action: Callable[[], _T], path: Path) -> _T:
+    for attempt in range(_WRITE_RETRIES):
+        try:
+            return action()
+        except PermissionError as exc:
+            if attempt == _WRITE_RETRIES - 1:
+                raise PermissionError(
+                    f"{path.name} を保存できません。Excel などでファイルを開いている場合は "
+                    "閉じてから再試行してください。"
+                ) from exc
+            time.sleep(_WRITE_RETRY_DELAY_SECONDS)
+    raise AssertionError("unreachable")
+
+
+def _prune_backups(path: Path) -> None:
+    backups = sorted(BACKUP_DIR.glob(f"{path.stem}_*{path.suffix}"))
+    for old in backups[:-_BACKUP_KEEP_PER_FILE]:
+        try:
+            old.unlink()
+        except OSError:
+            pass
+
+
 def _atomic_write(
     path: Path,
     rows: Iterable[dict[str, str]],
@@ -45,18 +73,16 @@ def _atomic_write(
     # 履歴のように起動・更新の都度書き込むファイルは backup=False にして
     # data/backup/ の肥大を防ぐ（履歴は本質的に追記ログでバックアップ不要）。
     if backup and path.exists():
-        backup_name = (
-            f"{path.stem}_{now_jst_iso().replace(':', '').replace('-', '')}"
-            + path.suffix
-        )
-        copy2(path, BACKUP_DIR / backup_name)
+        backup_name = f"{path.stem}_{now_jst().strftime('%Y%m%dT%H%M%S%f%z')}{path.suffix}"
+        _retry_on_permission_error(lambda: copy2(path, BACKUP_DIR / backup_name), path)
+        _prune_backups(path)
     tmp_path = path.with_suffix(path.suffix + ".tmp")
     with tmp_path.open("w", encoding="utf-8", newline="") as f:
         writer = csv.DictWriter(f, fieldnames=fieldnames)
         writer.writeheader()
         for row in rows:
             writer.writerow(row)
-    tmp_path.replace(path)
+    _retry_on_permission_error(lambda: tmp_path.replace(path), path)
 
 
 HOLDINGS_PATH = DATA_DIR / "holdings.csv"
@@ -170,4 +196,4 @@ def save_settings(**updates) -> None:
     tmp_path = SETTINGS_PATH.with_suffix(".json.tmp")
     with tmp_path.open("w", encoding="utf-8") as f:
         json.dump(data, f, ensure_ascii=False)
-    tmp_path.replace(SETTINGS_PATH)
+    _retry_on_permission_error(lambda: tmp_path.replace(SETTINGS_PATH), SETTINGS_PATH)
