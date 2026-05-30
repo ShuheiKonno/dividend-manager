@@ -382,9 +382,11 @@ class PieChartWidget(QWidget):
         display_tiles = self._build_display_tiles()
         w = float(rect.width())
         h = float(rect.height())
-        # ラベルを扇外に引き出すため、左右に帯を確保して円を小さめにする。
-        _LABEL_BAND = 120.0
-        r = max(30.0, min(w / 2.0 - _LABEL_BAND, h / 2.0 - 16.0))
+        # ラベルを扇外に引き出すため左右に帯を確保し、円はさらに小さめ（約0.7倍）に
+        # 描く。帯は銘柄名を表示できるよう広めに取る。
+        _LABEL_BAND = 175.0
+        base_r = min(w / 2.0 - _LABEL_BAND, h / 2.0 - 16.0)
+        r = max(30.0, base_r * 0.7)
         cx = w / 2.0
         cy = h / 2.0
         pie_rect = QRectF(cx - r, cy - r, r * 2, r * 2)
@@ -410,9 +412,9 @@ class PieChartWidget(QWidget):
         # 縦の重なりは spread_labels で回避する（同サイド内は引き出し線が交差しない）。
         painter.setFont(small_font)
         line_h = float(painter.fontMetrics().height())
-        block_h = line_h * 2.0
+        block_h = line_h * 3.0  # コード / 銘柄名 / 金額(％) の3行
         min_gap = block_h + 4.0
-        label_w = 100.0
+        label_w = 150.0
 
         # 各扇の中点から円周上の起点と左右サイドを求める
         entries = []  # (i, tile, x_in, y_in, side)
@@ -444,6 +446,7 @@ class PieChartWidget(QWidget):
                 painter.drawLine(int(elbow_x), int(y_lbl), int(text_x), int(y_lbl))
 
                 symbol = str(tile.get("symbol", ""))
+                name = str(tile.get("name") or "")
                 pct = float(tile[self._value_key]) / self._total * 100.0
                 mv_str = f"{_fmt_compact(float(tile[self._value_key]))} ({pct:.0f}%)"
                 if side == "right":
@@ -452,17 +455,28 @@ class PieChartWidget(QWidget):
                 else:
                     box_x = text_x - 2.0 - label_w
                     align = Qt.AlignmentFlag.AlignRight
-                top_rect = QRectF(box_x, y_lbl - block_h / 2.0, label_w, line_h)
-                bot_rect = QRectF(box_x, y_lbl - block_h / 2.0 + line_h, label_w, line_h)
+                top = y_lbl - block_h / 2.0
+                code_rect = QRectF(box_x, top, label_w, line_h)
+                name_rect = QRectF(box_x, top + line_h, label_w, line_h)
+                amount_rect = QRectF(box_x, top + line_h * 2.0, label_w, line_h)
+                # 1行目: コード（扇色・太字）
                 painter.setFont(bold_font)
                 painter.setPen(QPen(color))
                 painter.drawText(
-                    top_rect, align | Qt.AlignmentFlag.AlignVCenter, symbol
+                    code_rect, align | Qt.AlignmentFlag.AlignVCenter, symbol
                 )
+                # 2行目: 銘柄名（幅に収まらなければ末尾省略）
                 painter.setFont(small_font)
                 painter.setPen(QPen(QColor("#cfcfcf")))
+                elided_name = painter.fontMetrics().elidedText(
+                    name, Qt.TextElideMode.ElideRight, int(label_w)
+                )
                 painter.drawText(
-                    bot_rect, align | Qt.AlignmentFlag.AlignVCenter, mv_str
+                    name_rect, align | Qt.AlignmentFlag.AlignVCenter, elided_name
+                )
+                # 3行目: 金額(％)
+                painter.drawText(
+                    amount_rect, align | Qt.AlignmentFlag.AlignVCenter, mv_str
                 )
 
         painter.end()
