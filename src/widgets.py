@@ -645,13 +645,13 @@ class LineChartWidget(QWidget):
                 date,
             )
 
-        # 各系列の折れ線（None 点で分断）
+        # 各系列の折れ線（None 点で分断）。前後が None の孤立点はマーカーで可視化
+        # （例: 取崩収入は当初 1 点のみで線が引けないため点を描く）。
         for label, key, color in self._series:
-            pen = QPen(color, 2)
-            painter.setPen(pen)
+            painter.setPen(QPen(color, 2))
+            vals = [safe_float(rec.get(key)) for rec in self._visible]
             prev: tuple[float, float] | None = None
-            for idx, rec in enumerate(self._visible):
-                v = safe_float(rec.get(key))
+            for idx, v in enumerate(vals):
                 if v is None:
                     prev = None
                     continue
@@ -659,6 +659,11 @@ class LineChartWidget(QWidget):
                 y = self._y_for(v, plot)
                 if prev is not None:
                     painter.drawLine(int(prev[0]), int(prev[1]), int(x), int(y))
+                else:
+                    nxt = vals[idx + 1] if idx + 1 < len(vals) else None
+                    if nxt is None:  # 前後とも繋がらない孤立点
+                        painter.setBrush(color)
+                        painter.drawEllipse(QRectF(x - 2.5, y - 2.5, 5, 5))
                 prev = (x, y)
 
         # ホバー: 縦カーソル線 + 該当点マーカー

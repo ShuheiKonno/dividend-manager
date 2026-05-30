@@ -10,6 +10,7 @@ from src.history import (
     parse_android_backup,
     merge_records,
     upsert_record,
+    combine_income,
     _android_date_to_iso,
 )
 from src.models import HistoryRecord
@@ -23,6 +24,7 @@ def _rec(date: str, **kw) -> HistoryRecord:
         total_dividend_jpy=None,
         total_benefit_jpy=None,
         total_profit_jpy=None,
+        total_withdrawal_income_jpy=None,
         source="app",
     )
     base.update(kw)
@@ -66,9 +68,10 @@ def test_parse_android_backup_maps_main_only():
     assert r.total_dividend_jpy == 2835193
     # 優待 0 は None（無し）として扱う
     assert r.total_benefit_jpy is None
-    # JSON に簿価・損益は無い
+    # JSON に簿価・損益・取崩収入は無い
     assert r.total_book_value_jpy is None
     assert r.total_profit_jpy is None
+    assert r.total_withdrawal_income_jpy is None
     assert r.source == "android_backup"
 
 
@@ -134,7 +137,62 @@ def test_history_record_roundtrip():
         total_dividend_jpy=2835193.0,
         total_benefit_jpy=0.0,  # 0.0 の明示値が保持されること
         total_profit_jpy=-123.0,
+        total_withdrawal_income_jpy=4880000.0,
         source="app",
     )
     restored = HistoryRecord.from_dict(r.to_dict())
     assert restored == r
+
+
+def test_history_record_roundtrip_missing_new_column():
+    """新列を持たない旧 CSV 行（DictReader で欠損→None）も読み込めること。"""
+    row = {
+        "record_date": "2024-06-27",
+        "total_market_value_jpy": "100.0",
+        "total_dividend_jpy": "5.0",
+        "source": "android_backup",
+        # total_withdrawal_income_jpy は欠損
+    }
+    rec = HistoryRecord.from_dict(row)
+    assert rec.total_withdrawal_income_jpy is None
+    assert rec.total_dividend_jpy == 5.0
+
+
+# ---- combine_income（配当推移グラフの系列合成） ----
+
+def _income_rec(div, benefit, withdrawal) -> dict:
+    return {
+        "total_dividend_jpy": div,
+        "total_benefit_jpy": benefit,
+        "total_withdrawal_income_jpy": withdrawal,
+    }
+
+
+def test_combine_income_dividend_only():
+    rec = _income_rec(1000.0, 200.0, 1500.0)
+    assert combine_income(rec, with_benefit=False, with_withdrawal=False) == 1000.0
+
+
+def test_combine_income_with_benefit():
+    rec = _income_rec(1000.0, 200.0, 1500.0)
+    assert combine_income(rec, with_benefit=True, with_withdrawal=False) == 1200.0
+
+
+def test_combine_income_withdrawal():
+    rec = _income_rec(1000.0, 200.0, 1500.0)
+    assert combine_income(rec, with_benefit=False, with_withdrawal=True) == 1500.0
+    assert combine_income(rec, with_benefit=True, with_withdrawal=True) == 1700.0
+
+
+def test_combine_income_withdrawal_missing_returns_none():
+    """取崩収入が未記録（過去の取込分など）なら取崩込みは None で線を分断。"""
+    rec = _income_rec(1000.0, 200.0, None)
+    assert combine_income(rec, with_benefit=False, with_withdrawal=True) is None
+    assert combine_income(rec, with_benefit=True, with_withdrawal=True) is None
+    # 取崩無しは通常配当で描ける
+    assert combine_income(rec, with_benefit=False, with_withdrawal=False) == 1000.0
+
+
+def test_combine_income_none_benefit_treated_as_zero():
+    rec = _income_rec(1000.0, None, None)
+    assert combine_income(rec, with_benefit=True, with_withdrawal=False) == 1000.0

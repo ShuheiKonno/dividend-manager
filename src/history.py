@@ -94,6 +94,7 @@ def parse_android_backup(data: object) -> list[HistoryRecord]:
                 total_dividend_jpy=dividend if dividend > 0 else None,
                 total_benefit_jpy=benefit if benefit > 0 else None,
                 total_profit_jpy=None,  # JSON に損益は無い
+                total_withdrawal_income_jpy=None,  # JSON に取崩収入は無い
                 source="android_backup",
             )
         )
@@ -107,3 +108,23 @@ def load_android_backup(json_path: str | Path) -> list[HistoryRecord]:
     with path.open("r", encoding="utf-8-sig") as f:
         data = json.load(f)
     return parse_android_backup(data)
+
+
+def combine_income(
+    rec: dict, with_benefit: bool, with_withdrawal: bool
+) -> float | None:
+    """配当推移グラフの 1 点の表示値を、優待・取崩の選択に応じて合成して返す。
+
+    with_withdrawal=False: 取崩無しの通常配当（total_dividend_jpy）を基準。
+    with_withdrawal=True : 取崩込み収入（total_withdrawal_income_jpy）を基準。
+    with_benefit=True    : 上記へ優待（total_benefit_jpy）を加算。
+    基準値が None（取崩込みだが取崩収入未記録＝過去の取込分など）の場合は None を
+    返し、折れ線を分断する。優待が None の日は 0 として扱う。
+    """
+    key = "total_withdrawal_income_jpy" if with_withdrawal else "total_dividend_jpy"
+    base = safe_float(rec.get(key))
+    if base is None:
+        return None
+    if with_benefit:
+        base += safe_float(rec.get("total_benefit_jpy")) or 0.0
+    return base

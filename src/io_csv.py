@@ -119,6 +119,7 @@ _VALID_WITHDRAWAL_MODES = {None, "fixed", "rate"}
 _VALID_CHART_TYPES = {"treemap", "pie"}
 _VALID_TREND_PERIODS = {"all", "10y", "5y", "3y", "1y"}
 _VALID_BASELINES = {"zero", "min"}
+_VALID_INCLUDE = {"with", "without"}
 
 # 設定キー → 許容値集合。load/save 両方の検証に用いる（評価額/配当タブで独立）。
 _SETTINGS_VALIDATORS: dict[str, set] = {
@@ -130,6 +131,9 @@ _SETTINGS_VALIDATORS: dict[str, set] = {
     "income_trend_period": _VALID_TREND_PERIODS,
     "asset_trend_baseline": _VALID_BASELINES,
     "income_trend_baseline": _VALID_BASELINES,
+    # 配当推移グラフの系列選択（優待込み/取崩込み）
+    "income_benefit": _VALID_INCLUDE,
+    "income_withdrawal": _VALID_INCLUDE,
 }
 
 
