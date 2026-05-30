@@ -507,6 +507,209 @@ class PieChartWidget(QWidget):
         return None
 
 
+class LineChartWidget(QWidget):
+    """日次スナップショットの推移を描く折れ線グラフ（純 QPainter・依存追加なし）。
+
+    面積比例チャート群（treemap/pie）と同じく外部ライブラリを使わず、
+    起動パスに重量級 import を持ち込まない方針に従う。
+
+    set_data(records, series):
+      records … 時系列順の dict のリスト。各要素に "date"（"YYYY-MM-DD"）と
+                各系列の数値キーを持つ。値が None の点は線を分断する。
+      series  … (ラベル, キー, 線色 QColor) のタプルのリスト。
+    """
+
+    _MARGIN_LEFT = 64
+    _MARGIN_RIGHT = 16
+    _MARGIN_TOP = 28
+    _MARGIN_BOTTOM = 34
+
+    def __init__(self, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self._records: list[dict] = []
+        self._series: list[tuple[str, str, QColor]] = []
+        self._empty_message: str = "履歴データがありません（株価を更新すると記録されます）"
+        self._max_value: float = 0.0
+        self._hover_idx: int | None = None
+        self.setMinimumSize(420, 320)
+        self.setMouseTracking(True)
+        self.setAutoFillBackground(True)
+
+    def set_data(
+        self,
+        records: list[dict],
+        series: list[tuple[str, str, QColor]],
+        empty_message: str | None = None,
+    ) -> None:
+        self._records = list(records)
+        self._series = list(series)
+        if empty_message is not None:
+            self._empty_message = empty_message
+        max_v = 0.0
+        for rec in self._records:
+            for _, key, _c in self._series:
+                v = safe_float(rec.get(key))
+                if v is not None and v > max_v:
+                    max_v = v
+        self._max_value = max_v
+        self._hover_idx = None
+        self.update()
+
+    # ---- 座標変換 ----
+    def _plot_rect(self) -> QRectF:
+        rect = self.rect()
+        return QRectF(
+            self._MARGIN_LEFT,
+            self._MARGIN_TOP,
+            max(1.0, rect.width() - self._MARGIN_LEFT - self._MARGIN_RIGHT),
+            max(1.0, rect.height() - self._MARGIN_TOP - self._MARGIN_BOTTOM),
+        )
+
+    def _x_for(self, idx: int, plot: QRectF) -> float:
+        n = len(self._records)
+        if n <= 1:
+            return plot.left() + plot.width() / 2.0
+        return plot.left() + plot.width() * idx / (n - 1)
+
+    def _y_for(self, value: float, plot: QRectF) -> float:
+        top = self._max_value * 1.08 if self._max_value > 0 else 1.0
+        return plot.bottom() - plot.height() * (value / top)
+
+    # ---- 描画 ----
+    def paintEvent(self, event) -> None:  # noqa: N802 (Qt API)
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+        rect = self.rect()
+        painter.fillRect(rect, QColor("#1c1c1c"))
+
+        if not self._records or not self._series or self._max_value <= 0:
+            painter.setPen(QPen(QColor("#9e9e9e")))
+            painter.drawText(rect, Qt.AlignmentFlag.AlignCenter, self._empty_message)
+            painter.end()
+            return
+
+        plot = self._plot_rect()
+        small_font = QFont(self.font())
+        small_font.setPointSize(max(7, self.font().pointSize() - 1))
+
+        # 横グリッド線 + Y 軸ラベル（0 〜 上限を 4 分割）
+        top_value = self._max_value * 1.08
+        painter.setFont(small_font)
+        for i in range(5):
+            frac = i / 4.0
+            y = plot.bottom() - plot.height() * frac
+            painter.setPen(QPen(QColor("#2f2f2f"), 1))
+            painter.drawLine(int(plot.left()), int(y), int(plot.right()), int(y))
+            painter.setPen(QPen(QColor("#9e9e9e")))
+            painter.drawText(
+                QRectF(0, y - 8, self._MARGIN_LEFT - 6, 16),
+                Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter,
+                _fmt_compact(top_value * frac),
+            )
+
+        # X 軸ラベル（最大 5 点の日付を等間隔に）
+        n = len(self._records)
+        painter.setPen(QPen(QColor("#9e9e9e")))
+        label_count = min(5, n)
+        for j in range(label_count):
+            idx = 0 if label_count == 1 else round(j * (n - 1) / (label_count - 1))
+            x = self._x_for(idx, plot)
+            date = str(self._records[idx].get("date", ""))
+            painter.drawText(
+                QRectF(x - 44, plot.bottom() + 4, 88, 16),
+                Qt.AlignmentFlag.AlignCenter,
+                date,
+            )
+
+        # 各系列の折れ線（None 点で分断）
+        for label, key, color in self._series:
+            pen = QPen(color, 2)
+            painter.setPen(pen)
+            prev: tuple[float, float] | None = None
+            for idx, rec in enumerate(self._records):
+                v = safe_float(rec.get(key))
+                if v is None:
+                    prev = None
+                    continue
+                x = self._x_for(idx, plot)
+                y = self._y_for(v, plot)
+                if prev is not None:
+                    painter.drawLine(int(prev[0]), int(prev[1]), int(x), int(y))
+                prev = (x, y)
+
+        # ホバー: 縦カーソル線 + 該当点マーカー
+        if self._hover_idx is not None and 0 <= self._hover_idx < n:
+            hx = self._x_for(self._hover_idx, plot)
+            painter.setPen(QPen(QColor("#6f6f6f"), 1, Qt.PenStyle.DashLine))
+            painter.drawLine(int(hx), int(plot.top()), int(hx), int(plot.bottom()))
+            rec = self._records[self._hover_idx]
+            for _label, key, color in self._series:
+                v = safe_float(rec.get(key))
+                if v is None:
+                    continue
+                hy = self._y_for(v, plot)
+                painter.setBrush(color)
+                painter.setPen(QPen(QColor("#1c1c1c"), 1))
+                painter.drawEllipse(QRectF(hx - 3.5, hy - 3.5, 7, 7))
+
+        # 凡例（右上）
+        legend_x = plot.right() - 8
+        legend_y = plot.top() + 4
+        painter.setFont(small_font)
+        for label, _key, color in self._series:
+            text_w = painter.fontMetrics().horizontalAdvance(label)
+            sw = 16  # 色見本の幅
+            row_w = sw + 4 + text_w
+            lx = legend_x - row_w
+            painter.setPen(QPen(color, 2))
+            painter.drawLine(int(lx), int(legend_y + 7), int(lx + sw), int(legend_y + 7))
+            painter.setPen(QPen(QColor("#d0d0d0")))
+            painter.drawText(
+                QRectF(lx + sw + 4, legend_y, text_w + 4, 14),
+                Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter,
+                label,
+            )
+            legend_y += 16
+
+        painter.end()
+
+    # ---- ホバー: 最寄りの日付の値をツールチップ表示 ----
+    def mouseMoveEvent(self, event) -> None:  # noqa: N802 (Qt API)
+        pos = event.position().toPoint() if hasattr(event, "position") else event.pos()
+        idx = self._index_at(pos.x())
+        if idx is None:
+            if self._hover_idx is not None:
+                self._hover_idx = None
+                self.update()
+            QToolTip.hideText()
+            super().mouseMoveEvent(event)
+            return
+        if idx != self._hover_idx:
+            self._hover_idx = idx
+            self.update()
+        rec = self._records[idx]
+        lines = [str(rec.get("date", ""))]
+        for label, key, _color in self._series:
+            v = safe_float(rec.get(key))
+            if v is not None:
+                lines.append(f"{label}: {fmt_number(v, 0)} 円")
+        QToolTip.showText(event.globalPosition().toPoint(), "\n".join(lines), self)
+        super().mouseMoveEvent(event)
+
+    def _index_at(self, px: float) -> int | None:
+        if not self._records:
+            return None
+        plot = self._plot_rect()
+        if px < plot.left() - 12 or px > plot.right() + 12:
+            return None
+        n = len(self._records)
+        if n <= 1:
+            return 0
+        frac = (px - plot.left()) / plot.width()
+        idx = round(frac * (n - 1))
+        return max(0, min(n - 1, idx))
+
+
 class KpiCard(QFrame):
     """サマリー指標を1つ表示する小カード（タイトル＋値）。"""
 

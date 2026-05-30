@@ -32,6 +32,11 @@ from PySide6.QtWidgets import (
     QDoubleSpinBox,
     QMessageBox,
     QAbstractSpinBox,
+    QPushButton,
+    QButtonGroup,
+    QStackedWidget,
+    QSplitter,
+    QFileDialog,
 )
 
 from .io_csv import (
@@ -44,13 +49,22 @@ from .io_csv import (
     save_fx,
     load_settings,
     save_settings,
+    load_history,
+    save_history,
 )
-from .models import Holding
+from .models import Holding, HistoryRecord
 from .calc import compute_rows
+from .history import upsert_record, merge_records, load_android_backup
 # market_data は yfinance / ToushinReader / pandas を芋づる式に読み込み起動を数秒遅らせる。
 # 取得は p / u キーのワーカースレッドでしか走らないため、import を run() 内へ遅延させる。
-from .utils import fmt_number, fmt_percent, safe_float
-from .widgets import TreemapWidget, PieChartWidget, KpiCard, profit_text_qcolor
+from .utils import fmt_number, fmt_percent, safe_float, today_jst_str
+from .widgets import (
+    TreemapWidget,
+    PieChartWidget,
+    LineChartWidget,
+    KpiCard,
+    profit_text_qcolor,
+)
 
 
 PRICE_COLUMNS = [
@@ -76,6 +90,15 @@ INCOME_COLUMNS = [
     ("簿価利回り", "yield_on_cost"),
     ("時価利回り", "yield_on_value"),
     ("配当更新日", "div_forecast_as_of"),
+]
+# 推移グラフの系列定義 (ラベル, history キー, 線色)。set_data に渡す。
+ASSET_TREND_SERIES = [
+    ("評価額", "total_market_value_jpy", QColor("#42a5f5")),
+    ("簿価", "total_book_value_jpy", QColor("#9e9e9e")),
+]
+INCOME_TREND_SERIES = [
+    ("年間配当", "total_dividend_jpy", QColor("#66bb6a")),
+    ("優待", "total_benefit_jpy", QColor("#ffa726")),
 ]
 NUMERIC_SORT_COLUMNS = {
     "shares",
@@ -415,11 +438,15 @@ class DividendWindow(QMainWindow):
         _saved = load_settings()
         self.dividend_mode: str = _saved.get("dividend_mode", "gross")
         self.withdrawal_mode: str | None = _saved.get("withdrawal_mode", None)
+        self.asset_chart_type: str = _saved.get("asset_chart_type", "treemap")
+        self.income_chart_type: str = _saved.get("income_chart_type", "treemap")
         self.holdings: list[Holding] = []
         self.market_data_map: dict = {}
         self.fx_rate: float | None = None
         self.market_source: str | None = None
         self.market_fetched_at: str | None = None
+        self.history: list[HistoryRecord] = []
+        self._last_summary = None
         self.row_holding_indices: dict[str, list[int]] = {"price": [], "income": []}
         self._busy = False
         self._thread: QThread | None = None
@@ -464,6 +491,8 @@ class DividendWindow(QMainWindow):
         self._info.setStyleSheet("color: #bdbdbd; padding: 4px 2px;")
         root.addWidget(self._info)
 
+        self._build_button_bar(root)
+
         kpi_bar = QWidget()
         grid = QGridLayout(kpi_bar)
         grid.setContentsMargins(0, 0, 0, 0)
@@ -491,26 +520,29 @@ class DividendWindow(QMainWindow):
         root.addLayout(filter_row)
 
         self._tabs = QTabWidget()
-        # ダッシュボード（評価額 / 配当額 × ヒートマップ / 円グラフ の4サブタブ）
-        dash = QWidget()
-        dash_layout = QVBoxLayout(dash)
-        dash_layout.setContentsMargins(0, 0, 0, 0)
-        dash_layout.addWidget(QLabel("ポートフォリオ構成（色=損益率 / 面積はタブで切替）"))
-        self._dash_sub = QTabWidget()
-        self._dash_sub.tabBar().setExpanding(False)
-        # 評価額ベース（面積 = 評価額）
+        # 評価額タブ（左=構成グラフ[ヒートマップ⇔円グラフ] / 右=評価額推移）
         self._treemap = TreemapWidget()
-        self._dash_sub.addTab(self._treemap, "評価額ヒートマップ")
         self._piechart = PieChartWidget()
-        self._dash_sub.addTab(self._make_pie_tab(self._piechart), "評価額円グラフ")
-        # 配当額ベース（面積 = 年間配当）
+        self._asset_line = LineChartWidget()
+        asset_tab = self._make_dashboard_tab(
+            kind="asset",
+            treemap=self._treemap,
+            piechart=self._piechart,
+            line_chart=self._asset_line,
+        )
+        self._tabs.addTab(asset_tab, "評価額")
+        # 配当金タブ（左=構成グラフ / 右=配当推移）
         self._treemap_div = TreemapWidget()
-        self._dash_sub.addTab(self._treemap_div, "配当ヒートマップ")
         self._piechart_div = PieChartWidget()
-        self._dash_sub.addTab(self._make_pie_tab(self._piechart_div), "配当円グラフ")
-        dash_layout.addWidget(self._dash_sub, 1)
-        self._tabs.addTab(dash, "ダッシュボード")
-        # 株価 / 配当タブ
+        self._income_line = LineChartWidget()
+        income_tab = self._make_dashboard_tab(
+            kind="income",
+            treemap=self._treemap_div,
+            piechart=self._piechart_div,
+            line_chart=self._income_line,
+        )
+        self._tabs.addTab(income_tab, "配当金")
+        # 株価 / 配当テーブルタブ
         self._price_view, self._price_model, self._price_proxy = self._make_table(PRICE_COLUMNS)
         self._income_view, self._income_model, self._income_proxy = self._make_table(INCOME_COLUMNS)
         self._tabs.addTab(self._price_view, "株価関連")
@@ -571,6 +603,108 @@ class DividendWindow(QMainWindow):
         spin.valueChanged.connect(piechart.set_threshold)
         return container
 
+    def _build_button_bar(self, root: QVBoxLayout) -> None:
+        """主要アクションを GUI ボタンとして並べる（キーボードショートカットと等価）。"""
+        bar = QWidget()
+        layout = QHBoxLayout(bar)
+        layout.setContentsMargins(0, 0, 0, 2)
+        layout.setSpacing(4)
+        # (ラベル, スロット) ※ラベル末尾の (X) は対応ショートカット
+        defs = [
+            ("再読込 (R)", self._reload_all),
+            ("税引前後 (M)", self.action_toggle_mode),
+            ("取崩切替 (W)", self.action_toggle_withdrawal),
+            ("株価更新 (P)", self.action_update_market),
+            ("USDJPY (U)", self.action_update_fx),
+            ("新規 (N)", self.action_new_holding),
+            ("編集 (E)", self.action_edit),
+            ("削除 (D)", self.action_delete),
+            ("履歴取込", self.action_import_history),
+        ]
+        for label, slot in defs:
+            btn = QPushButton(label)
+            btn.setFocusPolicy(Qt.FocusPolicy.NoFocus)  # 一文字ショートカットを奪わない
+            # clicked は checked(bool) を渡すため、引数なしスロットへはラムダで吸収する。
+            btn.clicked.connect(lambda _checked=False, s=slot: s())
+            layout.addWidget(btn)
+        layout.addStretch()
+        root.addWidget(bar)
+
+    def _make_dashboard_tab(
+        self,
+        kind: str,
+        treemap: TreemapWidget,
+        piechart: PieChartWidget,
+        line_chart: LineChartWidget,
+    ) -> QWidget:
+        """構成グラフ（ヒートマップ⇔円グラフ切替）と推移グラフを横並びにしたタブを返す。
+
+        kind は "asset"（評価額）/ "income"（配当金）。構成グラフ種別は
+        self.{asset,income}_chart_type に保持し、設定へ永続化する。
+        """
+        tab = QWidget()
+        outer = QVBoxLayout(tab)
+        outer.setContentsMargins(0, 4, 0, 0)
+        outer.setSpacing(4)
+
+        # 切替ツールバー（構成グラフの種別）
+        bar = QHBoxLayout()
+        bar.addWidget(QLabel("構成グラフ:"))
+        heat_btn = QPushButton("ヒートマップ")
+        pie_btn = QPushButton("円グラフ")
+        group = QButtonGroup(tab)
+        for b in (heat_btn, pie_btn):
+            b.setCheckable(True)
+            b.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+            group.addButton(b)
+        bar.addWidget(heat_btn)
+        bar.addWidget(pie_btn)
+        bar.addStretch()
+        outer.addLayout(bar)
+
+        # 構成グラフ（QStackedWidget でヒートマップ/円グラフを切替）と推移グラフを左右分割
+        stack = QStackedWidget()
+        stack.addWidget(treemap)                       # index 0 = ヒートマップ
+        stack.addWidget(self._make_pie_tab(piechart))  # index 1 = 円グラフ（閾値付き）
+        split = QSplitter(Qt.Orientation.Horizontal)
+        left = QWidget()
+        left_v = QVBoxLayout(left)
+        left_v.setContentsMargins(0, 0, 0, 0)
+        left_v.addWidget(QLabel("構成（色=損益率）"))
+        left_v.addWidget(stack, 1)
+        right = QWidget()
+        right_v = QVBoxLayout(right)
+        right_v.setContentsMargins(0, 0, 0, 0)
+        right_v.addWidget(QLabel("推移"))
+        right_v.addWidget(line_chart, 1)
+        split.addWidget(left)
+        split.addWidget(right)
+        split.setSizes([500, 500])
+        outer.addWidget(split, 1)
+
+        # 初期状態を設定から復元
+        chart_type = self.asset_chart_type if kind == "asset" else self.income_chart_type
+        (pie_btn if chart_type == "pie" else heat_btn).setChecked(True)
+        stack.setCurrentIndex(1 if chart_type == "pie" else 0)
+
+        def on_changed(to_pie: bool) -> None:
+            stack.setCurrentIndex(1 if to_pie else 0)
+            new_type = "pie" if to_pie else "treemap"
+            if kind == "asset":
+                self.asset_chart_type = new_type
+            else:
+                self.income_chart_type = new_type
+            save_settings(
+                self.dividend_mode,
+                self.withdrawal_mode,
+                self.asset_chart_type,
+                self.income_chart_type,
+            )
+
+        heat_btn.clicked.connect(lambda _checked=False: on_changed(False))
+        pie_btn.clicked.connect(lambda _checked=False: on_changed(True))
+        return tab
+
     def _on_filter_changed(self, text: str) -> None:
         self._price_proxy.set_filter_text(text)
         self._income_proxy.set_filter_text(text)
@@ -590,6 +724,7 @@ class DividendWindow(QMainWindow):
             ("1", lambda: self._tabs.setCurrentIndex(0)),
             ("2", lambda: self._tabs.setCurrentIndex(1)),
             ("3", lambda: self._tabs.setCurrentIndex(2)),
+            ("4", lambda: self._tabs.setCurrentIndex(3)),
         ]
         for key, slot in binds:
             QShortcut(QKeySequence(key), self, activated=self._guard_shortcut(slot))
@@ -618,13 +753,18 @@ class DividendWindow(QMainWindow):
             latest = max((row.fetched_at or "") for row in market_data)
             self.market_fetched_at = latest or None
             self.market_source = market_data[0].source
+        self.history = load_history()
         self._refresh_view()
+        # 当日のスナップショットを履歴へ upsert（タブ切替で呼ばれる _refresh_view では
+        # 記録せず、再読込・取得完了時のみ記録して CSV の過剰書込を避ける）。
+        self._record_history_snapshot()
 
     def _refresh_view(self) -> None:
         rows, summary = compute_rows(
             self.holdings, self.market_data_map, self.fx_rate, self.dividend_mode,
             self.withdrawal_mode,
         )
+        self._last_summary = summary
         active_indices = [i for i, h in enumerate(self.holdings) if h.active]
         self._render_table("price", PRICE_COLUMNS, self._price_model, self._price_view, rows, active_indices)
         income_cols = list(INCOME_COLUMNS)
@@ -648,6 +788,8 @@ class DividendWindow(QMainWindow):
             rows, value_key="annual_dividend_jpy", value_label=div_label,
             empty_message=div_empty,
         )
+        # 推移グラフ（履歴スナップショット）
+        self._refresh_trend()
 
         withdrawal_label = {None: "配当", "fixed": "定額取崩", "rate": "定率取崩"}[self.withdrawal_mode]
         self._info.setText(
@@ -674,6 +816,83 @@ class DividendWindow(QMainWindow):
             fmt_percent(summary.profit_rate, 2),
             profit_text_qcolor(summary.profit_rate),
         )
+
+    # ---- 履歴（推移グラフ） ----
+    def _refresh_trend(self) -> None:
+        """推移グラフ 2 種へ最新の履歴を反映する。"""
+        hist_dicts = self._history_as_dicts()
+        self._asset_line.set_data(
+            hist_dicts, ASSET_TREND_SERIES,
+            empty_message="評価額の履歴がありません（株価更新か『履歴取込』で記録されます）",
+        )
+        self._income_line.set_data(
+            hist_dicts, INCOME_TREND_SERIES,
+            empty_message="配当の履歴がありません（株価更新か『履歴取込』で記録されます）",
+        )
+
+    def _history_as_dicts(self) -> list[dict]:
+        """LineChartWidget.set_data 用に履歴を dict 列へ変換（record_date 昇順）。"""
+        result: list[dict] = []
+        for rec in self.history:
+            result.append(
+                {
+                    "date": rec.record_date,
+                    "total_market_value_jpy": rec.total_market_value_jpy,
+                    "total_book_value_jpy": rec.total_book_value_jpy,
+                    "total_dividend_jpy": rec.total_dividend_jpy,
+                    "total_benefit_jpy": rec.total_benefit_jpy,
+                    "total_profit_jpy": rec.total_profit_jpy,
+                }
+            )
+        return result
+
+    def _record_history_snapshot(self) -> None:
+        """当日のサマリーを履歴へ upsert して保存する（評価額/配当が無ければ記録しない）。"""
+        summary = self._last_summary
+        if summary is None:
+            return
+        market = summary.total_market_value_jpy
+        dividend = summary.total_dividend_jpy
+        benefit = summary.total_benefit_jpy
+        # 全て None（株価未取得かつ配当・優待なし）の起動直後は記録をスキップ。
+        if market is None and dividend is None and benefit is None:
+            return
+        record = HistoryRecord(
+            record_date=today_jst_str(),
+            total_market_value_jpy=market,
+            total_book_value_jpy=summary.total_book_value_jpy,
+            total_dividend_jpy=dividend,
+            total_benefit_jpy=benefit,
+            total_profit_jpy=summary.total_profit_jpy,
+            source="app",
+        )
+        self.history = upsert_record(self.history, record)
+        save_history(self.history)
+        self._refresh_trend()  # 追加した当日点を推移グラフへ即時反映
+
+    def action_import_history(self) -> None:
+        """Android バックアップ JSON を選択して履歴へ取り込む（既存の日付は保持）。"""
+        path, _ = QFileDialog.getOpenFileName(
+            self, "履歴をインポート (BackUpRecordInfoAndroid.json)", "",
+            "JSON ファイル (*.json);;すべて (*.*)",
+        )
+        if not path:
+            return
+        try:
+            imported = load_android_backup(path)
+        except Exception as exc:  # noqa: BLE001 — UI に通知して継続
+            self._notify(f"取込に失敗しました: {exc}", error=True)
+            return
+        if not imported:
+            self._notify("取込対象のデータが見つかりませんでした", error=True)
+            return
+        before = len(self.history)
+        # 既存（アプリ記録など）を優先し、履歴に無い日付だけ埋める。
+        self.history = merge_records(self.history, imported, prefer="existing")
+        save_history(self.history)
+        added = len(self.history) - before
+        self._refresh_view()
+        self._notify(f"履歴を取り込みました（新規 {added} 日分 / 計 {len(self.history)} 日分）")
 
     def _render_table(self, tab_key, columns, model, view, rows, holding_indices: list[int] | None = None) -> None:
         header = view.horizontalHeader()
@@ -714,10 +933,12 @@ class DividendWindow(QMainWindow):
         self._refresh_view()
 
     def _active_tab_key(self) -> str:
+        # タブ構成: [評価額(0), 配当金(1), 株価関連(2), 配当関連(3)]。
+        # 0/1 はグラフタブで編集・削除・ソート対象外（dashboard 扱い）。
         idx = self._tabs.currentIndex()
-        if idx == 1:
-            return "price"
         if idx == 2:
+            return "price"
+        if idx == 3:
             return "income"
         return "dashboard"
 
@@ -893,6 +1114,8 @@ class DividendWindow(QMainWindow):
             if updated:
                 save_holdings(self.holdings)
         self._refresh_view()
+        # 最新株価で評価額が確定した時点で当日スナップショットを記録。
+        self._record_history_snapshot()
         if result.errors:
             self._notify(f"一部の取得に失敗しました（{len(result.errors)}件）", error=True)
         else:
