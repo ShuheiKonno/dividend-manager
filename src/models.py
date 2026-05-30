@@ -160,10 +160,11 @@ class MarketData:
         return {
             "symbol": self.symbol,
             "currency": self.currency,
-            "last_price": self.last_price or "",
+            # 0.0 と未取得（None）を区別する。
+            "last_price": _csv_num(self.last_price),
             "price_as_of": self.price_as_of or "",
-            "annual_div_ps_gross": self.annual_div_ps_gross or "",
-            "annual_div_ps_net": self.annual_div_ps_net or "",
+            "annual_div_ps_gross": _csv_num(self.annual_div_ps_gross),
+            "annual_div_ps_net": _csv_num(self.annual_div_ps_net),
             "div_forecast_as_of": self.div_forecast_as_of or "",
             "source": self.source or "",
             "fetched_at": self.fetched_at or "",

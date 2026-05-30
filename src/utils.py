@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import math
 from datetime import date, datetime, timezone, timedelta
 from typing import Any
 
@@ -24,17 +25,17 @@ def today_jst_str() -> str:
 def safe_float(value: Any) -> float | None:
     if value is None:
         return None
-    if isinstance(value, float):
-        return value
-    if isinstance(value, int):
-        return float(value)
-    text = str(value).strip()
-    if text == "":
-        return None
     try:
-        return float(text)
-    except ValueError:
+        if isinstance(value, (float, int)):
+            number = float(value)
+        else:
+            text = str(value).strip()
+            if text == "":
+                return None
+            number = float(text)
+    except (TypeError, ValueError):
         return None
+    return number if math.isfinite(number) else None
 
 
 def safe_str(value: Any) -> str | None:

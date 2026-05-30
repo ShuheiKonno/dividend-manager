@@ -297,6 +297,10 @@ class TreemapWidget(QWidget):
 class PieChartWidget(QWidget):
     """構成比の円グラフ。面積 ∝ value_key（既定=market_value_jpy）、色 = 銘柄ごと固有色（時計回り）。"""
 
+    _LABEL_BAND = 175.0
+    _MIN_RADIUS = 30.0
+    _RADIUS_SCALE = 0.82
+
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
         self._tiles: list[dict] = []
@@ -384,9 +388,8 @@ class PieChartWidget(QWidget):
         h = float(rect.height())
         # ラベルを扇外に引き出すため左右に帯を確保しつつ、円は大きめ（約0.82倍）に
         # 描く。帯は銘柄名を表示できるよう広めに取る。
-        _LABEL_BAND = 175.0
-        base_r = min(w / 2.0 - _LABEL_BAND, h / 2.0 - 16.0)
-        r = max(30.0, base_r * 0.82)
+        base_r = min(w / 2.0 - self._LABEL_BAND, h / 2.0 - 16.0)
+        r = max(self._MIN_RADIUS, base_r * self._RADIUS_SCALE)
         cx = w / 2.0
         cy = h / 2.0
         pie_rect = QRectF(cx - r, cy - r, r * 2, r * 2)
@@ -508,7 +511,8 @@ class PieChartWidget(QWidget):
             return None
         w = float(self.rect().width())
         h = float(self.rect().height())
-        r = min(w, h) / 2.0 - 20.0
+        base_r = min(w / 2.0 - self._LABEL_BAND, h / 2.0 - 16.0)
+        r = max(self._MIN_RADIUS, base_r * self._RADIUS_SCALE)
         cx = w / 2.0
         cy = h / 2.0
 

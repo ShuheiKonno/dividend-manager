@@ -18,6 +18,7 @@ class Summary:
     yield_on_value: float | None
     total_profit_jpy: float | None
     profit_rate: float | None
+    missing_market_value_count: int
 
 
 _DEFAULT_TAX_RATE = 0.20315  # 日本の源泉税率（所得税15.315% + 住民税5%）
@@ -72,10 +73,16 @@ def compute_rows(
     sum_dividend = 0.0
     sum_benefit = 0.0
     sum_profit = 0.0
+    active_count = 0
+    known_book_count = 0
+    known_market_count = 0
+    known_dividend_count = 0
+    known_profit_count = 0
 
     for holding in holdings:
         if not holding.active:
             continue
+        active_count += 1
         market = market_map.get(holding.symbol)
         div_ps = _pick_div_ps(holding, market, mode)
         annual_dividend = holding.shares * div_ps if div_ps is not None else None
@@ -154,17 +161,23 @@ def compute_rows(
 
         if book_value_jpy is not None:
             sum_book += book_value_jpy
+            known_book_count += 1
         if market_value_jpy is not None:
             sum_market += market_value_jpy
+            known_market_count += 1
         if annual_dividend_jpy is not None:
             sum_dividend += annual_dividend_jpy
+            known_dividend_count += 1
         sum_benefit += benefit_jpy
         if profit_jpy is not None:
             sum_profit += profit_jpy
+            known_profit_count += 1
 
-    total_book = sum_book if sum_book > 0 else None
-    total_market = sum_market if sum_market > 0 else None
-    total_dividend = sum_dividend if sum_dividend > 0 else None
+    total_book = sum_book if active_count > 0 and known_book_count == active_count else None
+    total_market = (
+        sum_market if active_count > 0 and known_market_count == active_count else None
+    )
+    total_dividend = sum_dividend if known_dividend_count > 0 else None
     total_benefit = sum_benefit if sum_benefit > 0 else None
     total_numerator = None
     if total_dividend is not None or total_benefit is not None:
@@ -179,7 +192,9 @@ def compute_rows(
         if total_numerator is not None and total_market
         else None
     )
-    total_profit = sum_profit if sum_profit != 0 else None
+    total_profit = (
+        sum_profit if active_count > 0 and known_profit_count == active_count else None
+    )
     profit_rate = (
         total_profit / total_book if total_profit is not None and total_book else None
     )
@@ -194,6 +209,7 @@ def compute_rows(
         yield_on_value=yield_on_value,
         total_profit_jpy=total_profit,
         profit_rate=profit_rate,
+        missing_market_value_count=active_count - known_market_count,
     )
     return rows, summary
 

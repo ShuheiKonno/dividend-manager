@@ -7,6 +7,8 @@ yfinance 自体のスレッド安全性は実取得（p キー）での確認対
 
 from __future__ import annotations
 
+import pytest
+
 import src.market_data as md
 from src.models import Holding, MarketData
 
@@ -70,3 +72,58 @@ def test_cached_holdings_skip_fetch(monkeypatch):
     res = md.fetch_market_data([_holding("AAA")], {"AAA": cached}, force=False)
     assert calls == []                       # 取得関数は呼ばれない
     assert res.rows[0].last_price == 100.0   # キャッシュ値を返す
+
+
+def test_failed_fetch_keeps_existing_cache(monkeypatch):
+    cached = MarketData(
+        symbol="AAA", currency="JPY", last_price=100.0, price_as_of="2026-05-29",
+        annual_div_ps_gross=5.0, annual_div_ps_net=None, div_forecast_as_of="2026-05-29",
+        source="yfinance", fetched_at="2026-05-29T09:00:00+09:00",
+    )
+
+    def failed(holding, fetched_at, source):
+        row, _, name_update = _fake_fetch_one(holding, fetched_at, source)
+        return row, ["temporary failure"], name_update
+
+    monkeypatch.setattr(md, "_fetch_one", failed)
+    monkeypatch.setattr(md, "_yf", lambda: object())
+    res = md.fetch_market_data([_holding("AAA")], {"AAA": cached}, force=True)
+    assert res.rows == [cached]
+    assert res.errors == ["temporary failure"]
+
+
+def test_duplicate_symbols_fetch_once(monkeypatch):
+    calls: list[str] = []
+
+    def spy(holding, fetched_at, source):
+        calls.append(holding.symbol)
+        return _fake_fetch_one(holding, fetched_at, source)
+
+    monkeypatch.setattr(md, "_fetch_one", spy)
+    monkeypatch.setattr(md, "_yf", lambda: object())
+    res = md.fetch_market_data([_holding("AAA"), _holding("AAA")], {}, force=True)
+    assert calls == ["AAA"]
+    assert [row.symbol for row in res.rows] == ["AAA"]
+
+
+def test_inactive_existing_cache_is_preserved(monkeypatch):
+    inactive = _holding("OLD")
+    inactive.active = False
+    cached = MarketData(
+        symbol="OLD", currency="JPY", last_price=100.0, price_as_of="2026-05-29",
+        annual_div_ps_gross=5.0, annual_div_ps_net=None, div_forecast_as_of="2026-05-29",
+        source="yfinance", fetched_at="2026-05-29T09:00:00+09:00",
+    )
+    res = md.fetch_market_data([inactive], {"OLD": cached}, force=True)
+    assert res.rows == [cached]
+
+
+def test_fetch_usdjpy_reports_failure_reason(monkeypatch):
+    class BrokenYFinance:
+        @staticmethod
+        def Ticker(_symbol):
+            raise OSError("cache unavailable")
+
+    monkeypatch.setattr(md, "_yf", lambda: BrokenYFinance())
+    with pytest.raises(RuntimeError, match="cache unavailable"):
+        md.fetch_usdjpy()

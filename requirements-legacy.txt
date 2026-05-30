@@ -1,0 +1,5 @@
+-r requirements.txt
+
+# src/legacy_tui.py 専用
+textual>=0.50
+rich>=13
