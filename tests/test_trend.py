@@ -6,7 +6,7 @@ src/utils.py の filter_by_period / axis_bounds を対象にする。表示層
 
 from __future__ import annotations
 
-from src.utils import filter_by_period, axis_bounds
+from src.utils import filter_by_period, axis_bounds, spread_labels
 
 
 def _recs(*dates: str) -> list[dict]:
@@ -94,3 +94,43 @@ def test_axis_min_single_value_has_positive_span():
 def test_axis_no_values():
     assert axis_bounds([], "zero") == (0.0, 1.0)
     assert axis_bounds([None, None], "min") == (0.0, 1.0)
+
+
+# ---- spread_labels（円グラフ引き出し線ラベルの重なり回避） ----
+
+def test_spread_empty_and_single():
+    assert spread_labels([], 20.0, 0.0, 100.0) == []
+    assert spread_labels([50.0], 20.0, 0.0, 100.0) == [50.0]
+    # 単一要素は範囲外なら範囲内へクランプ
+    assert spread_labels([-10.0], 20.0, 0.0, 100.0) == [0.0]
+    assert spread_labels([150.0], 20.0, 0.0, 100.0) == [100.0]
+
+
+def test_spread_keeps_order_and_min_gap():
+    out = spread_labels([10.0, 12.0, 14.0], 20.0, 0.0, 400.0)
+    # 入力順を保持（昇順のまま）
+    assert out == sorted(out)
+    # 隣接は min_gap 以上
+    for a, b in zip(out, out[1:]):
+        assert b - a >= 20.0 - 1e-9
+
+
+def test_spread_no_change_when_already_spaced():
+    out = spread_labels([50.0, 100.0, 150.0], 20.0, 0.0, 400.0)
+    assert out == [50.0, 100.0, 150.0]
+
+
+def test_spread_shifts_up_when_overflowing_bottom():
+    # 下端付近に密集 → 上へシフトして範囲内に収める
+    out = spread_labels([390.0, 395.0, 399.0], 20.0, 0.0, 400.0)
+    assert out[-1] <= 400.0 + 1e-9
+    for a, b in zip(out, out[1:]):
+        assert b - a >= 20.0 - 1e-9
+
+
+def test_spread_overflow_distributes_within_range():
+    # 6個 × min_gap 30 = 180 > 範囲100 → 均等配置（全て範囲内・単調増加）
+    out = spread_labels([10.0] * 6, 30.0, 0.0, 100.0)
+    assert len(out) == 6
+    assert out[0] >= -1e-9 and out[-1] <= 100.0 + 1e-9
+    assert out == sorted(out)

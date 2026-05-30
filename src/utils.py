@@ -86,6 +86,42 @@ def filter_by_period(
     return [r for r in records if r.get(date_key) and r.get(date_key) >= cutoff_s]
 
 
+def spread_labels(
+    ideal_ys: list[float], min_gap: float, top: float, bottom: float
+) -> list[float]:
+    """円グラフ引き出し線ラベルの y 位置を、重ならないよう最小限ずらして返す。
+
+    ideal_ys は同一サイド（左 or 右）のラベルの理想 y を昇順で渡す前提。出力は
+    入力と同じ順序（＝引き出し線が同サイド内で交差しない）。隣接は min_gap 以上
+    離し、全体は [top, bottom] に収める。全ラベルが min_gap 間隔で収まらない場合は
+    範囲内へ均等配置する（重なりは許容するが画面外には出さない）。
+    """
+    n = len(ideal_ys)
+    if n == 0:
+        return []
+    if n == 1:
+        return [min(max(ideal_ys[0], top), bottom)]
+    # min_gap 間隔で全部は収まらない → 範囲内に均等配置
+    if (n - 1) * min_gap >= (bottom - top):
+        step = (bottom - top) / (n - 1)
+        return [top + i * step for i in range(n)]
+    out = list(ideal_ys)
+    # 下方向パス: 前要素と min_gap を確保
+    for i in range(1, n):
+        if out[i] < out[i - 1] + min_gap:
+            out[i] = out[i - 1] + min_gap
+    # 下端超過なら全体を上へシフト
+    if out[-1] > bottom:
+        out = [y - (out[-1] - bottom) for y in out]
+    # 上端割れを下方向へ再解決（収まる前提なので bottom は超えない）
+    if out[0] < top:
+        out[0] = top
+        for i in range(1, n):
+            if out[i] < out[i - 1] + min_gap:
+                out[i] = out[i - 1] + min_gap
+    return out
+
+
 def axis_bounds(
     values: list[float | None], baseline_mode: str
 ) -> tuple[float, float]:
