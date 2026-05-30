@@ -433,12 +433,17 @@ class PieChartWidget(QWidget):
         for side in ("left", "right"):
             grp = [e for e in entries if e[4] == side]
             grp.sort(key=lambda e: e[3])  # 円周上の y 昇順（交差防止）
+            # y_lbl はブロック中心。3行ブロックが上下にはみ出さないよう、
+            # 配置範囲は中心が取り得る上下端（= ブロック半分＋余白）に絞る。
             placed = spread_labels(
-                [e[3] for e in grp], min_gap, top=line_h, bottom=h - line_h
+                [e[3] for e in grp],
+                min_gap,
+                top=block_h / 2.0 + 2.0,
+                bottom=h - block_h / 2.0 - 2.0,
             )
             sign = 1.0 if side == "right" else -1.0
-            elbow_x = cx + sign * (r + 14.0)
-            text_x = elbow_x + sign * 6.0
+            elbow_x = cx + sign * (r + 34.0)
+            text_x = elbow_x + sign * 8.0
             for (i, tile, x_in, y_in, _side), y_lbl in zip(grp, placed):
                 color = colors[i]
                 # 引き出し線（扇色）: 円周点 → 肘 → 水平
