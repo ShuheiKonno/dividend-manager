@@ -16,7 +16,7 @@ from PySide6.QtCore import Qt, QRectF, QPoint
 from PySide6.QtGui import QColor, QPainter, QPen, QFont
 from PySide6.QtWidgets import QWidget, QFrame, QLabel, QVBoxLayout, QToolTip
 
-from .utils import fmt_number, fmt_percent, safe_float
+from .utils import fmt_number, fmt_percent, safe_float, filter_by_period, axis_bounds
 
 # 株価未取得時などチャートが空のときに中央表示する既定メッセージ
 _EMPTY_MESSAGE = "株価未取得 — 'p' で株価・配当を取得してください"
@@ -526,10 +526,14 @@ class LineChartWidget(QWidget):
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
-        self._records: list[dict] = []
+        self._records: list[dict] = []      # 全期間の元データ
         self._series: list[tuple[str, str, QColor]] = []
         self._empty_message: str = "履歴データがありません（株価を更新すると記録されます）"
-        self._max_value: float = 0.0
+        self._period: str = "all"           # 表示期間 all/10y/5y/3y/1y
+        self._baseline: str = "zero"        # Y 軸下限 zero/min
+        self._visible: list[dict] = []      # 期間フィルタ後の描画対象
+        self._floor: float = 0.0            # Y 軸下限値
+        self._top: float = 1.0              # Y 軸上限値
         self._hover_idx: int | None = None
         self.setMinimumSize(420, 320)
         self.setMouseTracking(True)
@@ -541,19 +545,38 @@ class LineChartWidget(QWidget):
         series: list[tuple[str, str, QColor]],
         empty_message: str | None = None,
     ) -> None:
+        # 期間・底辺モードは保持し、データのみ差し替える（再描画時に再計算）。
         self._records = list(records)
         self._series = list(series)
         if empty_message is not None:
             self._empty_message = empty_message
-        max_v = 0.0
-        for rec in self._records:
-            for _, key, _c in self._series:
-                v = safe_float(rec.get(key))
-                if v is not None and v > max_v:
-                    max_v = v
-        self._max_value = max_v
         self._hover_idx = None
+        self._recompute()
         self.update()
+
+    def set_period(self, period_key: str) -> None:
+        """表示期間（all/10y/5y/3y/1y）を設定して再描画する。"""
+        self._period = period_key
+        self._hover_idx = None
+        self._recompute()
+        self.update()
+
+    def set_baseline(self, mode: str) -> None:
+        """Y 軸下限モード（zero/min）を設定して再描画する。"""
+        self._baseline = mode
+        self._recompute()
+        self.update()
+
+    def _recompute(self) -> None:
+        """期間フィルタと Y 軸範囲（_visible / _floor / _top）を再計算する。"""
+        self._visible = filter_by_period(self._records, self._period)
+        values: list[float | None] = []
+        for rec in self._visible:
+            for _label, key, _color in self._series:
+                values.append(safe_float(rec.get(key)))
+        self._floor, self._top = axis_bounds(values, self._baseline)
+        if self._hover_idx is not None and self._hover_idx >= len(self._visible):
+            self._hover_idx = None
 
     # ---- 座標変換 ----
     def _plot_rect(self) -> QRectF:
@@ -566,14 +589,16 @@ class LineChartWidget(QWidget):
         )
 
     def _x_for(self, idx: int, plot: QRectF) -> float:
-        n = len(self._records)
+        n = len(self._visible)
         if n <= 1:
             return plot.left() + plot.width() / 2.0
         return plot.left() + plot.width() * idx / (n - 1)
 
     def _y_for(self, value: float, plot: QRectF) -> float:
-        top = self._max_value * 1.08 if self._max_value > 0 else 1.0
-        return plot.bottom() - plot.height() * (value / top)
+        span = self._top - self._floor
+        if span <= 0:
+            return plot.bottom()
+        return plot.bottom() - plot.height() * ((value - self._floor) / span)
 
     # ---- 描画 ----
     def paintEvent(self, event) -> None:  # noqa: N802 (Qt API)
@@ -582,7 +607,7 @@ class LineChartWidget(QWidget):
         rect = self.rect()
         painter.fillRect(rect, QColor("#1c1c1c"))
 
-        if not self._records or not self._series or self._max_value <= 0:
+        if not self._visible or not self._series or self._top <= self._floor:
             painter.setPen(QPen(QColor("#9e9e9e")))
             painter.drawText(rect, Qt.AlignmentFlag.AlignCenter, self._empty_message)
             painter.end()
@@ -592,8 +617,7 @@ class LineChartWidget(QWidget):
         small_font = QFont(self.font())
         small_font.setPointSize(max(7, self.font().pointSize() - 1))
 
-        # 横グリッド線 + Y 軸ラベル（0 〜 上限を 4 分割）
-        top_value = self._max_value * 1.08
+        # 横グリッド線 + Y 軸ラベル（下限 〜 上限を 4 分割）
         painter.setFont(small_font)
         for i in range(5):
             frac = i / 4.0
@@ -604,17 +628,17 @@ class LineChartWidget(QWidget):
             painter.drawText(
                 QRectF(0, y - 8, self._MARGIN_LEFT - 6, 16),
                 Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter,
-                _fmt_compact(top_value * frac),
+                _fmt_compact(self._floor + (self._top - self._floor) * frac),
             )
 
         # X 軸ラベル（最大 5 点の日付を等間隔に）
-        n = len(self._records)
+        n = len(self._visible)
         painter.setPen(QPen(QColor("#9e9e9e")))
         label_count = min(5, n)
         for j in range(label_count):
             idx = 0 if label_count == 1 else round(j * (n - 1) / (label_count - 1))
             x = self._x_for(idx, plot)
-            date = str(self._records[idx].get("date", ""))
+            date = str(self._visible[idx].get("date", ""))
             painter.drawText(
                 QRectF(x - 44, plot.bottom() + 4, 88, 16),
                 Qt.AlignmentFlag.AlignCenter,
@@ -626,7 +650,7 @@ class LineChartWidget(QWidget):
             pen = QPen(color, 2)
             painter.setPen(pen)
             prev: tuple[float, float] | None = None
-            for idx, rec in enumerate(self._records):
+            for idx, rec in enumerate(self._visible):
                 v = safe_float(rec.get(key))
                 if v is None:
                     prev = None
@@ -642,7 +666,7 @@ class LineChartWidget(QWidget):
             hx = self._x_for(self._hover_idx, plot)
             painter.setPen(QPen(QColor("#6f6f6f"), 1, Qt.PenStyle.DashLine))
             painter.drawLine(int(hx), int(plot.top()), int(hx), int(plot.bottom()))
-            rec = self._records[self._hover_idx]
+            rec = self._visible[self._hover_idx]
             for _label, key, color in self._series:
                 v = safe_float(rec.get(key))
                 if v is None:
@@ -687,7 +711,7 @@ class LineChartWidget(QWidget):
         if idx != self._hover_idx:
             self._hover_idx = idx
             self.update()
-        rec = self._records[idx]
+        rec = self._visible[idx]
         lines = [str(rec.get("date", ""))]
         for label, key, _color in self._series:
             v = safe_float(rec.get(key))
@@ -697,12 +721,12 @@ class LineChartWidget(QWidget):
         super().mouseMoveEvent(event)
 
     def _index_at(self, px: float) -> int | None:
-        if not self._records:
+        if not self._visible:
             return None
         plot = self._plot_rect()
         if px < plot.left() - 12 or px > plot.right() + 12:
             return None
-        n = len(self._records)
+        n = len(self._visible)
         if n <= 1:
             return 0
         frac = (px - plot.left()) / plot.width()

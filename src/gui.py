@@ -440,6 +440,10 @@ class DividendWindow(QMainWindow):
         self.withdrawal_mode: str | None = _saved.get("withdrawal_mode", None)
         self.asset_chart_type: str = _saved.get("asset_chart_type", "treemap")
         self.income_chart_type: str = _saved.get("income_chart_type", "treemap")
+        self.asset_trend_period: str = _saved.get("asset_trend_period", "all")
+        self.income_trend_period: str = _saved.get("income_trend_period", "all")
+        self.asset_trend_baseline: str = _saved.get("asset_trend_baseline", "zero")
+        self.income_trend_baseline: str = _saved.get("income_trend_baseline", "zero")
         self.holdings: list[Holding] = []
         self.market_data_map: dict = {}
         self.fx_rate: float | None = None
@@ -675,7 +679,7 @@ class DividendWindow(QMainWindow):
         right = QWidget()
         right_v = QVBoxLayout(right)
         right_v.setContentsMargins(0, 0, 0, 0)
-        right_v.addWidget(QLabel("推移"))
+        right_v.addWidget(self._make_trend_controls(kind, line_chart))
         right_v.addWidget(line_chart, 1)
         split.addWidget(left)
         split.addWidget(right)
@@ -692,18 +696,91 @@ class DividendWindow(QMainWindow):
             new_type = "pie" if to_pie else "treemap"
             if kind == "asset":
                 self.asset_chart_type = new_type
+                save_settings(asset_chart_type=new_type)
             else:
                 self.income_chart_type = new_type
-            save_settings(
-                self.dividend_mode,
-                self.withdrawal_mode,
-                self.asset_chart_type,
-                self.income_chart_type,
-            )
+                save_settings(income_chart_type=new_type)
 
         heat_btn.clicked.connect(lambda _checked=False: on_changed(False))
         pie_btn.clicked.connect(lambda _checked=False: on_changed(True))
         return tab
+
+    def _make_trend_controls(self, kind: str, line_chart: LineChartWidget) -> QWidget:
+        """推移グラフ上部の操作行（表示期間＋Y軸下限）を生成し、初期状態を適用する。
+
+        kind は "asset"/"income"。選択は self.{asset,income}_trend_{period,baseline}
+        に保持し、設定へ永続化する。初期値は __init__ で設定から読み込み済み。
+        """
+        period = self.asset_trend_period if kind == "asset" else self.income_trend_period
+        baseline = (
+            self.asset_trend_baseline if kind == "asset" else self.income_trend_baseline
+        )
+
+        bar = QWidget()
+        row = QHBoxLayout(bar)
+        row.setContentsMargins(0, 0, 0, 0)
+        row.setSpacing(4)
+        row.addWidget(QLabel("推移  期間:"))
+
+        # 期間ボタン群（排他選択）
+        period_group = QButtonGroup(bar)
+        period_defs = [
+            ("all", "全期間"), ("10y", "10年"), ("5y", "5年"),
+            ("3y", "3年"), ("1y", "1年"),
+        ]
+        for key, label in period_defs:
+            btn = QPushButton(label)
+            btn.setCheckable(True)
+            btn.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+            period_group.addButton(btn)
+            row.addWidget(btn)
+            if key == period:
+                btn.setChecked(True)
+            # clicked のみ接続（setChecked では発火しない＝初期化時の誤保存を防ぐ）。
+            btn.clicked.connect(
+                lambda _c=False, k=key: self._on_trend_period(kind, line_chart, k)
+            )
+
+        row.addSpacing(12)
+        row.addWidget(QLabel("底辺:"))
+        # Y 軸下限トグル（0から / 最低値）
+        baseline_group = QButtonGroup(bar)
+        baseline_defs = [("zero", "0から"), ("min", "最低値")]
+        for key, label in baseline_defs:
+            btn = QPushButton(label)
+            btn.setCheckable(True)
+            btn.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+            baseline_group.addButton(btn)
+            row.addWidget(btn)
+            if key == baseline:
+                btn.setChecked(True)
+            btn.clicked.connect(
+                lambda _c=False, k=key: self._on_trend_baseline(kind, line_chart, k)
+            )
+        row.addStretch()
+
+        # ボタン状態にウィジェットを同期（既定 all/zero と保存値が異なる場合に反映）。
+        line_chart.set_period(period)
+        line_chart.set_baseline(baseline)
+        return bar
+
+    def _on_trend_period(self, kind: str, line_chart: LineChartWidget, key: str) -> None:
+        line_chart.set_period(key)
+        if kind == "asset":
+            self.asset_trend_period = key
+            save_settings(asset_trend_period=key)
+        else:
+            self.income_trend_period = key
+            save_settings(income_trend_period=key)
+
+    def _on_trend_baseline(self, kind: str, line_chart: LineChartWidget, key: str) -> None:
+        line_chart.set_baseline(key)
+        if kind == "asset":
+            self.asset_trend_baseline = key
+            save_settings(asset_trend_baseline=key)
+        else:
+            self.income_trend_baseline = key
+            save_settings(income_trend_baseline=key)
 
     def _on_filter_changed(self, text: str) -> None:
         self._price_proxy.set_filter_text(text)
@@ -923,13 +1000,13 @@ class DividendWindow(QMainWindow):
     # ---- アクション ----
     def action_toggle_mode(self) -> None:
         self.dividend_mode = "net" if self.dividend_mode == "gross" else "gross"
-        save_settings(self.dividend_mode, self.withdrawal_mode)
+        save_settings(dividend_mode=self.dividend_mode)
         self._refresh_view()
 
     def action_toggle_withdrawal(self) -> None:
         cycle: dict[str | None, str | None] = {None: "fixed", "fixed": "rate", "rate": None}
         self.withdrawal_mode = cycle[self.withdrawal_mode]
-        save_settings(self.dividend_mode, self.withdrawal_mode)
+        save_settings(withdrawal_mode=self.withdrawal_mode)
         self._refresh_view()
 
     def _active_tab_key(self) -> str:

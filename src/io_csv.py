@@ -117,6 +117,20 @@ SETTINGS_PATH = DATA_DIR / "settings.json"
 _VALID_DIVIDEND_MODES = {"gross", "net"}
 _VALID_WITHDRAWAL_MODES = {None, "fixed", "rate"}
 _VALID_CHART_TYPES = {"treemap", "pie"}
+_VALID_TREND_PERIODS = {"all", "10y", "5y", "3y", "1y"}
+_VALID_BASELINES = {"zero", "min"}
+
+# 設定キー → 許容値集合。load/save 両方の検証に用いる（評価額/配当タブで独立）。
+_SETTINGS_VALIDATORS: dict[str, set] = {
+    "dividend_mode": _VALID_DIVIDEND_MODES,
+    "withdrawal_mode": _VALID_WITHDRAWAL_MODES,
+    "asset_chart_type": _VALID_CHART_TYPES,
+    "income_chart_type": _VALID_CHART_TYPES,
+    "asset_trend_period": _VALID_TREND_PERIODS,
+    "income_trend_period": _VALID_TREND_PERIODS,
+    "asset_trend_baseline": _VALID_BASELINES,
+    "income_trend_baseline": _VALID_BASELINES,
+}
 
 
 def load_settings() -> dict:
@@ -127,37 +141,28 @@ def load_settings() -> dict:
             data = json.load(f)
         if not isinstance(data, dict):
             return {}
+        # 各キーを許容値で検証し、妥当なものだけ採用する。
         result = {}
-        if data.get("dividend_mode") in _VALID_DIVIDEND_MODES:
-            result["dividend_mode"] = data["dividend_mode"]
-        wm = data.get("withdrawal_mode")
-        if wm in _VALID_WITHDRAWAL_MODES:
-            result["withdrawal_mode"] = wm
-        # 構成グラフ種別（評価額タブ・配当タブで独立）
-        if data.get("asset_chart_type") in _VALID_CHART_TYPES:
-            result["asset_chart_type"] = data["asset_chart_type"]
-        if data.get("income_chart_type") in _VALID_CHART_TYPES:
-            result["income_chart_type"] = data["income_chart_type"]
+        for key, valid in _SETTINGS_VALIDATORS.items():
+            if key in data and data[key] in valid:
+                result[key] = data[key]
         return result
     except Exception:
         return {}
 
 
-def save_settings(
-    dividend_mode: str,
-    withdrawal_mode: str | None,
-    asset_chart_type: str | None = None,
-    income_chart_type: str | None = None,
-) -> None:
+def save_settings(**updates) -> None:
+    """設定を部分更新する。既存値を読み込み、検証を通った項目のみ上書きする。
+
+    例: save_settings(dividend_mode="net") / save_settings(asset_trend_period="1y")。
+    withdrawal_mode=None は正当値（取崩なし）なので、明示指定されれば保存される。
+    """
     _ensure_dirs()
-    # 既存値を引き継ぎ、明示指定された項目のみ更新する（部分更新を許容）。
     data = load_settings()
-    data["dividend_mode"] = dividend_mode
-    data["withdrawal_mode"] = withdrawal_mode
-    if asset_chart_type in _VALID_CHART_TYPES:
-        data["asset_chart_type"] = asset_chart_type
-    if income_chart_type in _VALID_CHART_TYPES:
-        data["income_chart_type"] = income_chart_type
+    for key, value in updates.items():
+        valid = _SETTINGS_VALIDATORS.get(key)
+        if valid is not None and value in valid:
+            data[key] = value
     tmp_path = SETTINGS_PATH.with_suffix(".json.tmp")
     with tmp_path.open("w", encoding="utf-8") as f:
         json.dump(data, f, ensure_ascii=False)
