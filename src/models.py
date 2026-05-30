@@ -48,6 +48,19 @@ FX_FIELDS = [
     "source",
 ]
 
+# 資産・配当の日次スナップショット履歴（推移グラフ用）。
+# record_date は ISO 日付 "YYYY-MM-DD"（1日1レコード）。
+# Android バックアップ取込分は簿価・損益を持たない（None）。
+HISTORY_FIELDS = [
+    "record_date",
+    "total_market_value_jpy",
+    "total_book_value_jpy",
+    "total_dividend_jpy",
+    "total_benefit_jpy",
+    "total_profit_jpy",
+    "source",
+]
+
 
 @dataclass
 class Holding:
@@ -151,6 +164,43 @@ class MarketData:
             "div_forecast_as_of": self.div_forecast_as_of or "",
             "source": self.source or "",
             "fetched_at": self.fetched_at or "",
+        }
+
+
+@dataclass
+class HistoryRecord:
+    """資産・配当の日次スナップショット（推移グラフのデータ点）。"""
+
+    record_date: str  # ISO 日付 "YYYY-MM-DD"
+    total_market_value_jpy: float | None
+    total_book_value_jpy: float | None
+    total_dividend_jpy: float | None
+    total_benefit_jpy: float | None
+    total_profit_jpy: float | None
+    source: str | None
+
+    @classmethod
+    def from_dict(cls, row: dict[str, Any]) -> "HistoryRecord":
+        return cls(
+            record_date=str(row.get("record_date", "")).strip(),
+            total_market_value_jpy=safe_float(row.get("total_market_value_jpy")),
+            total_book_value_jpy=safe_float(row.get("total_book_value_jpy")),
+            total_dividend_jpy=safe_float(row.get("total_dividend_jpy")),
+            total_benefit_jpy=safe_float(row.get("total_benefit_jpy")),
+            total_profit_jpy=safe_float(row.get("total_profit_jpy")),
+            source=safe_str(row.get("source")),
+        )
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "record_date": self.record_date,
+            # 0.0 を空文字に潰さないよう None 判定で書き出す。
+            "total_market_value_jpy": _csv_num(self.total_market_value_jpy),
+            "total_book_value_jpy": _csv_num(self.total_book_value_jpy),
+            "total_dividend_jpy": _csv_num(self.total_dividend_jpy),
+            "total_benefit_jpy": _csv_num(self.total_benefit_jpy),
+            "total_profit_jpy": _csv_num(self.total_profit_jpy),
+            "source": self.source or "",
         }
 
 
