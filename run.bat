@@ -6,9 +6,11 @@ if exist ".venv\Scripts\pythonw.exe" (
     exit /b 0
 )
 
-where pythonw >nul 2>&1
+rem bare pythonw は PATH 先頭の別ツール venv (PySide6 なし) を拾うため使わない。
+rem py ランチャー (pyw) はデフォルト Python を PATH 順に依存せず選ぶ。
+where pyw >nul 2>&1
 if %errorlevel%==0 (
-    start "" pythonw app.py
+    start "" pyw -3 app.py
     exit /b 0
 )
 
