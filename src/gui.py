@@ -683,7 +683,6 @@ class DividendWindow(QMainWindow):
             ("新規 (N)", self.action_new_holding),
             ("編集 (E)", self.action_edit),
             ("削除 (D)", self.action_delete),
-            ("履歴取込", self.action_import_history),
         ]
         for label, slot in defs:
             btn = QPushButton(label)
@@ -947,8 +946,7 @@ class DividendWindow(QMainWindow):
             f"税引: {'後' if self.dividend_mode == 'net' else '前'}  収入: {withdrawal_label}   |   "
             f"USDJPY: {fmt_number(self.fx_rate, 4)}   |   "
             f"株価・配当取得: {self.market_fetched_at or 'N/A'} "
-            f"({self.market_source or 'N/A'}){missing_note}   |   "
-            f"r:再読込  m:税引前後  w:取崩切替  p:株価更新  u:USDJPY  n:新規  e:編集  d:削除  s:列ソート"
+            f"({self.market_source or 'N/A'}){missing_note}"
         )
         income_kpi_label = "年間収入" if self.withdrawal_mode is not None else "年間配当"
         self._cards["年間配当"].set_title(income_kpi_label)
