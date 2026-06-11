@@ -147,8 +147,40 @@ _VALID_TREND_PERIODS = {"all", "10y", "5y", "3y", "1y"}
 _VALID_BASELINES = {"zero", "min"}
 _VALID_INCLUDE = {"with", "without"}
 
-# 設定キー → 許容値集合。load/save 両方の検証に用いる（評価額/配当タブで独立）。
-_SETTINGS_VALIDATORS: dict[str, set] = {
+def _is_int(value: object) -> bool:
+    """厳密な int 判定（bool は int のサブクラスなので除外する）。"""
+    return type(value) is int
+
+
+def _is_number(value: object) -> bool:
+    """厳密な数値判定（bool を除く int / float のみ許容）。"""
+    return type(value) in (int, float)
+
+
+def _is_geometry(value: object) -> bool:
+    """ウィンドウジオメトリ [x, y, w, h]。x/y は負値可（マルチモニタ）、
+    w/h は 200〜10000 に制限する。"""
+    return (
+        isinstance(value, list)
+        and len(value) == 4
+        and all(_is_int(v) for v in value)
+        and 200 <= value[2] <= 10000
+        and 200 <= value[3] <= 10000
+    )
+
+
+def _is_column_widths(value: object) -> bool:
+    """テーブル列幅リスト。正の int（10〜2000 px）のみ、最大 30 要素。"""
+    return (
+        isinstance(value, list)
+        and 0 < len(value) <= 30
+        and all(_is_int(v) and 10 <= v <= 2000 for v in value)
+    )
+
+
+# 設定キー → 許容値集合 または 検証 callable。load/save 両方の検証に用いる
+# （評価額/配当タブで独立）。集合キーの検証挙動は従来と互換。
+_SETTINGS_VALIDATORS: dict[str, set | Callable[[object], bool]] = {
     "dividend_mode": _VALID_DIVIDEND_MODES,
     "withdrawal_mode": _VALID_WITHDRAWAL_MODES,
     "asset_chart_type": _VALID_CHART_TYPES,
@@ -160,7 +192,27 @@ _SETTINGS_VALIDATORS: dict[str, set] = {
     # 配当推移グラフの系列選択（優待込み/取崩込み）
     "income_benefit": _VALID_INCLUDE,
     "income_withdrawal": _VALID_INCLUDE,
+    # ウィンドウ状態の永続化（GUI が closeEvent / タブ切替時に保存する）
+    "window_geometry": _is_geometry,
+    "last_tab": lambda v: _is_int(v) and 0 <= v <= 3,
+    "pie_threshold_asset": lambda v: _is_number(v) and 0 <= v <= 20,
+    "pie_threshold_income": lambda v: _is_number(v) and 0 <= v <= 20,
+    "column_widths_price": _is_column_widths,
+    "column_widths_income": _is_column_widths,
 }
+
+
+def _is_valid_setting(key: str, value: object) -> bool:
+    """設定キーと値の組が許容されるか判定する（未知キーは常に拒否）。"""
+    validator = _SETTINGS_VALIDATORS.get(key)
+    if validator is None:
+        return False
+    if isinstance(validator, set):
+        try:
+            return value in validator
+        except TypeError:  # list 等の非ハッシュ値が紛れても全体を壊さない
+            return False
+    return bool(validator(value))
 
 
 def load_settings() -> dict:
@@ -171,10 +223,10 @@ def load_settings() -> dict:
             data = json.load(f)
         if not isinstance(data, dict):
             return {}
-        # 各キーを許容値で検証し、妥当なものだけ採用する。
+        # 各キーを検証し、妥当なものだけ採用する。
         result = {}
-        for key, valid in _SETTINGS_VALIDATORS.items():
-            if key in data and data[key] in valid:
+        for key in _SETTINGS_VALIDATORS:
+            if key in data and _is_valid_setting(key, data[key]):
                 result[key] = data[key]
         return result
     except Exception:
@@ -184,14 +236,13 @@ def load_settings() -> dict:
 def save_settings(**updates) -> None:
     """設定を部分更新する。既存値を読み込み、検証を通った項目のみ上書きする。
 
-    例: save_settings(dividend_mode="net") / save_settings(asset_trend_period="1y")。
+    例: save_settings(dividend_mode="net") / save_settings(window_geometry=[0, 0, 1180, 760])。
     withdrawal_mode=None は正当値（取崩なし）なので、明示指定されれば保存される。
     """
     _ensure_dirs()
     data = load_settings()
     for key, value in updates.items():
-        valid = _SETTINGS_VALIDATORS.get(key)
-        if valid is not None and value in valid:
+        if _is_valid_setting(key, value):
             data[key] = value
     tmp_path = SETTINGS_PATH.with_suffix(".json.tmp")
     with tmp_path.open("w", encoding="utf-8") as f:

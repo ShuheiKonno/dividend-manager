@@ -6,14 +6,20 @@
 
 from __future__ import annotations
 
-import math
 import sys
 from dataclasses import replace
-from datetime import date
 from typing import Optional
 
-from PySide6.QtCore import Qt, QObject, QThread, Signal, QSortFilterProxyModel
-from PySide6.QtGui import QStandardItemModel, QStandardItem, QShortcut, QKeySequence, QColor
+from PySide6.QtCore import Qt, QObject, QThread, Signal, QSortFilterProxyModel, QRect
+from PySide6.QtGui import (
+    QStandardItemModel,
+    QStandardItem,
+    QShortcut,
+    QKeySequence,
+    QColor,
+    QFont,
+    QGuiApplication,
+)
 from PySide6.QtWidgets import (
     QApplication,
     QMainWindow,
@@ -21,14 +27,11 @@ from PySide6.QtWidgets import (
     QVBoxLayout,
     QHBoxLayout,
     QGridLayout,
-    QFormLayout,
     QTabWidget,
     QTableView,
     QLabel,
     QLineEdit,
-    QCheckBox,
     QDialog,
-    QDialogButtonBox,
     QProgressBar,
     QAbstractItemView,
     QHeaderView,
@@ -40,8 +43,19 @@ from PySide6.QtWidgets import (
     QSplitter,
     QFileDialog,
     QComboBox,
+    QMenu,
 )
 
+# 検証ヘルパーはダイアログと共に dialogs.py へ移設した。tests/test_gui_helpers.py が
+# gui._parse_num 等を参照するため、ここで再エクスポートして互換を維持する。
+from .dialogs import (  # noqa: F401 — 再エクスポート
+    EditHoldingDialog,
+    NewHoldingDialog,
+    _non_negative,
+    _optional_iso_date,
+    _optional_rate,
+    _parse_num,
+)
 from .io_csv import (
     init_empty_files,
     load_holdings,
@@ -60,6 +74,14 @@ from .calc import compute_rows
 from .history import upsert_record, merge_records, load_android_backup, combine_income
 # market_data は yfinance / ToushinReader / pandas を芋づる式に読み込み起動を数秒遅らせる。
 # 取得は p / u キーのワーカースレッドでしか走らないため、import を run() 内へ遅延させる。
+from .theme import (
+    build_app_qss,
+    BG_INPUT,
+    FONT_FAMILY_PRIMARY,
+    FONT_SIZE_PT,
+    TEXT_STATUS,
+    TEXT_STATUS_ERROR,
+)
 from .utils import fmt_number, fmt_percent, safe_float, today_jst_str
 from .widgets import (
     TreemapWidget,
@@ -115,6 +137,17 @@ NUMERIC_SORT_COLUMNS = {
     "profit_jpy",
     "profit_rate",
 }
+
+
+def row_for_holding_index(stored_indices: list[int], holding_idx: int) -> int | None:
+    """row_holding_indices のリストから該当 holdings インデックスのソース行を探す。
+
+    見つからない場合（削除直後など）は None を返す。
+    """
+    try:
+        return stored_indices.index(holding_idx)
+    except ValueError:
+        return None
 
 
 def _format_cell(row: dict, key: str) -> tuple[str, Optional[QColor]]:
@@ -217,283 +250,15 @@ class FxWorker(QObject):
         self.finished.emit(fx)
 
 
-# ---- ダイアログ共通ヘルパー ----
-
-def _parse_num(text: str) -> float:
-    """カンマ・全角数字・円記号を除去して float に変換。空文字は 0.0 を返す。"""
-    cleaned = (
-        text.replace(",", "")
-        .replace("，", "")
-        .replace("¥", "")
-        .replace("円", "")
-        .strip()
-    )
-    if not cleaned:
-        return 0.0
-    try:
-        value = float(cleaned)
-    except ValueError as exc:
-        raise ValueError("数値の入力が正しくありません。") from exc
-    if not math.isfinite(value):
-        raise ValueError("nan / inf は入力できません。")
-    return value
-
-
-def _non_negative(value: float, label: str) -> float:
-    if value < 0:
-        raise ValueError(f"{label}は 0 以上で入力してください。")
-    return value
-
-
-def _optional_rate(value: float | None, label: str) -> float | None:
-    if value is not None and not 0 <= value <= 1:
-        raise ValueError(f"{label}は 0 以上 1 以下で入力してください。")
-    return value
-
-
-def _optional_iso_date(value: str | None) -> str | None:
-    if value is not None:
-        try:
-            date.fromisoformat(value)
-        except ValueError as exc:
-            raise ValueError("配当予想更新日は YYYY-MM-DD 形式で入力してください。") from exc
-    return value
-
-
-# ---- 編集 / 新規ダイアログ ----
-
-class EditHoldingDialog(QDialog):
-    def __init__(self, holding: Holding, parent=None) -> None:
-        super().__init__(parent)
-        self.setWindowTitle("銘柄編集")
-        self.holding = holding
-        self.result_holding: Optional[Holding] = None
-
-        form = QFormLayout()
-        self._name = QLineEdit(holding.name)
-        self._account = QLineEdit(holding.account)
-        self._shares = QLineEdit(str(holding.shares))
-        self._avg_cost = QLineEdit(str(holding.avg_cost))
-        self._div_gross = QLineEdit(
-            "" if holding.annual_div_ps_gross_override is None
-            else str(holding.annual_div_ps_gross_override)
-        )
-        self._div_net = QLineEdit(
-            "" if holding.annual_div_ps_net_override is None
-            else str(holding.annual_div_ps_net_override)
-        )
-        self._div_date = QLineEdit(holding.div_forecast_as_of_override or "")
-        self._benefit = QLineEdit(str(holding.annual_benefit_jpy))
-        self._withdrawal_fixed = QLineEdit(
-            "" if holding.withdrawal_fixed_jpy is None
-            else str(holding.withdrawal_fixed_jpy)
-        )
-        self._withdrawal_rate = QLineEdit(
-            "" if holding.withdrawal_rate is None
-            else str(holding.withdrawal_rate)
-        )
-        self._tax_rate = QLineEdit(
-            "" if holding.tax_rate is None
-            else str(holding.tax_rate)
-        )
-        self._tax_rate.setPlaceholderText("未入力=20.315%（NISA口座は0）")
-        self._active = QCheckBox("有効")
-        self._active.setChecked(holding.active)
-
-        form.addRow("銘柄名", self._name)
-        form.addRow("口座（NISA等）", self._account)
-        form.addRow("保有株数", self._shares)
-        form.addRow("取得単価", self._avg_cost)
-        form.addRow("配当(税引前) 上書き", self._div_gross)
-        form.addRow("配当(税引後) 上書き", self._div_net)
-        form.addRow("配当予想更新日 (YYYY-MM-DD)", self._div_date)
-        form.addRow("優待換算額(円/年)", self._benefit)
-        form.addRow("定額取崩額(円/年)", self._withdrawal_fixed)
-        form.addRow("定率取崩率(例: 0.04)", self._withdrawal_rate)
-        form.addRow("源泉税率(例: 0 でNISA)", self._tax_rate)
-        form.addRow("", self._active)
-
-        buttons = QDialogButtonBox()
-        buttons.addButton("保存", QDialogButtonBox.ButtonRole.AcceptRole)
-        buttons.addButton("キャンセル", QDialogButtonBox.ButtonRole.RejectRole)
-        buttons.accepted.connect(self._on_save)
-        buttons.rejected.connect(self.reject)
-
-        layout = QVBoxLayout(self)
-        layout.addLayout(form)
-        layout.addWidget(buttons)
-
-    def _on_save(self) -> None:
-        try:
-            name = self._name.text().strip()
-            shares = _non_negative(_parse_num(self._shares.text()), "保有株数")
-            avg_cost = _non_negative(_parse_num(self._avg_cost.text()), "取得単価")
-            div_gross_text = self._div_gross.text().strip()
-            div_net_text = self._div_net.text().strip()
-            div_date = _optional_iso_date(self._div_date.text().strip() or None)
-            benefit = _non_negative(_parse_num(self._benefit.text()), "優待換算額")
-            withdrawal_fixed_text = self._withdrawal_fixed.text().strip()
-            withdrawal_rate_text = self._withdrawal_rate.text().strip()
-            div_gross = (
-                _non_negative(_parse_num(div_gross_text), "配当(税引前)")
-                if div_gross_text else None
-            )
-            div_net = (
-                _non_negative(_parse_num(div_net_text), "配当(税引後)")
-                if div_net_text else None
-            )
-            withdrawal_fixed = (
-                _non_negative(_parse_num(withdrawal_fixed_text), "定額取崩額")
-                if withdrawal_fixed_text else None
-            )
-            withdrawal_rate = _optional_rate(
-                _parse_num(withdrawal_rate_text) if withdrawal_rate_text else None,
-                "定率取崩率",
-            )
-            tax_rate_text = self._tax_rate.text().strip()
-            tax_rate = _optional_rate(
-                _parse_num(tax_rate_text) if tax_rate_text else None, "源泉税率"
-            )
-            active = self._active.isChecked()
-        except ValueError as exc:
-            QMessageBox.warning(self, "入力エラー", str(exc))
-            return
-        self.holding.name = name
-        self.holding.account = self._account.text().strip()
-        self.holding.shares = shares
-        self.holding.avg_cost = avg_cost
-        self.holding.annual_div_ps_gross_override = div_gross
-        self.holding.annual_div_ps_net_override = div_net
-        self.holding.div_forecast_as_of_override = div_date
-        self.holding.annual_benefit_jpy = benefit
-        self.holding.withdrawal_fixed_jpy = withdrawal_fixed
-        self.holding.withdrawal_rate = withdrawal_rate
-        self.holding.tax_rate = tax_rate
-        self.holding.active = bool(active)
-        self.result_holding = self.holding
-        self.accept()
-
-
-class NewHoldingDialog(QDialog):
-    def __init__(self, holding: Holding, parent=None) -> None:
-        super().__init__(parent)
-        self.setWindowTitle("新規登録")
-        self.holding = holding
-        self.result_holding: Optional[Holding] = None
-
-        form = QFormLayout()
-        self._symbol = QLineEdit(holding.symbol)
-        self._symbol.setPlaceholderText("JPY株は .T 不要 / 投信は ISIN 可")
-        self._name = QLineEdit(holding.name)
-        self._account = QLineEdit(holding.account)
-        self._asset_type = QLineEdit(holding.asset_type)
-        self._currency = QLineEdit(holding.currency)
-        self._shares = QLineEdit("")
-        self._shares.setPlaceholderText("投信は口数÷10,000")
-        self._avg_cost = QLineEdit("")
-        self._avg_cost.setPlaceholderText("0")
-        self._benefit = QLineEdit("")
-        self._benefit.setPlaceholderText("0")
-        self._withdrawal_fixed = QLineEdit("")
-        self._withdrawal_rate = QLineEdit("")
-        self._tax_rate = QLineEdit("")
-        self._tax_rate.setPlaceholderText("未入力=20.315%（NISA口座は0）")
-        self._active = QCheckBox("有効")
-        self._active.setChecked(holding.active)
-
-        form.addRow("銘柄コード/ティッカー", self._symbol)
-        form.addRow("銘柄名", self._name)
-        form.addRow("口座（NISA等）", self._account)
-        form.addRow("資産種別（stock/fund）", self._asset_type)
-        form.addRow("通貨（JPY/USD）", self._currency)
-        form.addRow("保有株数", self._shares)
-        form.addRow("取得単価", self._avg_cost)
-        form.addRow("優待換算額(円/年)", self._benefit)
-        form.addRow("定額取崩額(円/年)", self._withdrawal_fixed)
-        form.addRow("定率取崩率(例: 0.04)", self._withdrawal_rate)
-        form.addRow("源泉税率(例: 0 でNISA)", self._tax_rate)
-        form.addRow("", self._active)
-
-        buttons = QDialogButtonBox()
-        buttons.addButton("追加", QDialogButtonBox.ButtonRole.AcceptRole)
-        buttons.addButton("キャンセル", QDialogButtonBox.ButtonRole.RejectRole)
-        buttons.accepted.connect(self._on_save)
-        buttons.rejected.connect(self.reject)
-
-        note = QLabel(
-            "投信(fund)は基準価額が1万口単位。保有株数には「口数÷10,000」を入力してください。\n"
-            "投信の ISIN コードは基準価額を自動取得します。"
-        )
-        note.setWordWrap(True)
-        note.setStyleSheet("color: #9e9e9e; font-size: 11px;")
-
-        layout = QVBoxLayout(self)
-        layout.addWidget(note)
-        layout.addLayout(form)
-        layout.addWidget(buttons)
-
-    def _on_save(self) -> None:
-        symbol = self._symbol.text().strip()
-        name = self._name.text().strip()
-        account = self._account.text().strip()
-        asset_type = self._asset_type.text().strip().lower() or "stock"
-        currency = self._currency.text().strip().upper() or "JPY"
-        if not symbol:
-            QMessageBox.warning(self, "入力エラー", "銘柄コードを入力してください。")
-            return
-        if asset_type not in ("stock", "fund"):
-            QMessageBox.warning(self, "入力エラー", "資産種別は stock または fund を入力してください。")
-            return
-        if currency not in ("JPY", "USD"):
-            QMessageBox.warning(self, "入力エラー", "通貨は JPY または USD を入力してください。")
-            return
-        try:
-            shares = _non_negative(_parse_num(self._shares.text()), "保有株数")
-            avg_cost = _non_negative(_parse_num(self._avg_cost.text()), "取得単価")
-            benefit = _non_negative(_parse_num(self._benefit.text()), "優待換算額")
-            withdrawal_fixed_text = self._withdrawal_fixed.text().strip()
-            withdrawal_rate_text = self._withdrawal_rate.text().strip()
-            withdrawal_fixed = (
-                _non_negative(_parse_num(withdrawal_fixed_text), "定額取崩額")
-                if withdrawal_fixed_text else None
-            )
-            withdrawal_rate = _optional_rate(
-                _parse_num(withdrawal_rate_text) if withdrawal_rate_text else None,
-                "定率取崩率",
-            )
-            tax_rate_text = self._tax_rate.text().strip()
-            tax_rate = _optional_rate(
-                _parse_num(tax_rate_text) if tax_rate_text else None, "源泉税率"
-            )
-            active = self._active.isChecked()
-        except ValueError as exc:
-            QMessageBox.warning(self, "入力エラー", str(exc))
-            return
-        self.holding.symbol = symbol
-        self.holding.name = name
-        self.holding.account = account
-        self.holding.asset_type = asset_type
-        self.holding.currency = currency
-        self.holding.shares = shares
-        self.holding.avg_cost = avg_cost
-        self.holding.annual_benefit_jpy = benefit
-        self.holding.withdrawal_fixed_jpy = withdrawal_fixed
-        self.holding.withdrawal_rate = withdrawal_rate
-        self.holding.tax_rate = tax_rate
-        self.holding.active = bool(active)
-        self.result_holding = self.holding
-        self.accept()
-
-
 # ---- メインウィンドウ ----
 
 class DividendWindow(QMainWindow):
     def __init__(self) -> None:
         super().__init__()
         self.setWindowTitle("配当管理")
-        self.resize(1180, 760)
 
         _saved = load_settings()
+        self._restore_window_geometry(_saved.get("window_geometry"))
         self.dividend_mode: str = _saved.get("dividend_mode", "gross")
         self.withdrawal_mode: str | None = _saved.get("withdrawal_mode", None)
         self.asset_chart_type: str = _saved.get("asset_chart_type", "treemap")
@@ -505,6 +270,16 @@ class DividendWindow(QMainWindow):
         # 配当推移グラフの系列選択（優待込み / 取崩込み）。既定は配当のみ。
         self.income_benefit: str = _saved.get("income_benefit", "without")
         self.income_withdrawal: str = _saved.get("income_withdrawal", "without")
+        # 円グラフの「その他」集約閾値（評価額/配当タブで独立）と起動時の表示タブ。
+        self.pie_threshold_asset: float = float(_saved.get("pie_threshold_asset", 2.0))
+        self.pie_threshold_income: float = float(_saved.get("pie_threshold_income", 2.0))
+        self._initial_tab: int = _saved.get("last_tab", 0)
+        # テーブル列幅: 保存値があれば初回描画で適用、無ければ内容に合わせて自動調整。
+        self._saved_column_widths: dict[str, list[int]] = {
+            "price": _saved.get("column_widths_price", []),
+            "income": _saved.get("column_widths_income", []),
+        }
+        self._columns_sized: dict[str, bool] = {"price": False, "income": False}
         self.holdings: list[Holding] = []
         self.market_data_map: dict = {}
         self.fx_rate: float | None = None
@@ -518,41 +293,72 @@ class DividendWindow(QMainWindow):
 
         self._build_ui()
         self._register_shortcuts()
+        self._apply_dark_title_bar()
 
         init_empty_files()
         self._reload_all()
+
+    def _restore_window_geometry(self, geometry: list | None) -> None:
+        """保存済みのウィンドウ位置・サイズを復元する（無ければ既定サイズ）。
+
+        モニタ構成の変更などで保存位置がどの画面にも掛からない場合は、
+        位置を捨ててサイズのみ適用する（画面外に出て操作不能になるのを防ぐ）。
+        """
+        if not geometry:
+            self.resize(1180, 760)
+            return
+        x, y, w, h = geometry
+        rect = QRect(x, y, w, h)
+        for screen in QGuiApplication.screens():
+            if screen.availableGeometry().intersects(rect):
+                self.setGeometry(rect)
+                return
+        self.resize(w, h)
+
+    def _save_window_state(self) -> None:
+        """ウィンドウジオメトリと列幅を設定へ保存する（正常終了時のみ呼ぶ）。"""
+        g = self.geometry()
+        self._save_or_notify(lambda: save_settings(
+            window_geometry=[g.x(), g.y(), g.width(), g.height()],
+            column_widths_price=self._column_widths(self._price_view),
+            column_widths_income=self._column_widths(self._income_view),
+        ))
+
+    @staticmethod
+    def _column_widths(view: QTableView) -> list[int]:
+        """現在の列幅を validator の許容範囲（10〜2000px）へクランプして返す。"""
+        header = view.horizontalHeader()
+        return [
+            min(2000, max(10, header.sectionSize(col)))
+            for col in range(header.count())
+        ]
+
+    def _apply_dark_title_bar(self) -> None:
+        """Windows のタイトルバーをダーク化する（DWM API、失敗しても無害）。"""
+        try:
+            import ctypes
+
+            hwnd = int(self.winId())
+            value = ctypes.c_int(1)
+            # 20 = DWMWA_USE_IMMERSIVE_DARK_MODE（Win10 20H1 以降 / Win11）
+            ctypes.windll.dwmapi.DwmSetWindowAttribute(
+                ctypes.c_void_p(hwnd), 20, ctypes.byref(value), ctypes.sizeof(value)
+            )
+        except Exception:  # noqa: BLE001 — 非 Windows や旧ビルドでは何もしない
+            pass
 
     # ---- UI 構築 ----
     def _build_ui(self) -> None:
         # アプリ全体をダークに統一（TreemapWidget の濃色背景と整合させ、
         # Win11 既定ライトテーマとの混在を避ける。テーマ切替は対象外＝固定）。
-        self.setStyleSheet(
-            "QMainWindow, QWidget { background: #1e1e1e; color: #e0e0e0; }"
-            "QTabWidget::pane { border: 1px solid #3a3a3a; }"
-            "QTabBar::tab { background: #2a2a2a; color: #c0c0c0; padding: 6px 14px; }"
-            "QTabBar::tab:selected { background: #383838; color: #ffffff; }"
-            "QTableView { background: #232323; alternate-background-color: #292929;"
-            " gridline-color: #3a3a3a; color: #e0e0e0;"
-            " selection-background-color: #37474f; }"
-            "QHeaderView::section { background: #2d2d2d; color: #d0d0d0;"
-            " padding: 4px; border: 0px; border-right: 1px solid #3a3a3a; }"
-            "QStatusBar { background: #2a2a2a; color: #cfcfcf; }"
-            "QProgressBar { border: 1px solid #3a3a3a; background: #232323;"
-            " color: #e0e0e0; text-align: center; }"
-            "QProgressBar::chunk { background: #1565c0; }"
-            "QLineEdit { background: #2a2a2a; color: #e0e0e0;"
-            " border: 1px solid #3a3a3a; padding: 3px; }"
-            "QDialog { background: #1e1e1e; color: #e0e0e0; }"
-            "QPushButton { background: #2f2f2f; color: #e0e0e0;"
-            " border: 1px solid #4a4a4a; padding: 5px 12px; border-radius: 4px; }"
-            "QPushButton:hover { background: #3a3a3a; }"
-            "QToolTip { background: #2a2a2a; color: #f0f0f0; border: 1px solid #555; }"
-        )
+        # 配色・フォント等のトークンと QSS 生成は src/theme.py に集約。
+        self.setStyleSheet(build_app_qss())
+        self._build_menubar()
         central = QWidget()
         root = QVBoxLayout(central)
 
         self._info = QLabel("")
-        self._info.setStyleSheet("color: #bdbdbd; padding: 4px 2px;")
+        self._info.setObjectName("infoLabel")
         root.addWidget(self._info)
 
         self._build_button_bar(root)
@@ -611,7 +417,10 @@ class DividendWindow(QMainWindow):
         self._income_view, self._income_model, self._income_proxy = self._make_table(INCOME_COLUMNS)
         self._tabs.addTab(self._price_view, "株価関連")
         self._tabs.addTab(self._income_view, "配当関連")
-        self._tabs.currentChanged.connect(lambda _i: self._refresh_view())
+        # 前回終了時のタブを復元してからシグナル接続する（起動時の無駄な保存を避ける）。
+        if 0 <= self._initial_tab < self._tabs.count():
+            self._tabs.setCurrentIndex(self._initial_tab)
+        self._tabs.currentChanged.connect(self._on_tab_changed)
         root.addWidget(self._tabs, 1)
 
         self.setCentralWidget(central)
@@ -620,6 +429,68 @@ class DividendWindow(QMainWindow):
         self._progress.setMaximumWidth(260)
         self._progress.setVisible(False)
         self.statusBar().addPermanentWidget(self._progress)
+
+    def _build_menubar(self) -> None:
+        """薄いメニューバーを構築する（低頻度機能とショートカット一覧の置き場）。
+
+        一文字ショートカットは _register_shortcuts の QShortcut（入力中ガード付き）が
+        唯一の登録元のため、QAction にはショートカットを設定しない（二重登録すると
+        Ambiguous shortcut とガード回避が起きる）。ラベル末尾の (X) は対応キーの表記。
+        メニュータイトルの &F 等は Alt 系ニーモニックで一文字キーとは衝突しない。
+        """
+        bar = self.menuBar()
+
+        def add(menu, label: str, slot):
+            action = menu.addAction(label)
+            # triggered は checked(bool) を渡すため、引数なしスロットへはラムダで吸収する。
+            action.triggered.connect(lambda _checked=False, s=slot: s())
+            return action
+
+        file_menu = bar.addMenu("ファイル(&F)")
+        add(file_menu, "履歴取込 (JSON)...", self.action_import_history)
+        file_menu.addSeparator()
+        add(file_menu, "終了 (Q)", self.close)
+
+        data_menu = bar.addMenu("データ(&D)")
+        add(data_menu, "株価・配当更新 (P)", self.action_update_market)
+        add(data_menu, "USDJPY更新 (U)", self.action_update_fx)
+        add(data_menu, "再読込 (R)", self._reload_all)
+        data_menu.addSeparator()
+        add(data_menu, "新規登録 (N)", self.action_new_holding)
+        add(data_menu, "編集 (E)", self.action_edit)
+        add(data_menu, "削除 (D)", self.action_delete)
+
+        view_menu = bar.addMenu("表示(&V)")
+        add(view_menu, "税引前後の切替 (M)", self.action_toggle_mode)
+        add(view_menu, "取崩モードの切替 (W)", self.action_toggle_withdrawal)
+        view_menu.addSeparator()
+        tab_labels = ["評価額 (1)", "配当金 (2)", "株価関連 (3)", "配当関連 (4)"]
+        for i, label in enumerate(tab_labels):
+            add(view_menu, label, lambda idx=i: self._tabs.setCurrentIndex(idx))
+
+        help_menu = bar.addMenu("ヘルプ(&H)")
+        add(help_menu, "キーボードショートカット一覧...", self._show_shortcut_help)
+
+    def _show_shortcut_help(self) -> None:
+        """キーボードショートカットの一覧を表示する。"""
+        QMessageBox.information(
+            self,
+            "キーボードショートカット",
+            "Q: 終了\n"
+            "R: 再読込\n"
+            "M: 税引前後の切替\n"
+            "W: 取崩モードの切替\n"
+            "P: 株価・配当の更新\n"
+            "U: USDJPYレートの更新\n"
+            "N: 新規登録\n"
+            "E: 選択銘柄の編集（ダブルクリックでも可）\n"
+            "D: 選択銘柄の削除\n"
+            "S: カーソル列でソート\n"
+            "1〜4: タブ切替（評価額 / 配当金 / 株価関連 / 配当関連）\n"
+            "Ctrl+F: 絞り込みボックスへフォーカス\n"
+            "Esc: 絞り込みのクリア\n"
+            "\n※テキスト入力中は一文字ショートカットが無効になります。",
+        )
 
     def _make_table(self, columns: list[tuple[str, str]]):
         model = QStandardItemModel()
@@ -639,14 +510,47 @@ class DividendWindow(QMainWindow):
         view.verticalHeader().setVisible(False)
         view.sortByColumn(0, Qt.SortOrder.AscendingOrder)
         view.doubleClicked.connect(lambda _idx: self.action_edit())
+        view.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        view.customContextMenuRequested.connect(
+            lambda pos, v=view: self._show_table_context_menu(v, pos)
+        )
         return view, model, proxy
 
-    def _make_pie_tab(self, piechart: PieChartWidget) -> QWidget:
+    def _show_table_context_menu(self, view: QTableView, pos) -> None:
+        """テーブルの右クリックメニュー（編集/削除/新規登録）を表示する。
+
+        右クリックされた行を選択してから表示するため、既存の action_edit /
+        action_delete（現在選択行を対象とする）がそのまま機能する。
+        """
+        idx = view.indexAt(pos)
+        if idx.isValid():
+            view.selectRow(idx.row())
+        has_row = view.currentIndex().isValid()
+        menu = QMenu(self)
+        act_edit = menu.addAction("編集 (E)")
+        act_delete = menu.addAction("削除 (D)")
+        menu.addSeparator()
+        act_new = menu.addAction("新規登録 (N)")
+        act_edit.setEnabled(has_row)
+        act_delete.setEnabled(has_row)
+        chosen = menu.exec(view.viewport().mapToGlobal(pos))
+        if chosen is act_edit:
+            self.action_edit()
+        elif chosen is act_delete:
+            self.action_delete()
+        elif chosen is act_new:
+            self.action_new_holding()
+
+    def _make_pie_tab(self, kind: str, piechart: PieChartWidget) -> QWidget:
         """閾値スピンボックス付きの円グラフコンテナを生成して返す。
 
-        スピンボックスの値変更を piechart.set_threshold に接続する。評価額用・
-        配当用それぞれが独立した閾値を持てるよう、チャート単位で生成する。
+        kind は "asset" / "income"。閾値は self.pie_threshold_{kind} から
+        初期化し、変更を piechart.set_threshold と設定保存の両方へ流す。
+        評価額用・配当用それぞれが独立した閾値を持てるよう、チャート単位で生成する。
         """
+        initial = (
+            self.pie_threshold_asset if kind == "asset" else self.pie_threshold_income
+        )
         container = QWidget()
         layout = QVBoxLayout(container)
         layout.setContentsMargins(0, 4, 0, 0)
@@ -655,7 +559,7 @@ class DividendWindow(QMainWindow):
         row.addWidget(QLabel("その他にまとめる閾値:"))
         spin = QDoubleSpinBox()
         spin.setRange(0.0, 20.0)
-        spin.setValue(2.0)
+        spin.setValue(initial)
         spin.setSuffix(" %")
         spin.setSingleStep(0.5)
         spin.setDecimals(1)
@@ -664,7 +568,19 @@ class DividendWindow(QMainWindow):
         row.addStretch()
         layout.addLayout(row)
         layout.addWidget(piechart, 1)
-        spin.valueChanged.connect(piechart.set_threshold)
+        piechart.set_threshold(initial)
+
+        def on_threshold(value: float) -> None:
+            piechart.set_threshold(value)
+            if kind == "asset":
+                self.pie_threshold_asset = value
+                self._save_or_notify(lambda: save_settings(pie_threshold_asset=value))
+            else:
+                self.pie_threshold_income = value
+                self._save_or_notify(lambda: save_settings(pie_threshold_income=value))
+
+        # setValue(initial) より後に接続する（初期化時の無駄な保存を避ける）。
+        spin.valueChanged.connect(on_threshold)
         return container
 
     def _build_button_bar(self, root: QVBoxLayout) -> None:
@@ -732,8 +648,8 @@ class DividendWindow(QMainWindow):
 
         # 構成グラフ（QStackedWidget でヒートマップ/円グラフを切替）
         stack = QStackedWidget()
-        stack.addWidget(treemap)                       # index 0 = ヒートマップ
-        stack.addWidget(self._make_pie_tab(piechart))  # index 1 = 円グラフ（閾値付き）
+        stack.addWidget(treemap)                             # index 0 = ヒートマップ
+        stack.addWidget(self._make_pie_tab(kind, piechart))  # index 1 = 円グラフ（閾値付き）
         chart_type = self.asset_chart_type if kind == "asset" else self.income_chart_type
         stack.setCurrentIndex(1 if chart_type == "pie" else 0)
 
@@ -853,6 +769,11 @@ class DividendWindow(QMainWindow):
         self._price_proxy.set_filter_text(text)
         self._income_proxy.set_filter_text(text)
 
+    def _on_tab_changed(self, index: int) -> None:
+        """タブ切替時に再描画し、最後に開いたタブとして設定へ保存する。"""
+        self._save_or_notify(lambda: save_settings(last_tab=index))
+        self._refresh_view()
+
     def _register_shortcuts(self) -> None:
         binds = [
             ("Q", self.close),
@@ -872,6 +793,26 @@ class DividendWindow(QMainWindow):
         ]
         for key, slot in binds:
             QShortcut(QKeySequence(key), self, activated=self._guard_shortcut(slot))
+        # 修飾キー付き・Esc は入力中でも安全なためガード無しで直結する。
+        QShortcut(QKeySequence("Ctrl+F"), self, activated=self._focus_filter)
+        QShortcut(QKeySequence(Qt.Key.Key_Escape), self, activated=self._on_escape)
+
+    def _focus_filter(self) -> None:
+        """絞り込みボックスへフォーカスを移す（Ctrl+F）。"""
+        self._filter.setFocus()
+        self._filter.selectAll()
+
+    def _on_escape(self) -> None:
+        """Esc: フィルタ入力があればクリアし、フィルタ編集中ならテーブルへ戻す。"""
+        if self._filter.text():
+            self._filter.clear()
+            return
+        if self._filter.hasFocus():
+            tab_key = self._active_tab_key()
+            if tab_key == "dashboard":
+                self._tabs.setFocus()
+            else:
+                self._view_for_tab(tab_key).setFocus()
 
     def _guard_shortcut(self, slot):
         """テキスト/数値入力中は単一キーショートカットを無効化するラッパを返す。
@@ -881,7 +822,7 @@ class DividendWindow(QMainWindow):
         """
         def wrapper() -> None:
             focus = QApplication.focusWidget()
-            if isinstance(focus, (QLineEdit, QAbstractSpinBox)):
+            if isinstance(focus, (QLineEdit, QAbstractSpinBox, QComboBox)):
                 return
             slot()
         return wrapper
@@ -1080,6 +1021,7 @@ class DividendWindow(QMainWindow):
         self._notify(f"履歴を取り込みました（新規 {added} 日分 / 計 {len(self.history)} 日分）")
 
     def _render_table(self, tab_key, columns, model, view, rows, holding_indices: list[int] | None = None) -> None:
+        state = self._capture_table_state(tab_key)
         header = view.horizontalHeader()
         sort_col = header.sortIndicatorSection()
         sort_order = header.sortIndicatorOrder()
@@ -1103,7 +1045,65 @@ class DividendWindow(QMainWindow):
             stored_indices.append(holding_indices[i] if holding_indices is not None else i)
         self.row_holding_indices[tab_key] = stored_indices
         view.sortByColumn(sort_col, sort_order)
-        view.resizeColumnsToContents()
+        self._size_columns_once(tab_key, view)
+        self._restore_table_state(tab_key, state)
+
+    def _size_columns_once(self, tab_key: str, view: QTableView) -> None:
+        """列幅を初回描画時のみ調整する（以降はユーザーの手動調整幅を維持）。
+
+        保存済みの列幅（前回終了時）があればそれを適用し、無ければ内容に合わせる。
+        """
+        if self._columns_sized[tab_key]:
+            return
+        self._columns_sized[tab_key] = True
+        saved = self._saved_column_widths.get(tab_key) or []
+        if saved:
+            header = view.horizontalHeader()
+            for col in range(min(len(saved), header.count())):
+                header.resizeSection(col, saved[col])
+        else:
+            view.resizeColumnsToContents()
+
+    def _capture_table_state(self, tab_key: str) -> dict:
+        """再描画前の選択行（holdings インデックス）とスクロール位置を取得する。"""
+        view = self._view_for_tab(tab_key)
+        proxy = self._proxy_for_tab(tab_key)
+        state: dict = {
+            "holding_idx": None,
+            "view_row": None,
+            "scroll": view.verticalScrollBar().value(),
+        }
+        idx = view.currentIndex()
+        if idx.isValid():
+            state["view_row"] = idx.row()
+            src_row = proxy.mapToSource(idx).row()
+            indices = self.row_holding_indices[tab_key]
+            if 0 <= src_row < len(indices):
+                state["holding_idx"] = indices[src_row]
+        return state
+
+    def _restore_table_state(self, tab_key: str, state: dict) -> None:
+        """再描画後に選択行とスクロール位置を復元する。
+
+        元の銘柄（holdings インデックス）を最優先で選択し直し、削除などで
+        見つからない場合は元の視覚行位置へフォールバックする。
+        """
+        view = self._view_for_tab(tab_key)
+        proxy = self._proxy_for_tab(tab_key)
+        target_row: int | None = None
+        if state.get("holding_idx") is not None:
+            src_row = row_for_holding_index(
+                self.row_holding_indices[tab_key], state["holding_idx"]
+            )
+            if src_row is not None:
+                proxy_idx = proxy.mapFromSource(proxy.sourceModel().index(src_row, 0))
+                if proxy_idx.isValid():
+                    target_row = proxy_idx.row()
+        if target_row is None and state.get("view_row") is not None and proxy.rowCount() > 0:
+            target_row = min(state["view_row"], proxy.rowCount() - 1)
+        if target_row is not None and target_row >= 0:
+            view.selectRow(target_row)
+        view.verticalScrollBar().setValue(state.get("scroll", 0))
 
     # ---- アクション ----
     def action_toggle_mode(self) -> None:
@@ -1229,7 +1229,26 @@ class DividendWindow(QMainWindow):
                 return
             self.holdings = holdings
             self._reload_all()
+            self._select_holding_row(len(self.holdings) - 1)
             self._notify("銘柄を追加しました")
+
+    def _select_holding_row(self, holding_idx: int) -> None:
+        """指定 holdings インデックスの行を現在のテーブルタブで選択・表示する。
+
+        ダッシュボードタブ表示中や、フィルタで対象行が非表示の場合は何もしない。
+        """
+        tab_key = self._active_tab_key()
+        if tab_key == "dashboard":
+            return
+        view = self._view_for_tab(tab_key)
+        proxy = self._proxy_for_tab(tab_key)
+        src_row = row_for_holding_index(self.row_holding_indices[tab_key], holding_idx)
+        if src_row is None:
+            return
+        proxy_idx = proxy.mapFromSource(proxy.sourceModel().index(src_row, 0))
+        if proxy_idx.isValid():
+            view.selectRow(proxy_idx.row())
+            view.scrollTo(proxy_idx)
 
     # ---- バックグラウンド取得 ----
     def _start_worker(self, worker: QObject, on_finished, on_progress=None) -> None:
@@ -1274,6 +1293,9 @@ class DividendWindow(QMainWindow):
         if thread is not None and thread.isRunning():
             thread.quit()
             thread.wait(3000)
+        # 正常終了が確定したパスでのみウィンドウ状態を保存する
+        # （busy で ignore した場合は保存しない）。
+        self._save_window_state()
         event.accept()
 
     def action_update_market(self) -> None:
@@ -1345,8 +1367,8 @@ class DividendWindow(QMainWindow):
 
     def _notify(self, message: str, error: bool = False) -> None:
         # エラーは警告色＋⚠ で差別化。通常通知のたびに既定色へ戻す。
-        color = "#ff8a80" if error else "#cfcfcf"
-        self.statusBar().setStyleSheet(f"QStatusBar {{ background: #2a2a2a; color: {color}; }}")
+        color = TEXT_STATUS_ERROR if error else TEXT_STATUS
+        self.statusBar().setStyleSheet(f"QStatusBar {{ background: {BG_INPUT}; color: {color}; }}")
         self.statusBar().showMessage(f"⚠ {message}" if error else message, 6000)
 
     def _save_or_notify(self, action) -> bool:
@@ -1368,6 +1390,12 @@ def _ensure_app() -> QApplication:
     app = QApplication.instance()
     if app is None:
         app = QApplication(sys.argv)
+    # Fusion は QSS と相性が良く、矢印等の複合サブコントロールが崩れない
+    # （Windows 既定スタイルは部分的な QSS 適用で描画が乱れることがある）。
+    app.setStyle("Fusion")
+    # QSS の font-family は QPainter 直描画（チャート類の self.font()）へ
+    # 反映されないため、アプリ既定フォントも同じ族で揃える。
+    app.setFont(QFont(FONT_FAMILY_PRIMARY, FONT_SIZE_PT))
     return app
 
 

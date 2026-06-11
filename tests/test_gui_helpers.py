@@ -57,6 +57,13 @@ def test_parse_num_rejects_non_finite_values():
     assert math.isfinite(gui._parse_num("１２３"))
 
 
+def test_row_for_holding_index():
+    assert gui.row_for_holding_index([2, 5, 7], 5) == 1
+    assert gui.row_for_holding_index([2, 5, 7], 2) == 0
+    assert gui.row_for_holding_index([2, 5, 7], 9) is None  # 削除後など対象なし
+    assert gui.row_for_holding_index([], 0) is None
+
+
 def test_rate_and_date_validation():
     assert gui._optional_rate(0.0, "率") == 0.0
     assert gui._optional_rate(1.0, "率") == 1.0
