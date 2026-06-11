@@ -16,6 +16,7 @@ from PySide6.QtCore import Qt, QRectF, QPoint
 from PySide6.QtGui import QColor, QPainter, QPen, QFont
 from PySide6.QtWidgets import QWidget, QFrame, QLabel, QVBoxLayout, QToolTip
 
+from .theme import CHART_BG
 from .utils import (
     fmt_number,
     fmt_percent,
@@ -155,6 +156,7 @@ class TreemapWidget(QWidget):
         self._tiles: list[dict] = []
         self._total: float = 0.0
         self._rects: list[tuple[QRectF, dict]] = []
+        self._hover_tile: dict | None = None  # マウスホバー中のタイル（強調表示用）
         self._value_key: str = "market_value_jpy"
         self._value_label: str = "評価額"
         self._empty_message: str = _EMPTY_MESSAGE
@@ -185,6 +187,7 @@ class TreemapWidget(QWidget):
         self._tiles = tiles
         self._total = sum(float(t[value_key]) for t in tiles)
         self._rects = []
+        self._hover_tile = None  # データ差し替え時に古いタイル参照を残さない
         self.update()
 
     # ---- 描画 ----
@@ -192,7 +195,7 @@ class TreemapWidget(QWidget):
         painter = QPainter(self)
         painter.setRenderHint(QPainter.RenderHint.Antialiasing, False)
         rect = self.rect()
-        painter.fillRect(rect, QColor("#1c1c1c"))
+        painter.fillRect(rect, QColor(CHART_BG))
 
         if not self._tiles or self._total <= 0:
             painter.setPen(QPen(QColor("#9e9e9e")))
@@ -211,6 +214,7 @@ class TreemapWidget(QWidget):
         layout = _squarify(scaled, 0.0, 0.0, w, h)
 
         self._rects = []
+        hover_rect: QRectF | None = None
         small_font = QFont(self.font())
         for tile, (rx, ry, rw, rh) in zip(self._tiles, layout):
             if rw <= 0 or rh <= 0:
@@ -219,6 +223,10 @@ class TreemapWidget(QWidget):
             self._rects.append((qrect, tile))
 
             bg, fg = profit_tile_colors(tile.get("profit_rate"))
+            # ホバー中のタイルは背景をわずかに明るく（色決定はヘルパー経由を維持）。
+            if tile is self._hover_tile:
+                bg = bg.lighter(115)
+                hover_rect = qrect
             painter.fillRect(qrect, bg)
             painter.setPen(QPen(_BORDER, 1))
             painter.drawRect(qrect.adjusted(0.5, 0.5, -0.5, -0.5))
@@ -267,12 +275,19 @@ class TreemapWidget(QWidget):
                         Qt.AlignmentFlag.AlignCenter,
                         mv_str,
                     )
+        # ホバー枠は隣接タイルの枠線に潰されないよう、全タイル描画後に上描きする。
+        if hover_rect is not None:
+            painter.setPen(QPen(_WHITE, 2))
+            painter.drawRect(hover_rect.adjusted(1, 1, -1, -1))
         painter.end()
 
-    # ---- ホバー: ツールチップで詳細表示 ----
+    # ---- ホバー: タイル強調＋ツールチップで詳細表示 ----
     def mouseMoveEvent(self, event) -> None:  # noqa: N802 (Qt API)
         pos = event.position().toPoint() if hasattr(event, "position") else event.pos()
         tile = self._tile_at(pos)
+        if tile is not self._hover_tile:
+            self._hover_tile = tile
+            self.update()
         if tile is None:
             QToolTip.hideText()
         else:
@@ -286,6 +301,13 @@ class TreemapWidget(QWidget):
             )
             QToolTip.showText(event.globalPosition().toPoint(), text, self)
         super().mouseMoveEvent(event)
+
+    def leaveEvent(self, event) -> None:  # noqa: N802 (Qt API)
+        if self._hover_tile is not None:
+            self._hover_tile = None
+            self.update()
+        QToolTip.hideText()
+        super().leaveEvent(event)
 
     def _tile_at(self, pos: QPoint) -> dict | None:
         for qrect, tile in self._rects:
@@ -371,7 +393,7 @@ class PieChartWidget(QWidget):
         painter = QPainter(self)
         painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
         rect = self.rect()
-        painter.fillRect(rect, QColor("#1c1c1c"))
+        painter.fillRect(rect, QColor(CHART_BG))
 
         if not self._tiles or self._total <= 0:
             painter.setPen(QPen(QColor("#9e9e9e")))
@@ -401,7 +423,7 @@ class PieChartWidget(QWidget):
         for i, tile in enumerate(display_tiles):
             span = float(tile[self._value_key]) / self._total * 360.0
             painter.setBrush(colors[i])
-            painter.setPen(QPen(QColor("#1c1c1c"), 1.5))
+            painter.setPen(QPen(QColor(CHART_BG), 1.5))
             painter.drawPie(pie_rect, int(current * 16), -int(span * 16))  # 負値 = 時計回り
             self._segments.append((current, span, tile))
             current -= span  # 時計回り = 角度を減算
@@ -635,7 +657,7 @@ class LineChartWidget(QWidget):
         painter = QPainter(self)
         painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
         rect = self.rect()
-        painter.fillRect(rect, QColor("#1c1c1c"))
+        painter.fillRect(rect, QColor(CHART_BG))
 
         if not self._visible or not self._series or self._top <= self._floor:
             painter.setPen(QPen(QColor("#9e9e9e")))
@@ -708,7 +730,7 @@ class LineChartWidget(QWidget):
                     continue
                 hy = self._y_for(v, plot)
                 painter.setBrush(color)
-                painter.setPen(QPen(QColor("#1c1c1c"), 1))
+                painter.setPen(QPen(QColor(CHART_BG), 1))
                 painter.drawEllipse(QRectF(hx - 3.5, hy - 3.5, 7, 7))
 
         # 凡例（右上）
@@ -774,18 +796,15 @@ class KpiCard(QFrame):
 
     def __init__(self, title: str, parent: QWidget | None = None) -> None:
         super().__init__(parent)
+        # 見た目はグローバル QSS（theme.build_app_qss の #kpiCard 系セレクタ）に集約。
         self.setObjectName("kpiCard")
-        self.setStyleSheet(
-            "#kpiCard { background: #2a2a2a; border: 1px solid #3f3f3f; "
-            "border-radius: 6px; }"
-        )
         layout = QVBoxLayout(self)
-        layout.setContentsMargins(10, 6, 10, 6)
+        layout.setContentsMargins(12, 8, 12, 8)
         layout.setSpacing(2)
         self._title = QLabel(title)
-        self._title.setStyleSheet("color: #9e9e9e; font-size: 11px;")
+        self._title.setObjectName("kpiTitle")
         self._value = QLabel("—")
-        self._value.setStyleSheet("color: #f5f5f5; font-size: 16px; font-weight: bold;")
+        self._value.setObjectName("kpiValue")
         layout.addWidget(self._title)
         layout.addWidget(self._value)
 
@@ -794,7 +813,5 @@ class KpiCard(QFrame):
 
     def set_value(self, text: str, color: QColor | None = None) -> None:
         self._value.setText(text)
-        hex_color = color.name() if color is not None else "#f5f5f5"
-        self._value.setStyleSheet(
-            f"color: {hex_color}; font-size: 16px; font-weight: bold;"
-        )
+        # 損益などの動的色のみインラインで上書きし、既定色はグローバル QSS に任せる。
+        self._value.setStyleSheet(f"color: {color.name()};" if color is not None else "")
