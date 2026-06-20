@@ -1,17 +1,15 @@
 """履歴ロジック（src/history.py）と HistoryRecord の検証（PySide6 非依存）。
 
-Android バックアップ取込のマッピング・日付変換、日付キーのマージ/upsert、
-CSV ラウンドトリップを確認する。
+日付キーのマージ/upsert、配当系列の合成、CSV ラウンドトリップを確認する。
+履歴 CSV の取込（read_history_csv）は tests/test_io_csv.py で検証する。
 """
 
 from __future__ import annotations
 
 from src.history import (
-    parse_android_backup,
     merge_records,
     upsert_record,
     combine_income,
-    _android_date_to_iso,
 )
 from src.models import HistoryRecord
 
@@ -31,69 +29,6 @@ def _rec(date: str, **kw) -> HistoryRecord:
     return HistoryRecord(**base)
 
 
-# ---- 日付変換 ----
-
-def test_android_date_to_iso():
-    assert _android_date_to_iso("Jun 27, 2024 00:00:00") == "2024-06-27"
-    assert _android_date_to_iso("May 30, 2026 00:00:00") == "2026-05-30"
-    assert _android_date_to_iso("不正な日付") is None
-
-
-# ---- Android バックアップ取込 ----
-
-def test_parse_android_backup_maps_main_only():
-    data = [
-        {
-            "portfolioId": "main",
-            "recordDate": "Jun 27, 2024 00:00:00",
-            "japaneseStockValue": 7.1404e7,
-            "usStockValue": 1.0171358e7,
-            "investmentTrustValue": 3629058.6486,
-            "totalHaitouKin": 2835193,
-            "totalShareholderBenefit": 0,
-        },
-        # main 以外は無視
-        {
-            "portfolioId": "portfolio2",
-            "recordDate": "Jun 27, 2024 00:00:00",
-            "japaneseStockValue": 999.0,
-            "totalHaitouKin": 999,
-        },
-    ]
-    records = parse_android_backup(data)
-    assert len(records) == 1
-    r = records[0]
-    assert r.record_date == "2024-06-27"
-    assert r.total_market_value_jpy == 7.1404e7 + 1.0171358e7 + 3629058.6486
-    assert r.total_dividend_jpy == 2835193
-    # 優待 0 は None（無し）として扱う
-    assert r.total_benefit_jpy is None
-    # JSON に簿価・損益・取崩収入は無い
-    assert r.total_book_value_jpy is None
-    assert r.total_profit_jpy is None
-    assert r.total_withdrawal_income_jpy is None
-    assert r.source == "android_backup"
-
-
-def test_parse_android_backup_skips_all_zero():
-    data = [
-        {
-            "portfolioId": "main",
-            "recordDate": "Jun 28, 2024 00:00:00",
-            "japaneseStockValue": 0.0,
-            "usStockValue": 0.0,
-            "investmentTrustValue": 0.0,
-            "totalHaitouKin": 0,
-            "totalShareholderBenefit": 0,
-        }
-    ]
-    assert parse_android_backup(data) == []
-
-
-def test_parse_android_backup_non_list():
-    assert parse_android_backup({"not": "a list"}) == []
-
-
 # ---- マージ / upsert ----
 
 def test_upsert_replaces_same_date():
@@ -107,8 +42,8 @@ def test_upsert_replaces_same_date():
 def test_merge_prefer_existing_keeps_original():
     existing = [_rec("2024-06-27", total_market_value_jpy=100.0, source="app")]
     incoming = [
-        _rec("2024-06-27", total_market_value_jpy=999.0, source="android_backup"),
-        _rec("2024-06-26", total_market_value_jpy=50.0, source="android_backup"),
+        _rec("2024-06-27", total_market_value_jpy=999.0, source="csv"),
+        _rec("2024-06-26", total_market_value_jpy=50.0, source="csv"),
     ]
     result = merge_records(existing, incoming, prefer="existing")
     by_date = {r.record_date: r for r in result}

@@ -22,6 +22,34 @@ def today_jst_str() -> str:
     return now_jst().date().isoformat()
 
 
+def normalize_iso_date(raw: object) -> str | None:
+    """日付文字列を ISO 形式 "YYYY-MM-DD" に正規化する。解析不能なら None。
+
+    取込 CSV を Excel で再保存すると "2024/1/1" や "2024-1-1" のように
+    区切り・ゼロ埋めが崩れることがある。そのまま履歴へ保存すると
+    filter_by_period の date.fromisoformat が ValueError を投げるため、
+    取込時にここで ISO へ正規化し、復元不能な値は呼び出し側で除外する。
+    """
+    if raw is None:
+        return None
+    text = str(raw).strip()
+    if not text:
+        return None
+    try:
+        return date.fromisoformat(text).isoformat()
+    except ValueError:
+        pass
+    for sep in ("/", "-", "."):
+        parts = text.split(sep)
+        if len(parts) == 3:
+            try:
+                year, month, day = (int(p) for p in parts)
+                return date(year, month, day).isoformat()
+            except (ValueError, TypeError):
+                continue
+    return None
+
+
 def safe_float(value: Any) -> float | None:
     if value is None:
         return None

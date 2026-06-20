@@ -68,10 +68,14 @@ from .io_csv import (
     save_settings,
     load_history,
     save_history,
+    export_holdings_csv,
+    export_history_csv,
+    read_history_csv,
+    read_holdings_csv,
 )
 from .models import Holding, HistoryRecord
 from .calc import compute_rows
-from .history import upsert_record, merge_records, load_android_backup, combine_income
+from .history import upsert_record, merge_records, combine_income
 # market_data は yfinance / ToushinReader / pandas を芋づる式に読み込み起動を数秒遅らせる。
 # 取得は p / u キーのワーカースレッドでしか走らないため、import を run() 内へ遅延させる。
 from .theme import (
@@ -447,7 +451,12 @@ class DividendWindow(QMainWindow):
             return action
 
         file_menu = bar.addMenu("ファイル(&F)")
-        add(file_menu, "履歴取込 (JSON)...", self.action_import_history)
+        export_menu = file_menu.addMenu("エクスポート (CSV)")
+        add(export_menu, "保有銘柄...", self.action_export_holdings)
+        add(export_menu, "推移履歴...", self.action_export_history)
+        import_menu = file_menu.addMenu("インポート (CSV)")
+        add(import_menu, "保有銘柄...", self.action_import_holdings)
+        add(import_menu, "推移履歴...", self.action_import_history)
         file_menu.addSeparator()
         add(file_menu, "終了 (Q)", self.close)
 
@@ -917,7 +926,7 @@ class DividendWindow(QMainWindow):
         hist_dicts = self._history_as_dicts()
         self._asset_line.set_data(
             hist_dicts, ASSET_TREND_SERIES,
-            empty_message="評価額の履歴がありません（株価更新か『履歴取込』で記録されます）",
+            empty_message="評価額の履歴がありません（株価更新か『インポート』で記録されます）",
         )
         with_benefit = self.income_benefit == "with"
         with_withdrawal = self.income_withdrawal == "with"
@@ -929,7 +938,7 @@ class DividendWindow(QMainWindow):
         label = self._income_trend_label(with_benefit, with_withdrawal)
         self._income_line.set_data(
             income_dicts, [(label, "income_value", INCOME_TREND_COLOR)],
-            empty_message="配当の履歴がありません（株価更新か『履歴取込』で記録されます）",
+            empty_message="配当の履歴がありません（株価更新か『インポート』で記録されます）",
         )
 
     @staticmethod
@@ -994,16 +1003,88 @@ class DividendWindow(QMainWindow):
         self.history = history
         self._refresh_trend()  # 追加した当日点を推移グラフへ即時反映
 
-    def action_import_history(self) -> None:
-        """Android バックアップ JSON を選択して履歴へ取り込む（既存の日付は保持）。"""
+    @staticmethod
+    def _with_csv_suffix(path: str) -> str:
+        """保存ダイアログが拡張子を付けない環境向けに .csv を補う。"""
+        return path if path.lower().endswith(".csv") else path + ".csv"
+
+    def action_export_holdings(self) -> None:
+        """保有銘柄を CSV へエクスポートする（holdings.csv と同一フォーマット）。"""
+        if not self.holdings:
+            self._notify("エクスポートする保有銘柄がありません", error=True)
+            return
+        path, _ = QFileDialog.getSaveFileName(
+            self, "保有銘柄をエクスポート", f"holdings_{today_jst_str()}.csv",
+            "CSV ファイル (*.csv)",
+        )
+        if not path:
+            return
+        path = self._with_csv_suffix(path)
+        if self._save_or_notify(lambda: export_holdings_csv(path, self.holdings)):
+            self._notify(f"保有銘柄を書き出しました（{len(self.holdings)} 件）")
+
+    def action_export_history(self) -> None:
+        """推移履歴を CSV へエクスポートする（history.csv と同一フォーマット）。"""
+        if not self.history:
+            self._notify("エクスポートする履歴がありません", error=True)
+            return
+        path, _ = QFileDialog.getSaveFileName(
+            self, "推移履歴をエクスポート", f"history_{today_jst_str()}.csv",
+            "CSV ファイル (*.csv)",
+        )
+        if not path:
+            return
+        path = self._with_csv_suffix(path)
+        if self._save_or_notify(lambda: export_history_csv(path, self.history)):
+            self._notify(f"履歴を書き出しました（{len(self.history)} 日分）")
+
+    def action_import_holdings(self) -> None:
+        """エクスポートした保有銘柄 CSV を選択して取り込む（全置換）。
+
+        symbol が一意でない（複数口座・取得単価）ためマージできず、取込は現在の
+        保有を完全に置き換える。破壊的操作のため確認ダイアログを挟む（CSV は
+        save_holdings が自動バックアップする）。
+        """
         path, _ = QFileDialog.getOpenFileName(
-            self, "履歴をインポート (BackUpRecordInfoAndroid.json)", "",
-            "JSON ファイル (*.json);;すべて (*.*)",
+            self, "保有銘柄をインポート (CSV)", "",
+            "CSV ファイル (*.csv);;すべて (*.*)",
         )
         if not path:
             return
         try:
-            imported = load_android_backup(path)
+            imported = read_holdings_csv(path)
+        except Exception as exc:  # noqa: BLE001 — UI に通知して継続
+            self._notify(f"取込に失敗しました: {exc}", error=True)
+            return
+        if not imported:
+            self._notify("取込対象のデータが見つかりませんでした", error=True)
+            return
+        reply = QMessageBox.question(
+            self,
+            "保有銘柄の取込",
+            f"現在の保有銘柄（{len(self.holdings)} 件）を取込内容（{len(imported)} 件）で"
+            "置き換えますか？\nこの操作は現在の保有を上書きします"
+            "（CSV は自動バックアップされます）。",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No,
+        )
+        if reply != QMessageBox.StandardButton.Yes:
+            return
+        if not self._save_or_notify(lambda: save_holdings(imported)):
+            return
+        self._reload_all()  # 保存済み CSV から再読込し全表示を更新
+        self._notify(f"保有銘柄を取り込みました（{len(imported)} 件）")
+
+    def action_import_history(self) -> None:
+        """エクスポートした履歴 CSV を選択して取り込む（既存の日付は保持）。"""
+        path, _ = QFileDialog.getOpenFileName(
+            self, "履歴をインポート (CSV)", "",
+            "CSV ファイル (*.csv);;すべて (*.*)",
+        )
+        if not path:
+            return
+        try:
+            imported = read_history_csv(path)
         except Exception as exc:  # noqa: BLE001 — UI に通知して継続
             self._notify(f"取込に失敗しました: {exc}", error=True)
             return
@@ -1012,6 +1093,7 @@ class DividendWindow(QMainWindow):
             return
         before = len(self.history)
         # 既存（アプリ記録など）を優先し、履歴に無い日付だけ埋める。
+        # 同一日付は上書きしないため、編集して取り込み直す用途には向かない。
         history = merge_records(self.history, imported, prefer="existing")
         if not self._save_or_notify(lambda: save_history(history)):
             return
