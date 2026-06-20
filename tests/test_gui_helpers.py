@@ -5,7 +5,8 @@ import math
 import pytest
 
 import src.gui as gui
-from src.models import Holding, MarketData
+import src.io_csv as io_csv
+from src.models import Holding, HistoryRecord, MarketData
 
 
 def _holding(**overrides) -> Holding:
@@ -100,3 +101,129 @@ def test_history_snapshot_skips_missing_market_value(monkeypatch):
     gui.DividendWindow._record_history_snapshot(stub)
     assert called is False
     assert stub.history == []
+
+
+# ---- エクスポート / 履歴取込アクション（QFileDialog をスタブ化して本体を実行） ----
+
+
+def _io_stub(holdings, history):
+    """エクスポート/取込アクションを unbound 呼び出しするための最小スタブ。"""
+    notes: list[tuple[str, bool]] = []
+
+    class WindowStub:
+        def _notify(self, message, error=False):
+            notes.append((message, error))
+
+        def _save_or_notify(self, action):
+            action()
+            return True
+
+        def _refresh_view(self):
+            pass
+
+        def _reload_all(self):
+            self.reloaded = True
+
+        _with_csv_suffix = staticmethod(gui.DividendWindow._with_csv_suffix)
+
+    stub = WindowStub()
+    stub.holdings = holdings
+    stub.history = history
+    stub.notes = notes
+    stub.reloaded = False
+    return stub
+
+
+def _history(date: str, **kw) -> HistoryRecord:
+    base = dict(
+        record_date=date,
+        total_market_value_jpy=None,
+        total_book_value_jpy=None,
+        total_dividend_jpy=None,
+        total_benefit_jpy=None,
+        total_profit_jpy=None,
+        total_withdrawal_income_jpy=None,
+        source="app",
+    )
+    base.update(kw)
+    return HistoryRecord(**base)
+
+
+def test_export_then_import_history_roundtrip(monkeypatch, tmp_path):
+    """履歴をエクスポートし、別ウィンドウへ取り込んで往復できること。"""
+    monkeypatch.setattr(io_csv, "DATA_DIR", tmp_path)
+    monkeypatch.setattr(io_csv, "BACKUP_DIR", tmp_path / "backup")
+    target = tmp_path / "history.csv"
+    exporter = _io_stub([], [_history("2024-01-01", total_dividend_jpy=5.0)])
+    monkeypatch.setattr(gui.QFileDialog, "getSaveFileName", lambda *a, **k: (str(target), ""))
+    gui.DividendWindow.action_export_history(exporter)
+    assert target.exists()
+
+    importer = _io_stub([], [])
+    monkeypatch.setattr(gui.QFileDialog, "getOpenFileName", lambda *a, **k: (str(target), ""))
+    monkeypatch.setattr(gui, "save_history", lambda rows: None)
+    gui.DividendWindow.action_import_history(importer)
+    assert [r.record_date for r in importer.history] == ["2024-01-01"]
+    assert importer.history[0].total_dividend_jpy == 5.0
+
+
+def test_export_holdings_appends_csv_suffix(monkeypatch, tmp_path):
+    """保存ダイアログが拡張子を返さなくても .csv を補ってから書き出すこと。"""
+    captured: dict = {}
+    monkeypatch.setattr(gui.QFileDialog, "getSaveFileName", lambda *a, **k: (str(tmp_path / "noext"), ""))
+    monkeypatch.setattr(gui, "export_holdings_csv", lambda path, rows: captured.update(path=path))
+    gui.DividendWindow.action_export_holdings(_io_stub([_holding()], []))
+    assert captured["path"].endswith(".csv")
+
+
+def test_export_history_empty_guard_skips_dialog(monkeypatch):
+    """履歴が空ならダイアログを開かずエラー通知して早期 return すること。"""
+    opened = {"dialog": False}
+
+    def fake_dialog(*_a, **_k):
+        opened["dialog"] = True
+        return ("", "")
+
+    monkeypatch.setattr(gui.QFileDialog, "getSaveFileName", fake_dialog)
+    stub = _io_stub([], [])
+    gui.DividendWindow.action_export_history(stub)
+    assert opened["dialog"] is False
+    assert stub.notes and stub.notes[-1][1] is True  # error 通知で終わる
+
+
+def test_import_holdings_replaces_after_confirm(monkeypatch, tmp_path):
+    """確認 Yes で現在の保有を取込内容に全置換し、保存・再読込すること。"""
+    monkeypatch.setattr(io_csv, "DATA_DIR", tmp_path)
+    monkeypatch.setattr(io_csv, "BACKUP_DIR", tmp_path / "backup")
+    target = tmp_path / "holdings.csv"
+    io_csv.export_holdings_csv(target, [_holding(symbol="7203"), _holding(symbol="AAPL")])
+
+    stub = _io_stub([_holding(symbol="9999")], [])  # 既存1件
+    monkeypatch.setattr(gui.QFileDialog, "getOpenFileName", lambda *a, **k: (str(target), ""))
+    monkeypatch.setattr(
+        gui.QMessageBox, "question", lambda *a, **k: gui.QMessageBox.StandardButton.Yes
+    )
+    saved: dict = {}
+    monkeypatch.setattr(gui, "save_holdings", lambda rows: saved.update(rows=rows))
+    gui.DividendWindow.action_import_holdings(stub)
+    assert [h.symbol for h in saved["rows"]] == ["7203", "AAPL"]  # 全置換
+    assert stub.reloaded is True
+
+
+def test_import_holdings_declined_keeps_current(monkeypatch, tmp_path):
+    """確認 No なら保存も再読込もせず現在の保有を維持すること。"""
+    monkeypatch.setattr(io_csv, "DATA_DIR", tmp_path)
+    monkeypatch.setattr(io_csv, "BACKUP_DIR", tmp_path / "backup")
+    target = tmp_path / "holdings.csv"
+    io_csv.export_holdings_csv(target, [_holding(symbol="7203")])
+
+    stub = _io_stub([_holding(symbol="9999")], [])
+    monkeypatch.setattr(gui.QFileDialog, "getOpenFileName", lambda *a, **k: (str(target), ""))
+    monkeypatch.setattr(
+        gui.QMessageBox, "question", lambda *a, **k: gui.QMessageBox.StandardButton.No
+    )
+    saved = {"called": False}
+    monkeypatch.setattr(gui, "save_holdings", lambda rows: saved.update(called=True))
+    gui.DividendWindow.action_import_holdings(stub)
+    assert saved["called"] is False
+    assert stub.reloaded is False

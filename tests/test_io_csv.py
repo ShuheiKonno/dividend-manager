@@ -6,6 +6,12 @@ from pathlib import Path
 import pytest
 
 import src.io_csv as io_csv
+from src.models import (
+    HOLDINGS_FIELDS,
+    HISTORY_FIELDS,
+    Holding,
+    HistoryRecord,
+)
 
 
 def _configure_tmp_dirs(monkeypatch, tmp_path):
@@ -55,6 +61,154 @@ def test_atomic_write_prunes_old_backups(monkeypatch, tmp_path):
         )
     io_csv._atomic_write(target, [{"value": "new"}], ["value"])
     assert len(list(backup_dir.glob("sample_*.csv"))) == io_csv._BACKUP_KEEP_PER_FILE
+
+
+# ---- エクスポート / インポート（外部パス・BOM 付き UTF-8・往復可能） ----
+
+
+def _history(date: str, **kw) -> HistoryRecord:
+    base = dict(
+        record_date=date,
+        total_market_value_jpy=None,
+        total_book_value_jpy=None,
+        total_dividend_jpy=None,
+        total_benefit_jpy=None,
+        total_profit_jpy=None,
+        total_withdrawal_income_jpy=None,
+        source="app",
+    )
+    base.update(kw)
+    return HistoryRecord(**base)
+
+
+def _holding(symbol: str, **kw) -> Holding:
+    base = dict(
+        symbol=symbol,
+        name="日本株サンプル",  # Excel での BOM 確認用に日本語を含める
+        asset_type="stock",
+        currency="JPY",
+        shares=100.0,
+        avg_cost=1500.0,
+        account="特定",
+        annual_div_ps_gross_override=None,
+        annual_div_ps_net_override=None,
+        div_forecast_as_of_override=None,
+        annual_benefit_jpy=0.0,
+        withdrawal_fixed_jpy=None,
+        withdrawal_rate=None,
+        tax_rate=None,
+        active=True,
+    )
+    base.update(kw)
+    return Holding(**base)
+
+
+def test_export_history_csv_is_sorted_and_roundtrips(monkeypatch, tmp_path):
+    _configure_tmp_dirs(monkeypatch, tmp_path)
+    target = tmp_path / "export" / "history.csv"
+    target.parent.mkdir()
+    records = [
+        _history("2024-12-01", total_market_value_jpy=200.0),
+        _history("2024-01-01", total_market_value_jpy=100.0, total_benefit_jpy=0.0),
+    ]
+    io_csv.export_history_csv(target, records)
+    # 昇順で書き出され、read_history_csv で同値に読み戻せる（0.0 も保持）。
+    loaded = io_csv.read_history_csv(target)
+    assert [r.record_date for r in loaded] == ["2024-01-01", "2024-12-01"]
+    assert loaded[0].total_market_value_jpy == 100.0
+    assert loaded[0].total_benefit_jpy == 0.0  # 明示 0 が空に潰れない
+    assert loaded[1].total_market_value_jpy == 200.0
+
+
+def test_export_csv_writes_bom_and_canonical_headers(monkeypatch, tmp_path):
+    _configure_tmp_dirs(monkeypatch, tmp_path)
+    hist_path = tmp_path / "h.csv"
+    hold_path = tmp_path / "p.csv"
+    io_csv.export_history_csv(hist_path, [_history("2024-01-01")])
+    io_csv.export_holdings_csv(hold_path, [_holding("7203")])
+    # Excel 文字化け回避のため BOM 付き UTF-8 で書き出す。
+    assert hist_path.read_bytes().startswith(b"\xef\xbb\xbf")
+    assert hold_path.read_bytes().startswith(b"\xef\xbb\xbf")
+    # ヘッダーは内部正規フォーマットと同一（往復可能）。
+    hist_header = hist_path.read_text(encoding="utf-8-sig").splitlines()[0]
+    hold_header = hold_path.read_text(encoding="utf-8-sig").splitlines()[0]
+    assert hist_header == ",".join(HISTORY_FIELDS)
+    assert hold_header == ",".join(HOLDINGS_FIELDS)
+
+
+def test_export_holdings_csv_roundtrips(monkeypatch, tmp_path):
+    _configure_tmp_dirs(monkeypatch, tmp_path)
+    target = tmp_path / "holdings.csv"
+    holdings = [_holding("7203"), _holding("AAPL", currency="USD", account="NISA")]
+    io_csv.export_holdings_csv(target, holdings)
+    rows = io_csv._read_csv(target)
+    restored = [Holding.from_dict(r) for r in rows]
+    assert restored == holdings
+
+
+def test_read_history_csv_skips_blank_record_date(monkeypatch, tmp_path):
+    _configure_tmp_dirs(monkeypatch, tmp_path)
+    target = tmp_path / "history.csv"
+    io_csv.export_history_csv(
+        target,
+        [_history("2024-01-01", total_market_value_jpy=100.0), _history("")],
+    )
+    loaded = io_csv.read_history_csv(target)
+    assert [r.record_date for r in loaded] == ["2024-01-01"]
+
+
+def test_read_history_csv_normalizes_and_rejects_dates(monkeypatch, tmp_path):
+    """Excel 再保存の "2024/1/1" 等を ISO へ正規化し、不正日付の行は除外する。
+
+    正規化を怠ると後段の filter_by_period が date.fromisoformat で ValueError。
+    """
+    _configure_tmp_dirs(monkeypatch, tmp_path)
+    target = tmp_path / "history.csv"
+    rows = [
+        {"record_date": "2024/1/1", "total_market_value_jpy": "100.0"},
+        {"record_date": "2024-2-3", "total_market_value_jpy": "200.0"},
+        {"record_date": "abc", "total_market_value_jpy": "300.0"},  # 不正→除外
+    ]
+    io_csv._atomic_write(target, rows, HISTORY_FIELDS, backup=False)
+    loaded = io_csv.read_history_csv(target)
+    assert [r.record_date for r in loaded] == ["2024-01-01", "2024-02-03"]
+    # 取り込んだ全日付が ISO として解釈可能であること（後段クラッシュ防止）。
+    from datetime import date
+    for r in loaded:
+        date.fromisoformat(r.record_date)
+
+
+def test_read_history_csv_wrong_file_yields_empty(monkeypatch, tmp_path):
+    """履歴ではないファイル（保有 CSV 等）を選んでも空を返し履歴を壊さない。"""
+    _configure_tmp_dirs(monkeypatch, tmp_path)
+    target = tmp_path / "holdings.csv"
+    io_csv.export_holdings_csv(target, [_holding("7203")])
+    assert io_csv.read_history_csv(target) == []
+
+
+def test_read_holdings_csv_roundtrips(monkeypatch, tmp_path):
+    _configure_tmp_dirs(monkeypatch, tmp_path)
+    target = tmp_path / "holdings.csv"
+    holdings = [_holding("7203"), _holding("AAPL", currency="USD", account="NISA")]
+    io_csv.export_holdings_csv(target, holdings)
+    assert io_csv.read_holdings_csv(target) == holdings
+
+
+def test_read_holdings_csv_skips_blank_symbol(monkeypatch, tmp_path):
+    """symbol 空の行は除外する（誤った履歴 CSV を選んでも空を返す）。"""
+    _configure_tmp_dirs(monkeypatch, tmp_path)
+    target = tmp_path / "holdings.csv"
+    io_csv.export_holdings_csv(target, [_holding("7203"), _holding("")])
+    loaded = io_csv.read_holdings_csv(target)
+    assert [h.symbol for h in loaded] == ["7203"]
+
+
+def test_read_holdings_csv_wrong_file_yields_empty(monkeypatch, tmp_path):
+    """保有ではないファイル（履歴 CSV）を選んでも空を返し保有を壊さない。"""
+    _configure_tmp_dirs(monkeypatch, tmp_path)
+    target = tmp_path / "history.csv"
+    io_csv.export_history_csv(target, [_history("2024-01-01")])
+    assert io_csv.read_holdings_csv(target) == []
 
 
 # ---- settings.json（集合キー＝従来互換 / callable キー＝ウィンドウ状態） ----

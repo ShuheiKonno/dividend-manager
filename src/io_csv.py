@@ -17,7 +17,7 @@ from .models import (
     FXRate,
     HistoryRecord,
 )
-from .utils import now_jst
+from .utils import now_jst, normalize_iso_date
 
 DATA_DIR = Path(__file__).resolve().parents[1] / "data"
 BACKUP_DIR = DATA_DIR / "backup"
@@ -68,6 +68,7 @@ def _atomic_write(
     rows: Iterable[dict[str, str]],
     fieldnames: list[str],
     backup: bool = True,
+    encoding: str = "utf-8",
 ) -> None:
     _ensure_dirs()
     # 履歴のように起動・更新の都度書き込むファイルは backup=False にして
@@ -76,8 +77,10 @@ def _atomic_write(
         backup_name = f"{path.stem}_{now_jst().strftime('%Y%m%dT%H%M%S%f%z')}{path.suffix}"
         _retry_on_permission_error(lambda: copy2(path, BACKUP_DIR / backup_name), path)
         _prune_backups(path)
+    # encoding は data/ 内の正規ファイルでは "utf-8"。ユーザー指定先への
+    # エクスポートだけ "utf-8-sig"（BOM）にして Excel での日本語文字化けを防ぐ。
     tmp_path = path.with_suffix(path.suffix + ".tmp")
-    with tmp_path.open("w", encoding="utf-8", newline="") as f:
+    with tmp_path.open("w", encoding=encoding, newline="") as f:
         writer = csv.DictWriter(f, fieldnames=fieldnames)
         writer.writeheader()
         for row in rows:
@@ -125,6 +128,67 @@ def save_history(rows: list[HistoryRecord]) -> None:
     _atomic_write(
         HISTORY_PATH, [row.to_dict() for row in ordered], HISTORY_FIELDS, backup=False
     )
+
+
+# ---- 外部パスへのエクスポート / 外部パスからのインポート ----
+# data/ 内の正規 CSV と同じ列・同じ列名で読み書きするため、エクスポート結果は
+# そのまま import で読み戻せる（往復可能）。Excel での文字化け回避のため BOM 付き
+# UTF-8（utf-8-sig）で書き出す。バックアップ・原子的置換は _atomic_write に委譲する。
+
+
+def export_holdings_csv(path: str | Path, rows: list[Holding]) -> None:
+    """保有銘柄を外部パスへ CSV 出力する（holdings.csv と同一フォーマット）。"""
+    _atomic_write(
+        Path(path),
+        [row.to_dict() for row in rows],
+        HOLDINGS_FIELDS,
+        backup=False,
+        encoding="utf-8-sig",
+    )
+
+
+def export_history_csv(path: str | Path, rows: list[HistoryRecord]) -> None:
+    """推移履歴を外部パスへ CSV 出力する（record_date 昇順 / history.csv と同一）。"""
+    ordered = sorted(rows, key=lambda r: r.record_date)
+    _atomic_write(
+        Path(path),
+        [row.to_dict() for row in ordered],
+        HISTORY_FIELDS,
+        backup=False,
+        encoding="utf-8-sig",
+    )
+
+
+def read_history_csv(path: str | Path) -> list[HistoryRecord]:
+    """外部 CSV を推移履歴として読み込む（エクスポートした history CSV の取込用）。
+
+    record_date は ISO "YYYY-MM-DD" へ正規化し、解析不能な行（空・誤ファイルの
+    別列・"abc" 等）は除外する。これにより誤ったファイル（保有 CSV 等）を選んでも
+    履歴を壊さず「取込対象なし」になり、Excel 再保存で "2024/1/1" のように崩れた
+    日付も ISO へ直して取り込める（後段の filter_by_period のクラッシュを防ぐ）。
+    欠損列は from_dict が None で吸収するため、列が一部欠けた CSV も読める。
+    """
+    records: list[HistoryRecord] = []
+    for row in _read_csv(Path(path)):
+        rec = HistoryRecord.from_dict(row)
+        iso = normalize_iso_date(rec.record_date)
+        if iso is None:
+            continue
+        rec.record_date = iso
+        records.append(rec)
+    return records
+
+
+def read_holdings_csv(path: str | Path) -> list[Holding]:
+    """外部 CSV を保有銘柄として読み込む（エクスポートした holdings CSV の取込用）。
+
+    symbol が空の行は除外する。これにより誤ったファイル（履歴 CSV 等）を選んでも
+    保有を壊さず「取込対象なし」として扱える。欠損列は from_dict が既定値で
+    吸収するため、列が一部欠けた CSV も読める。symbol は一意でない（複数口座・
+    取得単価）ため取込はマージせず全置換（呼び出し側が確認の上で保存する）。
+    """
+    holdings = [Holding.from_dict(row) for row in _read_csv(Path(path))]
+    return [h for h in holdings if h.symbol]
 
 
 def init_empty_files() -> None:
