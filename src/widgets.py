@@ -14,9 +14,16 @@ from typing import Optional
 
 from PySide6.QtCore import Qt, QRectF, QPoint
 from PySide6.QtGui import QColor, QPainter, QPen, QFont
-from PySide6.QtWidgets import QWidget, QFrame, QLabel, QVBoxLayout, QToolTip
+from PySide6.QtWidgets import (
+    QWidget,
+    QFrame,
+    QLabel,
+    QVBoxLayout,
+    QSizePolicy,
+    QToolTip,
+)
 
-from .theme import CHART_BG
+from .theme import CHART_BG, PROFIT_DOWN, PROFIT_UP
 from .utils import (
     fmt_number,
     fmt_percent,
@@ -27,7 +34,7 @@ from .utils import (
 )
 
 # 株価未取得時などチャートが空のときに中央表示する既定メッセージ
-_EMPTY_MESSAGE = "株価未取得 — 'p' で株価・配当を取得してください"
+_EMPTY_MESSAGE = "株価未取得 — F5 で株価・配当を取得してください"
 
 
 def _fmt_compact(v: float) -> str:
@@ -116,8 +123,8 @@ def _squarify(sizes: list[float], x: float, y: float, dx: float, dy: float):
 _BORDER = QColor("#7f7f7f")          # grey50 相当（タイル枠線）
 _NEUTRAL_BG = QColor("#3a3a3a")      # grey23 相当
 _WEAK_BG = QColor("#262626")         # grey15 相当
-_RED_TEXT = QColor("#e53935")
-_BLUE_TEXT = QColor("#42a5f5")
+_RED_TEXT = QColor(PROFIT_UP)
+_BLUE_TEXT = QColor(PROFIT_DOWN)
 _WHITE = QColor("#f5f5f5")
 
 
@@ -141,11 +148,15 @@ def profit_tile_colors(profit_rate: float | None) -> tuple[QColor, QColor]:
 
 
 def profit_text_qcolor(value: float | None) -> Optional[QColor]:
-    """損益値に応じたテキスト色（プラス=赤 / マイナス=青 / それ以外=既定色 None）。"""
+    """損益値に応じたテキスト色（プラス=赤 / マイナス=青 / それ以外=既定色 None）。
+
+    treemap のタイル文字色と同じ theme トークンを使う（従来は表だけ濃い
+    #d32f2f / #1976d2 で、ダーク背景に対するコントラストが不足していた）。
+    """
     num = safe_float(value)
     if num is None or num == 0:
         return None
-    return QColor("#d32f2f") if num > 0 else QColor("#1976d2")
+    return QColor(PROFIT_UP) if num > 0 else QColor(PROFIT_DOWN)
 
 
 class TreemapWidget(QWidget):
@@ -798,6 +809,10 @@ class KpiCard(QFrame):
         super().__init__(parent)
         # 見た目はグローバル QSS（theme.build_app_qss の #kpiCard 系セレクタ）に集約。
         self.setObjectName("kpiCard")
+        # 横はウィンドウ幅に合わせて伸縮、縦は内容ぶんに固定する。最小幅を持たせて
+        # ウィンドウを狭めたときに値が読めなくなるまで潰れるのを防ぐ。
+        self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+        self.setMinimumWidth(120)
         layout = QVBoxLayout(self)
         layout.setContentsMargins(12, 8, 12, 8)
         layout.setSpacing(2)
