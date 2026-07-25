@@ -179,3 +179,66 @@ def test_summary_preserves_known_zero_values():
     assert summary.total_dividend_jpy == 0.0
     assert summary.total_profit_jpy == 0.0
     assert summary.profit_rate == 0.0
+
+
+# ---- compute_rows: include_inactive（無効銘柄の表示） ----
+
+def _mixed_holdings() -> list[Holding]:
+    """有効2件・無効1件（順序を跨いで配置）。"""
+    return [
+        _holding(symbol="7203", annual_div_ps_gross_override=60.0),
+        _holding(symbol="9999", name="休眠", active=False, avg_cost=100.0),
+        _holding(symbol="8058", name="三菱商事", annual_div_ps_gross_override=70.0),
+    ]
+
+
+def _mixed_market() -> dict[str, MarketData]:
+    return {
+        "7203": _market(last_price=2500.0),
+        "9999": _market(symbol="9999", last_price=500.0),
+        "8058": _market(symbol="8058", last_price=3000.0),
+    }
+
+
+def test_include_inactive_defaults_to_excluding_inactive():
+    rows, _ = compute_rows(_mixed_holdings(), _mixed_market(), 150.0, "gross")
+    assert [r["symbol"] for r in rows] == ["7203", "8058"]
+
+
+def test_include_inactive_adds_row_preserving_order():
+    rows, _ = compute_rows(
+        _mixed_holdings(), _mixed_market(), 150.0, "gross", include_inactive=True
+    )
+    assert [r["symbol"] for r in rows] == ["7203", "9999", "8058"]
+    assert [r["active"] for r in rows] == [True, False, True]
+
+
+def test_include_inactive_leaves_summary_bit_identical():
+    """無効銘柄を行に足しても Summary は 1 フィールドたりとも変わらないこと。"""
+    holdings, market = _mixed_holdings(), _mixed_market()
+    _, without = compute_rows(holdings, market, 150.0, "gross")
+    _, with_inactive = compute_rows(
+        holdings, market, 150.0, "gross", include_inactive=True
+    )
+    assert with_inactive == without
+
+
+def test_include_inactive_does_not_shift_missing_market_value_count():
+    """無効銘柄に株価が無くても missing_market_value_count は増えないこと。"""
+    holdings = _mixed_holdings()
+    market = {"7203": _market(last_price=2500.0), "8058": _market(symbol="8058")}
+    _, summary = compute_rows(
+        holdings, market, 150.0, "gross", include_inactive=True
+    )
+    assert summary.missing_market_value_count == 0
+
+
+def test_rows_expose_account_and_asset_type():
+    """同一 symbol の重複行を表示側が判別できるキーを持つこと。"""
+    holdings = [
+        _holding(symbol="PFF", account="特定", asset_type="stock"),
+        _holding(symbol="PFF", account="NISA", asset_type="stock"),
+    ]
+    rows, _ = compute_rows(holdings, {}, 150.0, "gross")
+    assert [r["account"] for r in rows] == ["特定", "NISA"]
+    assert [r["asset_type"] for r in rows] == ["stock", "stock"]

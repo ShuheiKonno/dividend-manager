@@ -256,6 +256,17 @@ def test_settings_last_tab_rejects_bool_and_out_of_range(monkeypatch, tmp_path):
     assert io_csv.load_settings()["last_tab"] == 2
 
 
+def test_settings_show_inactive_roundtrip(monkeypatch, tmp_path):
+    """無効銘柄の表示トグルが bool として往復し、非 bool は拒否されること。"""
+    _configure_tmp_dirs(monkeypatch, tmp_path)
+    io_csv.save_settings(show_inactive=True)
+    assert io_csv.load_settings()["show_inactive"] is True
+    io_csv.save_settings(show_inactive=False)
+    assert io_csv.load_settings()["show_inactive"] is False
+    io_csv.save_settings(show_inactive="yes")  # 文字列は拒否
+    assert io_csv.load_settings()["show_inactive"] is False
+
+
 def test_settings_pie_threshold_and_column_widths(monkeypatch, tmp_path):
     _configure_tmp_dirs(monkeypatch, tmp_path)
     io_csv.save_settings(

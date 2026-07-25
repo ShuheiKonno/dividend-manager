@@ -83,6 +83,7 @@ from .theme import (
     BG_INPUT,
     FONT_FAMILY_PRIMARY,
     FONT_SIZE_PT,
+    TEXT_DISABLED,
     TEXT_STATUS,
     TEXT_STATUS_ERROR,
 )
@@ -96,9 +97,15 @@ from .widgets import (
 )
 
 
+# 同一 symbol が複数行（複数口座・取得単価）になり得るため、口座・種別を
+# コード/銘柄名の直後に置いて行を判別できるようにする。両テーブルで
+# 0=symbol / 1=name / 2=account の並びを揃える（NumericSortProxy の絞り込みが
+# この列位置を前提にする）。
 PRICE_COLUMNS = [
     ("コード", "symbol"),
     ("銘柄名", "name"),
+    ("口座", "account"),
+    ("種別", "asset_type"),
     ("株数", "shares"),
     ("通貨", "currency"),
     ("購入単価", "avg_cost"),
@@ -111,6 +118,8 @@ PRICE_COLUMNS = [
 INCOME_COLUMNS = [
     ("コード", "symbol"),
     ("銘柄名", "name"),
+    ("口座", "account"),
+    ("種別", "asset_type"),
     ("株数", "shares"),
     ("通貨", "currency"),
     ("配当/株", "annual_div_ps"),
@@ -120,6 +129,8 @@ INCOME_COLUMNS = [
     ("時価利回り", "yield_on_value"),
     ("配当更新日", "div_forecast_as_of"),
 ]
+# 資産種別の表示名（CSV 上の値 → 日本語ラベル）
+ASSET_TYPE_LABELS = {"stock": "株式", "fund": "投信"}
 # 評価額タブの推移系列 (ラベル, history キー, 線色)。評価額＋簿価の2本固定。
 ASSET_TREND_SERIES = [
     ("評価額", "total_market_value_jpy", QColor("#42a5f5")),
@@ -155,9 +166,24 @@ def row_for_holding_index(stored_indices: list[int], holding_idx: int) -> int | 
 
 
 def _format_cell(row: dict, key: str) -> tuple[str, Optional[QColor]]:
-    """セル表示文字列と文字色（損益のみ赤青）を返す。"""
+    """セル表示文字列と文字色を返す。
+
+    無効（active=False）銘柄は集計対象外なので、損益の赤青より優先して
+    行全体を淡色にする。
+    """
+    text, color = _cell_text_and_color(row, key)
+    if row.get("active") is False:
+        return text, QColor(TEXT_DISABLED)
+    return text, color
+
+
+def _cell_text_and_color(row: dict, key: str) -> tuple[str, Optional[QColor]]:
+    """有効銘柄としての表示文字列と文字色（損益のみ赤青）を返す。"""
     val = row.get(key)
-    if key in ("symbol", "name", "currency", "div_forecast_as_of"):
+    if key == "asset_type":
+        text = str(val or "")
+        return ASSET_TYPE_LABELS.get(text, text), None
+    if key in ("symbol", "name", "account", "currency", "div_forecast_as_of"):
         return str(val or ""), None
     if key in ("shares", "avg_cost", "last_price", "annual_div_ps"):
         return fmt_number(val, 2), None
@@ -184,7 +210,7 @@ class NumericSortProxy(QSortFilterProxyModel):
         self._filter_text = ""
 
     def set_filter_text(self, text: str) -> None:
-        """コード(col0)・銘柄名(col1)に対する部分一致フィルタ語を設定して再評価する。"""
+        """コード(col0)・銘柄名(col1)・口座(col2)への部分一致フィルタ語を設定する。"""
         self._filter_text = (text or "").strip().lower()
         self.invalidateFilter()
 
@@ -192,7 +218,7 @@ class NumericSortProxy(QSortFilterProxyModel):
         if not self._filter_text:
             return True
         model = self.sourceModel()
-        for col in (0, 1):  # symbol / name（両テーブル共通の並び）
+        for col in (0, 1, 2):  # symbol / name / account（両テーブル共通の並び）
             idx = model.index(source_row, col, source_parent)
             value = model.data(idx, Qt.ItemDataRole.DisplayRole) or ""
             if self._filter_text in str(value).lower():
@@ -277,6 +303,9 @@ class DividendWindow(QMainWindow):
         # 円グラフの「その他」集約閾値（評価額/配当タブで独立）と起動時の表示タブ。
         self.pie_threshold_asset: float = float(_saved.get("pie_threshold_asset", 2.0))
         self.pie_threshold_income: float = float(_saved.get("pie_threshold_income", 2.0))
+        # 無効銘柄をテーブルへ表示するか。既定は非表示（従来どおり）だが、
+        # 表示できないと編集ダイアログで無効化した銘柄を復帰できなくなる。
+        self.show_inactive: bool = bool(_saved.get("show_inactive", False))
         self._initial_tab: int = _saved.get("last_tab", 0)
         # テーブル列幅: 保存値があれば初回描画で適用、無ければ内容に合わせて自動調整。
         self._saved_column_widths: dict[str, list[int]] = {
@@ -472,6 +501,7 @@ class DividendWindow(QMainWindow):
         view_menu = bar.addMenu("表示(&V)")
         add(view_menu, "税引前後の切替 (M)", self.action_toggle_mode)
         add(view_menu, "取崩モードの切替 (W)", self.action_toggle_withdrawal)
+        add(view_menu, "無効銘柄も表示", self.action_toggle_inactive)
         view_menu.addSeparator()
         tab_labels = ["評価額 (1)", "配当金 (2)", "株価関連 (3)", "配当関連 (4)"]
         for i, label in enumerate(tab_labels):
@@ -859,10 +889,13 @@ class DividendWindow(QMainWindow):
     def _refresh_view(self) -> None:
         rows, summary = compute_rows(
             self.holdings, self.market_data_map, self.fx_rate, self.dividend_mode,
-            self.withdrawal_mode,
+            self.withdrawal_mode, include_inactive=self.show_inactive,
         )
-        active_indices = [i for i, h in enumerate(self.holdings) if h.active]
-        self._render_table("price", PRICE_COLUMNS, self._price_model, self._price_view, rows, active_indices)
+        # rows と同じ条件・同じ順序で holdings インデックスを組む（表示行 ↔ 保有の対応）。
+        visible_indices = [
+            i for i, h in enumerate(self.holdings) if h.active or self.show_inactive
+        ]
+        self._render_table("price", PRICE_COLUMNS, self._price_model, self._price_view, rows, visible_indices)
         income_cols = list(INCOME_COLUMNS)
         if self.withdrawal_mode is not None:
             income_cols = [
@@ -870,18 +903,21 @@ class DividendWindow(QMainWindow):
                 for lbl, key in income_cols
             ]
         self._income_model.setHorizontalHeaderLabels([lbl for lbl, _ in income_cols])
-        self._render_table("income", income_cols, self._income_model, self._income_view, rows, active_indices)
-        self._treemap.set_data(rows)
-        self._piechart.set_data(rows)
+        self._render_table("income", income_cols, self._income_model, self._income_view, rows, visible_indices)
+        # 構成グラフは集計と揃えるため常に有効銘柄のみを対象にする
+        # （無効銘柄は Summary に含まれず、構成比に混ぜると割合が狂う）。
+        chart_rows = [r for r in rows if r.get("active") is not False]
+        self._treemap.set_data(chart_rows)
+        self._piechart.set_data(chart_rows)
         # 配当額ベース: 面積 = 年間配当（取崩モード時は「年間収入」に上書きされた額）
         div_label = "年間収入" if self.withdrawal_mode is not None else "年間配当"
-        div_empty = f"{div_label}データがありません（'p' で取得 / 配当のある銘柄が必要です）"
+        div_empty = f"{div_label}データがありません（F5 で取得 / 配当のある銘柄が必要です）"
         self._treemap_div.set_data(
-            rows, value_key="annual_dividend_jpy", value_label=div_label,
+            chart_rows, value_key="annual_dividend_jpy", value_label=div_label,
             empty_message=div_empty,
         )
         self._piechart_div.set_data(
-            rows, value_key="annual_dividend_jpy", value_label=div_label,
+            chart_rows, value_key="annual_dividend_jpy", value_label=div_label,
             empty_message=div_empty,
         )
         # 推移グラフ（履歴スナップショット）
@@ -1134,15 +1170,17 @@ class DividendWindow(QMainWindow):
         """列幅を初回描画時のみ調整する（以降はユーザーの手動調整幅を維持）。
 
         保存済みの列幅（前回終了時）があればそれを適用し、無ければ内容に合わせる。
+        保存値の要素数が現在の列数と食い違う場合（列の追加・削除をまたいだ設定）は
+        列ごとに幅がずれるため、保存値を捨てて内容に合わせ直す。
         """
         if self._columns_sized[tab_key]:
             return
         self._columns_sized[tab_key] = True
+        header = view.horizontalHeader()
         saved = self._saved_column_widths.get(tab_key) or []
-        if saved:
-            header = view.horizontalHeader()
-            for col in range(min(len(saved), header.count())):
-                header.resizeSection(col, saved[col])
+        if len(saved) == header.count():
+            for col, width in enumerate(saved):
+                header.resizeSection(col, width)
         else:
             view.resizeColumnsToContents()
 
@@ -1198,6 +1236,21 @@ class DividendWindow(QMainWindow):
         self.withdrawal_mode = cycle[self.withdrawal_mode]
         self._save_or_notify(lambda: save_settings(withdrawal_mode=self.withdrawal_mode))
         self._refresh_view()
+
+    def action_toggle_inactive(self) -> None:
+        """無効銘柄をテーブルへ表示するかを切り替える。
+
+        無効銘柄は集計・構成グラフの対象外のまま、テーブルにだけ淡色で並ぶ。
+        これが無いと編集ダイアログで「有効」を外した銘柄へ二度と到達できない。
+        """
+        self.show_inactive = not self.show_inactive
+        self._save_or_notify(lambda: save_settings(show_inactive=self.show_inactive))
+        self._refresh_view()
+        self._notify(
+            "無効銘柄を表示します（淡色＝集計対象外）"
+            if self.show_inactive
+            else "無効銘柄を非表示にしました"
+        )
 
     def _active_tab_key(self) -> str:
         # タブ構成: [評価額(0), 配当金(1), 株価関連(2), 配当関連(3)]。

@@ -38,7 +38,9 @@ def main() -> None:
     menus = [a for a in w.menuBar().actions() if a.menu() is not None]
     assert len(menus) == 4, f"メニューが4つでない: {len(menus)}"
     file_actions = [a.text() for a in menus[0].menu().actions() if a.text()]
-    assert any("履歴取込" in t for t in file_actions), f"履歴取込が無い: {file_actions}"
+    # ファイルメニューはエクスポート/インポートの対称サブメニューを持つ。
+    assert any("エクスポート" in t for t in file_actions), f"エクスポートが無い: {file_actions}"
+    assert any("インポート" in t for t in file_actions), f"インポートが無い: {file_actions}"
     help_actions = [a.text() for a in menus[3].menu().actions() if a.text()]
     assert any("ショートカット" in t for t in help_actions), help_actions
 
