@@ -13,6 +13,8 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
+from PySide6.QtWidgets import QApplication  # noqa: E402
+
 from src.dialogs import EditHoldingDialog, NewHoldingDialog  # noqa: E402
 from src.gui import build_window  # noqa: E402
 from src.models import Holding  # noqa: E402
@@ -74,11 +76,28 @@ def _check_actions(w) -> None:
 
 
 def _check_toolbar(w) -> None:
-    """ツールバーのグループ分けとモード表示の追随を検証する。"""
+    """ツールバーのグループ分け・折返し耐性・モード表示の追随を検証する。"""
     separators = [a for a in w._toolbar.actions() if a.isSeparator()]
-    assert len(separators) >= 2, f"ツールバーの区切りが足りない: {len(separators)}"
+    assert len(separators) >= 1, f"ツールバーの区切りが無い: {len(separators)}"
     delete_button = w._toolbar.widgetForAction(w._actions["delete"])
     assert delete_button is not None and delete_button.objectName() == "dangerAction"
+
+    # 最小幅でも絞り込みが拡張メニューへ飛ばず画面に残ること
+    # （1段に詰め込むと狭い幅であふれ、右端の絞り込みが消える回帰があった）。
+    # isVisible() の判定には実際のレイアウトが要るのでここだけ show() する
+    # （QT_QPA_PLATFORM=offscreen なら画面には出ない）。最後に hide() で戻す。
+    original = w.size()
+    w.show()
+    for width in (w.minimumWidth(), 1100, 1536):
+        w.resize(width, max(620, w.minimumHeight()))
+        QApplication.processEvents()
+        assert w._filter.isVisible(), f"幅 {width}px で絞り込みが消えている"
+        assert w._toolbar.widgetForAction(w._actions["new"]).isVisible(), (
+            f"幅 {width}px で新規登録ボタンが消えている"
+        )
+    w.resize(original)
+    w.hide()
+    QApplication.processEvents()
 
     # ドロップダウンが現在のモードを示していること
     assert w._mode_combo.currentData() == w.dividend_mode

@@ -414,7 +414,9 @@ class DividendWindow(QMainWindow):
         for idx, title in enumerate(card_defs):
             card = KpiCard(title)
             self._cards[title] = card
-            grid.addWidget(card, idx // columns, idx % columns)
+            # 9枚は 5+4 に割れるため、2行目の最後を2列ぶんに広げて右端の穴を埋める。
+            span = 2 if idx == len(card_defs) - 1 else 1
+            grid.addWidget(card, idx // columns, idx % columns, 1, span)
         # 幅の変化を全列で均等に吸収する（伸縮指定が無いとカードが潰れる）。
         for col in range(columns):
             grid.setColumnStretch(col, 1)
@@ -697,9 +699,13 @@ class DividendWindow(QMainWindow):
     def _build_toolbar(self) -> None:
         """主要アクションをツールバーへ並べる（メニューと同じ QAction を共有）。
 
-        取得系 / 編集系 / 表示系をセパレータで区切り、参照操作と破壊的操作
-        （削除）が同列に並ぶのを避ける。ボタンの有効/無効は QAction 側の状態に
-        追随するため、_sync_action_states の1箇所で3者まとめて制御できる。
+        取得系 / 編集系をセパレータで区切り、参照操作と破壊的操作（削除）が
+        同列に並ぶのを避ける。ボタンの有効/無効は QAction 側の状態に追随する
+        ため、_sync_action_states の1箇所で3者まとめて制御できる。
+
+        表示モードと絞り込みは2段目へ分ける。1段に詰めると最小ウィンドウ幅では
+        収まらず、あふれた項目（＝右端の絞り込みボックス）が Qt の拡張メニューへ
+        追いやられて画面から消えてしまう。
         """
         bar = QToolBar("操作")
         bar.setObjectName("mainToolBar")
@@ -717,14 +723,28 @@ class DividendWindow(QMainWindow):
         delete_button = bar.widgetForAction(act["delete"])
         if delete_button is not None:
             delete_button.setObjectName("dangerAction")
-        bar.addSeparator()
-        self._build_mode_controls(bar)
+        # ボタン面にはショートカットを書かないので、ツールチップで補う。
+        for key in ("update_market", "update_fx", "reload", "new", "edit", "delete"):
+            action = act[key]
+            sequence = action.shortcut().toString()
+            action.setToolTip(
+                f"{action.text().rstrip('.')} ({sequence})" if sequence else action.text()
+            )
 
         self.addToolBar(bar)
         self._toolbar = bar
 
+        self.addToolBarBreak()
+        view_bar = QToolBar("表示")
+        view_bar.setObjectName("viewToolBar")
+        view_bar.setMovable(False)
+        view_bar.setFloatable(False)
+        self._build_mode_controls(view_bar)
+        self.addToolBar(view_bar)
+        self._view_toolbar = view_bar
+
     def _build_mode_controls(self, bar: QToolBar) -> None:
-        """表示モードの切替と絞り込みをツールバー右側へ配置する。
+        """表示モードの切替と絞り込みを2段目のツールバーへ配置する。
 
         トグルをドロップダウンにして現在のモードを常時可視にする（従来は情報
         ラベルの1行テキストにしか出ず、今どちらのモードか分からなかった）。
@@ -755,7 +775,10 @@ class DividendWindow(QMainWindow):
         self._filter = QLineEdit()
         self._filter.setPlaceholderText("コード / 銘柄名 / 口座")
         self._filter.setClearButtonEnabled(True)
-        self._filter.setFixedWidth(220)
+        # 固定幅にすると狭いウィンドウで収まらず拡張メニューへ飛んで消えるため、
+        # 下限を決めたうえで縮められるようにする。
+        self._filter.setMinimumWidth(150)
+        self._filter.setMaximumWidth(260)
         # proxy は後段で生成されるが、textChanged は実行時にしか発火しないため接続順は問題ない。
         self._filter.textChanged.connect(self._on_filter_changed)
         bar.addWidget(self._filter)
@@ -1059,12 +1082,12 @@ class DividendWindow(QMainWindow):
         # 税引・収入モードはツールバーのドロップダウンが示すため、ここでは
         # 他に表示場所の無い恒久情報だけを載せる。
         missing_note = (
-            f"   |   評価額未算出 {summary.missing_market_value_count}銘柄"
+            f" | 未算出 {summary.missing_market_value_count}銘柄"
             if summary.missing_market_value_count else ""
         )
         self._info.setText(
-            f"USDJPY {fmt_number(self.fx_rate, 4)}   |   "
-            f"取得 {self.market_fetched_at or 'N/A'} "
+            f"USDJPY {fmt_number(self.fx_rate, 4)} | "
+            f"取得 {self._compact_timestamp(self.market_fetched_at)} "
             f"({self.market_source or 'N/A'}){missing_note}"
         )
         income_kpi_label = "年間収入" if self.withdrawal_mode is not None else "年間配当"
@@ -1173,6 +1196,17 @@ class DividendWindow(QMainWindow):
             return
         self.history = history
         self._refresh_trend()  # 追加した当日点を推移グラフへ即時反映
+
+    @staticmethod
+    def _compact_timestamp(value: str | None) -> str:
+        """ISO 日時を "YYYY-MM-DD HH:MM" へ詰める（秒・タイムゾーンは落とす）。
+
+        ステータスバーの恒久情報は一時通知（showMessage）と横幅を分け合うため、
+        狭いウィンドウで通知が潰れないよう短く保つ。
+        """
+        if not value:
+            return "N/A"
+        return value[:16].replace("T", " ")
 
     @staticmethod
     def _with_csv_suffix(path: str) -> str:
