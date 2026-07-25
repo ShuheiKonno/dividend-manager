@@ -3,11 +3,19 @@
 from __future__ import annotations
 
 from src.dialogs import (
+    ACCOUNT_CHOICES,
     validate_optional_date,
     validate_optional_number,
     validate_optional_rate,
     validate_required_number,
 )
+
+
+def test_account_choices():
+    """口座の選択肢（空=未設定を先頭に、指定の5種）。"""
+    assert ACCOUNT_CHOICES == [
+        "", "特定", "一般", "NISA（成長）", "NISA（積立）", "旧NISA"
+    ]
 
 
 def test_validate_required_number():

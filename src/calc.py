@@ -38,7 +38,11 @@ def _pick_div_ps(
             if gross is None:
                 gross = market.annual_div_ps_gross if market else None
             if gross is not None:
-                rate = holding.tax_rate if holding.tax_rate is not None else _DEFAULT_TAX_RATE
+                rate = (
+                    holding.tax_rate
+                    if holding.tax_rate is not None
+                    else _DEFAULT_TAX_RATE
+                )
                 result = gross * (1.0 - rate)
     else:
         override = holding.annual_div_ps_gross_override
@@ -66,7 +70,15 @@ def compute_rows(
     fx_rate: float | None,
     mode: str,
     withdrawal_mode: str | None = None,
+    include_inactive: bool = False,
 ) -> tuple[list[dict[str, float | str | None]], Summary]:
+    """保有銘柄ごとの表示用 dict 列と、集計済み Summary を返す。
+
+    include_inactive=True のとき active=False の銘柄も rows へ（元の順序のまま）
+    含めるが、Summary の集計には一切加算しない（無効銘柄は集計対象外という
+    意味論を保つ）。既定の False では従来どおり無効銘柄を完全に読み飛ばすため、
+    既存の呼び出し側（legacy_tui / 履歴スナップショット）の結果は変わらない。
+    """
     rows: list[dict[str, float | str | None]] = []
     sum_book = 0.0
     sum_market = 0.0
@@ -80,9 +92,11 @@ def compute_rows(
     known_profit_count = 0
 
     for holding in holdings:
-        if not holding.active:
+        if not holding.active and not include_inactive:
             continue
-        active_count += 1
+        is_active = holding.active
+        if is_active:
+            active_count += 1
         market = market_map.get(holding.symbol)
         div_ps = _pick_div_ps(holding, market, mode)
         annual_dividend = holding.shares * div_ps if div_ps is not None else None
@@ -141,6 +155,11 @@ def compute_rows(
             {
                 "symbol": holding.symbol,
                 "name": holding.name,
+                # 同一 symbol が複数行（複数口座・取得単価）になり得るため、
+                # 表示側が行を判別できるよう口座・資産種別も返す。
+                "account": holding.account,
+                "asset_type": holding.asset_type,
+                "active": is_active,
                 "shares": holding.shares,
                 "currency": holding.currency,
                 "avg_cost": holding.avg_cost,
@@ -159,6 +178,9 @@ def compute_rows(
             }
         )
 
+        # 無効銘柄は行として返しても集計には一切加算しない（集計対象外の意味論）。
+        if not is_active:
+            continue
         if book_value_jpy is not None:
             sum_book += book_value_jpy
             known_book_count += 1
@@ -173,7 +195,9 @@ def compute_rows(
             sum_profit += profit_jpy
             known_profit_count += 1
 
-    total_book = sum_book if active_count > 0 and known_book_count == active_count else None
+    total_book = (
+        sum_book if active_count > 0 and known_book_count == active_count else None
+    )
     total_market = (
         sum_market if active_count > 0 and known_market_count == active_count else None
     )

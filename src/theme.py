@@ -36,6 +36,13 @@ TEXT_STATUS_ERROR = "#ff8a80"  # ステータスバーのエラー色（ダー�
 ERROR = "#e53935"            # 入力エラーの枠線・文字
 CHART_BG = "#1c1c1c"         # チャート描画背景（widgets.py と共有）
 
+# ---- 損益カラー（日本式: プラス=赤 / マイナス=青） ----
+# テーブルの文字色と treemap のタイル文字色で同じ値を使う。ダーク背景
+# （BG_TABLE / CHART_BG）でも読めるよう、彩度より明度を優先した淡めの赤青。
+# 実際の色の出し分けは widgets.profit_text_qcolor / profit_tile_colors に集約。
+PROFIT_UP = "#e53935"        # 含み益（プラス）
+PROFIT_DOWN = "#42a5f5"      # 含み損（マイナス）
+
 # ---- フォント・形状トークン ----
 FONT_FAMILY_PRIMARY = "Yu Gothic UI"  # QFont 用（Windows 10/11 標準 UI フォント）
 FONT_FAMILY = '"Yu Gothic UI", "Meiryo UI", "MS UI Gothic", sans-serif'  # QSS 用
@@ -155,8 +162,39 @@ QScrollBar::handle:vertical:hover, QScrollBar::handle:horizontal:hover {{ backgr
 QScrollBar::add-line, QScrollBar::sub-line {{ width: 0px; height: 0px; }}
 QScrollBar::add-page, QScrollBar::sub-page {{ background: transparent; }}
 
+/* ---- ツールバー ---- */
+/* Fusion 既定のツールバーはダーク背景から浮くため、明示的に配色を与える。
+   ツールボタンは QPushButton と同系の見え方に揃える。 */
+QToolBar {{
+    background: {BG_WINDOW}; border: none;
+    border-bottom: 1px solid {BORDER}; padding: 4px 6px; spacing: 4px;
+}}
+QToolBar::separator {{
+    background: {BORDER}; width: 1px; margin: 4px 8px;
+}}
+QToolBar QToolButton {{
+    background: {BG_BUTTON}; color: {TEXT_PRIMARY};
+    border: 1px solid {BORDER_LIGHT}; padding: 5px 12px; border-radius: {RADIUS}px;
+}}
+QToolBar QToolButton:hover {{ background: {BG_HOVER}; border-color: #5a5a5a; }}
+QToolBar QToolButton:pressed {{ background: {BG_PRESSED}; }}
+QToolBar QToolButton:disabled {{
+    background: #282828; color: {TEXT_DISABLED}; border-color: {BORDER};
+}}
+QToolBar QToolButton:focus {{ border-color: {BORDER_FOCUS}; outline: none; }}
+/* 取り消せない操作（削除）はホバー時に赤枠で他と区別する。 */
+QToolBar QToolButton#dangerAction:hover {{
+    border-color: {ERROR}; color: {TEXT_STATUS_ERROR};
+}}
+QToolBar QLabel {{ color: {TEXT_SECONDARY}; padding: 0px 2px; }}
+
 /* ---- ステータスバー・プログレスバー・ツールチップ ---- */
 QStatusBar {{ background: {BG_INPUT}; color: {TEXT_STATUS}; }}
+/* エラー通知は動的プロパティで切り替える（_notify が setProperty +
+   unpolish/polish を呼ぶ）。QStatusBar 全体を setStyleSheet で組み直すと
+   このファイルと配色が二重管理になるため、状態はここで定義する。 */
+QStatusBar[error="true"] {{ color: {TEXT_STATUS_ERROR}; }}
+QStatusBar QLabel {{ color: {TEXT_STATUS}; }}
 QProgressBar {{
     border: 1px solid {BORDER}; background: {BG_TABLE}; color: {TEXT_PRIMARY};
     text-align: center; border-radius: {RADIUS}px;

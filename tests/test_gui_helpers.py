@@ -65,6 +65,28 @@ def test_row_for_holding_index():
     assert gui.row_for_holding_index([], 0) is None
 
 
+def test_format_cell_translates_asset_type_and_shows_account():
+    row = {"account": "NISA", "asset_type": "fund", "active": True}
+    assert gui._format_cell(row, "account") == ("NISA", None)
+    assert gui._format_cell(row, "asset_type")[0] == "投信"
+    assert gui._format_cell({"asset_type": "stock"}, "asset_type")[0] == "株式"
+    # 未知の値はそのまま出す（CSV を手で編集した場合に消えないように）
+    assert gui._format_cell({"asset_type": "bond"}, "asset_type")[0] == "bond"
+
+
+def test_format_cell_dims_inactive_rows_over_profit_color():
+    """無効銘柄は損益の赤青より優先して淡色になること。"""
+    active = {"profit_jpy": 1000.0, "active": True}
+    inactive = {"profit_jpy": 1000.0, "active": False}
+    _, active_color = gui._format_cell(active, "profit_jpy")
+    text, inactive_color = gui._format_cell(inactive, "profit_jpy")
+    assert active_color is not None and active_color.name() != inactive_color.name()
+    assert inactive_color.name() == gui.TEXT_DISABLED
+    assert text == "1,000"  # 表示文字列は淡色化で変わらない
+    # active キーが無い行（無効銘柄を含めない既定パス）は従来どおり損益色
+    assert gui._format_cell({"profit_jpy": 1000.0}, "profit_jpy")[1] is not None
+
+
 def test_rate_and_date_validation():
     assert gui._optional_rate(0.0, "率") == 0.0
     assert gui._optional_rate(1.0, "率") == 1.0

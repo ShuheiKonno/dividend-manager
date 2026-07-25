@@ -12,6 +12,7 @@ from typing import Optional
 
 from PySide6.QtCore import Qt, QObject, QThread, Signal, QSortFilterProxyModel, QRect
 from PySide6.QtGui import (
+    QAction,
     QStandardItemModel,
     QStandardItem,
     QShortcut,
@@ -37,13 +38,13 @@ from PySide6.QtWidgets import (
     QHeaderView,
     QDoubleSpinBox,
     QMessageBox,
-    QAbstractSpinBox,
-    QPushButton,
     QStackedWidget,
     QSplitter,
     QFileDialog,
     QComboBox,
     QMenu,
+    QToolBar,
+    QSizePolicy,
 )
 
 # 検証ヘルパーはダイアログと共に dialogs.py へ移設した。tests/test_gui_helpers.py が
@@ -80,11 +81,9 @@ from .history import upsert_record, merge_records, combine_income
 # 取得は p / u キーのワーカースレッドでしか走らないため、import を run() 内へ遅延させる。
 from .theme import (
     build_app_qss,
-    BG_INPUT,
     FONT_FAMILY_PRIMARY,
     FONT_SIZE_PT,
-    TEXT_STATUS,
-    TEXT_STATUS_ERROR,
+    TEXT_DISABLED,
 )
 from .utils import fmt_number, fmt_percent, safe_float, today_jst_str
 from .widgets import (
@@ -96,9 +95,15 @@ from .widgets import (
 )
 
 
+# 同一 symbol が複数行（複数口座・取得単価）になり得るため、口座・種別を
+# コード/銘柄名の直後に置いて行を判別できるようにする。両テーブルで
+# 0=symbol / 1=name / 2=account の並びを揃える（NumericSortProxy の絞り込みが
+# この列位置を前提にする）。
 PRICE_COLUMNS = [
     ("コード", "symbol"),
     ("銘柄名", "name"),
+    ("口座", "account"),
+    ("種別", "asset_type"),
     ("株数", "shares"),
     ("通貨", "currency"),
     ("購入単価", "avg_cost"),
@@ -111,6 +116,8 @@ PRICE_COLUMNS = [
 INCOME_COLUMNS = [
     ("コード", "symbol"),
     ("銘柄名", "name"),
+    ("口座", "account"),
+    ("種別", "asset_type"),
     ("株数", "shares"),
     ("通貨", "currency"),
     ("配当/株", "annual_div_ps"),
@@ -120,6 +127,12 @@ INCOME_COLUMNS = [
     ("時価利回り", "yield_on_value"),
     ("配当更新日", "div_forecast_as_of"),
 ]
+# 資産種別の表示名（CSV 上の値 → 日本語ラベル）
+ASSET_TYPE_LABELS = {"stock": "株式", "fund": "投信"}
+# 収入モードの選択肢。内部表現の None を "none" キーで表す（ドロップダウン用）。
+WITHDRAWAL_CHOICES = [("none", "配当"), ("fixed", "定額取崩"), ("rate", "定率取崩")]
+# 収入モード → 表示ラベル（情報バー・KPI タイトル用）
+WITHDRAWAL_LABELS = {None: "配当", "fixed": "定額取崩", "rate": "定率取崩"}
 # 評価額タブの推移系列 (ラベル, history キー, 線色)。評価額＋簿価の2本固定。
 ASSET_TREND_SERIES = [
     ("評価額", "total_market_value_jpy", QColor("#42a5f5")),
@@ -155,9 +168,24 @@ def row_for_holding_index(stored_indices: list[int], holding_idx: int) -> int | 
 
 
 def _format_cell(row: dict, key: str) -> tuple[str, Optional[QColor]]:
-    """セル表示文字列と文字色（損益のみ赤青）を返す。"""
+    """セル表示文字列と文字色を返す。
+
+    無効（active=False）銘柄は集計対象外なので、損益の赤青より優先して
+    行全体を淡色にする。
+    """
+    text, color = _cell_text_and_color(row, key)
+    if row.get("active") is False:
+        return text, QColor(TEXT_DISABLED)
+    return text, color
+
+
+def _cell_text_and_color(row: dict, key: str) -> tuple[str, Optional[QColor]]:
+    """有効銘柄としての表示文字列と文字色（損益のみ赤青）を返す。"""
     val = row.get(key)
-    if key in ("symbol", "name", "currency", "div_forecast_as_of"):
+    if key == "asset_type":
+        text = str(val or "")
+        return ASSET_TYPE_LABELS.get(text, text), None
+    if key in ("symbol", "name", "account", "currency", "div_forecast_as_of"):
         return str(val or ""), None
     if key in ("shares", "avg_cost", "last_price", "annual_div_ps"):
         return fmt_number(val, 2), None
@@ -184,7 +212,7 @@ class NumericSortProxy(QSortFilterProxyModel):
         self._filter_text = ""
 
     def set_filter_text(self, text: str) -> None:
-        """コード(col0)・銘柄名(col1)に対する部分一致フィルタ語を設定して再評価する。"""
+        """コード(col0)・銘柄名(col1)・口座(col2)への部分一致フィルタ語を設定する。"""
         self._filter_text = (text or "").strip().lower()
         self.invalidateFilter()
 
@@ -192,7 +220,7 @@ class NumericSortProxy(QSortFilterProxyModel):
         if not self._filter_text:
             return True
         model = self.sourceModel()
-        for col in (0, 1):  # symbol / name（両テーブル共通の並び）
+        for col in (0, 1, 2):  # symbol / name / account（両テーブル共通の並び）
             idx = model.index(source_row, col, source_parent)
             value = model.data(idx, Qt.ItemDataRole.DisplayRole) or ""
             if self._filter_text in str(value).lower():
@@ -277,6 +305,9 @@ class DividendWindow(QMainWindow):
         # 円グラフの「その他」集約閾値（評価額/配当タブで独立）と起動時の表示タブ。
         self.pie_threshold_asset: float = float(_saved.get("pie_threshold_asset", 2.0))
         self.pie_threshold_income: float = float(_saved.get("pie_threshold_income", 2.0))
+        # 無効銘柄をテーブルへ表示するか。既定は非表示（従来どおり）だが、
+        # 表示できないと編集ダイアログで無効化した銘柄を復帰できなくなる。
+        self.show_inactive: bool = bool(_saved.get("show_inactive", False))
         self._initial_tab: int = _saved.get("last_tab", 0)
         # テーブル列幅: 保存値があれば初回描画で適用、無ければ内容に合わせて自動調整。
         self._saved_column_widths: dict[str, list[int]] = {
@@ -291,6 +322,8 @@ class DividendWindow(QMainWindow):
         self.market_fetched_at: str | None = None
         self.history: list[HistoryRecord] = []
         self.row_holding_indices: dict[str, list[int]] = {"price": [], "income": []}
+        # メニュー・ツールバー・ショートカットが共有する QAction（_build_actions が充填）
+        self._actions: dict[str, QAction] = {}
         self._busy = False
         self._thread: QThread | None = None
         self._worker: QObject | None = None
@@ -308,6 +341,8 @@ class DividendWindow(QMainWindow):
         モニタ構成の変更などで保存位置がどの画面にも掛からない場合は、
         位置を捨ててサイズのみ適用する（画面外に出て操作不能になるのを防ぐ）。
         """
+        # ツールバー・KPI・表が読める下限。これ未満に縮めると各所が潰れる。
+        self.setMinimumSize(900, 600)
         if not geometry:
             self.resize(1180, 760)
             return
@@ -357,41 +392,35 @@ class DividendWindow(QMainWindow):
         # Win11 既定ライトテーマとの混在を避ける。テーマ切替は対象外＝固定）。
         # 配色・フォント等のトークンと QSS 生成は src/theme.py に集約。
         self.setStyleSheet(build_app_qss())
+        # QAction はメニュー・ツールバー・ショートカットの共有元なので最初に作る。
+        self._build_actions()
         self._build_menubar()
+        self._build_toolbar()
         central = QWidget()
         root = QVBoxLayout(central)
-
-        self._info = QLabel("")
-        self._info.setObjectName("infoLabel")
-        root.addWidget(self._info)
-
-        self._build_button_bar(root)
 
         kpi_bar = QWidget()
         grid = QGridLayout(kpi_bar)
         grid.setContentsMargins(0, 0, 0, 0)
+        grid.setSpacing(6)
         self._cards: dict[str, KpiCard] = {}
+        # 1行目＝ポートフォリオ全体の要約、2行目＝収入の内訳と利回り。
+        # 最初に見たい指標（評価額・損益）を左上に置く。
         card_defs = [
-            "評価額計", "簿価計", "年間配当", "優待", "合計",
-            "簿価利回り", "時価利回り", "損益", "損益率",
+            "評価額計", "簿価計", "損益", "損益率", "合計",
+            "年間配当", "優待", "簿価利回り", "時価利回り",
         ]
+        columns = 5
         for idx, title in enumerate(card_defs):
             card = KpiCard(title)
             self._cards[title] = card
-            grid.addWidget(card, idx // 5, idx % 5)
+            # 9枚は 5+4 に割れるため、2行目の最後を2列ぶんに広げて右端の穴を埋める。
+            span = 2 if idx == len(card_defs) - 1 else 1
+            grid.addWidget(card, idx // columns, idx % columns, 1, span)
+        # 幅の変化を全列で均等に吸収する（伸縮指定が無いとカードが潰れる）。
+        for col in range(columns):
+            grid.setColumnStretch(col, 1)
         root.addWidget(kpi_bar)
-
-        filter_row = QHBoxLayout()
-        filter_row.addWidget(QLabel("絞り込み:"))
-        self._filter = QLineEdit()
-        self._filter.setPlaceholderText("コード/銘柄名で絞り込み")
-        self._filter.setClearButtonEnabled(True)
-        self._filter.setMaximumWidth(320)
-        # proxy は後段で生成されるが、textChanged は実行時にしか発火しないため接続順は問題ない。
-        self._filter.textChanged.connect(self._on_filter_changed)
-        filter_row.addWidget(self._filter)
-        filter_row.addStretch()
-        root.addLayout(filter_row)
 
         self._tabs = QTabWidget()
         # 評価額タブ（左=構成グラフ[ヒートマップ⇔円グラフ] / 右=評価額推移）
@@ -429,76 +458,144 @@ class DividendWindow(QMainWindow):
 
         self.setCentralWidget(central)
 
+        # 恒久情報（レート・取得時刻・未算出件数）はステータスバー右側へ置き、
+        # 一時通知は左側の showMessage が使う（Qt の作法どおり領域を分ける）。
+        # 画面上部の情報ラベル行が無くなるぶん、表とグラフに縦幅を回せる。
+        self._info = QLabel("")
+        self._info.setObjectName("infoLabel")
+        self.statusBar().addPermanentWidget(self._info)
+
         self._progress = QProgressBar()
         self._progress.setMaximumWidth(260)
         self._progress.setVisible(False)
         self.statusBar().addPermanentWidget(self._progress)
 
-    def _build_menubar(self) -> None:
-        """薄いメニューバーを構築する（低頻度機能とショートカット一覧の置き場）。
+    # (キー, ラベル, ショートカット, スロット属性名) — メニュー・ツールバー・
+    # ショートカットの唯一の定義元。ショートカットは QAction に持たせるため、
+    # ラベルへ手書きでキーを書かない（メニューが自動表示する）。
+    _ACTION_DEFS = [
+        ("update_market", "株価・配当を取得", "F5", "action_update_market"),
+        ("update_fx", "USDJPYを取得", "Ctrl+U", "action_update_fx"),
+        ("reload", "再読込", "Ctrl+R", "_reload_all"),
+        ("new", "新規登録...", "Ctrl+N", "action_new_holding"),
+        ("edit", "編集...", "Ctrl+E", "action_edit"),
+        ("delete", "削除", "Ctrl+D", "action_delete"),
+        ("toggle_mode", "税引前 / 税引後 の切替", "Ctrl+M", "action_toggle_mode"),
+        ("toggle_withdrawal", "収入モードの切替", "Ctrl+I", "action_toggle_withdrawal"),
+        ("export_holdings", "保有銘柄...", None, "action_export_holdings"),
+        ("export_history", "推移履歴...", None, "action_export_history"),
+        ("import_holdings", "保有銘柄...", None, "action_import_holdings"),
+        ("import_history", "推移履歴...", None, "action_import_history"),
+        ("focus_filter", "絞り込みへ移動", "Ctrl+F", "_focus_filter"),
+        ("help_shortcuts", "キーボードショートカット一覧...", "F1", "_show_shortcut_help"),
+        ("quit", "終了", "Ctrl+Q", "close"),
+    ]
+    # タブ切替（Ctrl+1〜4）。ラベルは QTabWidget のタブ名と揃える。
+    _TAB_ACTION_LABELS = ["評価額", "配当金", "株価関連", "配当関連"]
 
-        一文字ショートカットは _register_shortcuts の QShortcut（入力中ガード付き）が
-        唯一の登録元のため、QAction にはショートカットを設定しない（二重登録すると
-        Ambiguous shortcut とガード回避が起きる）。ラベル末尾の (X) は対応キーの表記。
-        メニュータイトルの &F 等は Alt 系ニーモニックで一文字キーとは衝突しない。
+    def _build_actions(self) -> None:
+        """メニュー・ツールバー・ショートカットが共有する QAction を生成する。
+
+        同じ操作をメニュー・ボタン・ショートカットで別々に定義すると有効/無効を
+        同期できず「押せるのに何も起きないボタン」が生まれる。QAction を唯一の
+        定義元にして、3者が同じインスタンスを参照する。
+
+        ショートカットは全て修飾キー付き（Ctrl / F キー）。一文字キーだと表で
+        銘柄コードを打つだけで誤爆するため、入力中ガードごと廃止した。
+        """
+        for key, label, sequence, slot_name in self._ACTION_DEFS:
+            action = QAction(label, self)
+            if sequence:
+                action.setShortcut(QKeySequence(sequence))
+            # triggered は checked(bool) を渡すため、引数なしスロットへはラムダで吸収する。
+            action.triggered.connect(
+                lambda _checked=False, name=slot_name: getattr(self, name)()
+            )
+            self.addAction(action)  # ウィンドウ配下でショートカットを有効化
+            self._actions[key] = action
+
+        # 無効銘柄トグルはチェック状態を持たせ、現在値をメニュー上で示す。
+        inactive = QAction("無効銘柄も表示", self)
+        inactive.setShortcut(QKeySequence("Ctrl+Shift+I"))
+        inactive.setCheckable(True)
+        inactive.setChecked(self.show_inactive)
+        inactive.triggered.connect(lambda _checked=False: self.action_toggle_inactive())
+        self.addAction(inactive)
+        self._actions["toggle_inactive"] = inactive
+
+        for index, label in enumerate(self._TAB_ACTION_LABELS):
+            action = QAction(label, self)
+            action.setShortcut(QKeySequence(f"Ctrl+{index + 1}"))
+            action.triggered.connect(
+                lambda _checked=False, i=index: self._tabs.setCurrentIndex(i)
+            )
+            self.addAction(action)
+            self._actions[f"tab{index}"] = action
+
+    def _build_menubar(self) -> None:
+        """メニューバーを構築する（項目は _build_actions の QAction を共有）。
+
+        メニュータイトルの &F 等は Alt 系ニーモニック。各項目のショートカットは
+        QAction 側に設定済みで、Qt が右端へ自動表示する。
         """
         bar = self.menuBar()
-
-        def add(menu, label: str, slot):
-            action = menu.addAction(label)
-            # triggered は checked(bool) を渡すため、引数なしスロットへはラムダで吸収する。
-            action.triggered.connect(lambda _checked=False, s=slot: s())
-            return action
+        act = self._actions
 
         file_menu = bar.addMenu("ファイル(&F)")
         export_menu = file_menu.addMenu("エクスポート (CSV)")
-        add(export_menu, "保有銘柄...", self.action_export_holdings)
-        add(export_menu, "推移履歴...", self.action_export_history)
+        export_menu.addAction(act["export_holdings"])
+        export_menu.addAction(act["export_history"])
         import_menu = file_menu.addMenu("インポート (CSV)")
-        add(import_menu, "保有銘柄...", self.action_import_holdings)
-        add(import_menu, "推移履歴...", self.action_import_history)
+        import_menu.addAction(act["import_holdings"])
+        import_menu.addAction(act["import_history"])
         file_menu.addSeparator()
-        add(file_menu, "終了 (Q)", self.close)
+        file_menu.addAction(act["quit"])
 
         data_menu = bar.addMenu("データ(&D)")
-        add(data_menu, "株価・配当更新 (P)", self.action_update_market)
-        add(data_menu, "USDJPY更新 (U)", self.action_update_fx)
-        add(data_menu, "再読込 (R)", self._reload_all)
+        data_menu.addAction(act["update_market"])
+        data_menu.addAction(act["update_fx"])
+        data_menu.addAction(act["reload"])
         data_menu.addSeparator()
-        add(data_menu, "新規登録 (N)", self.action_new_holding)
-        add(data_menu, "編集 (E)", self.action_edit)
-        add(data_menu, "削除 (D)", self.action_delete)
+        data_menu.addAction(act["new"])
+        data_menu.addAction(act["edit"])
+        data_menu.addAction(act["delete"])
 
         view_menu = bar.addMenu("表示(&V)")
-        add(view_menu, "税引前後の切替 (M)", self.action_toggle_mode)
-        add(view_menu, "取崩モードの切替 (W)", self.action_toggle_withdrawal)
+        view_menu.addAction(act["toggle_mode"])
+        view_menu.addAction(act["toggle_withdrawal"])
+        view_menu.addAction(act["toggle_inactive"])
         view_menu.addSeparator()
-        tab_labels = ["評価額 (1)", "配当金 (2)", "株価関連 (3)", "配当関連 (4)"]
-        for i, label in enumerate(tab_labels):
-            add(view_menu, label, lambda idx=i: self._tabs.setCurrentIndex(idx))
+        view_menu.addAction(act["focus_filter"])
+        view_menu.addSeparator()
+        for index in range(len(self._TAB_ACTION_LABELS)):
+            view_menu.addAction(act[f"tab{index}"])
 
         help_menu = bar.addMenu("ヘルプ(&H)")
-        add(help_menu, "キーボードショートカット一覧...", self._show_shortcut_help)
+        help_menu.addAction(act["help_shortcuts"])
 
     def _show_shortcut_help(self) -> None:
-        """キーボードショートカットの一覧を表示する。"""
+        """キーボードショートカットの一覧を表示する（F1）。"""
         QMessageBox.information(
             self,
             "キーボードショートカット",
-            "Q: 終了\n"
-            "R: 再読込\n"
-            "M: 税引前後の切替\n"
-            "W: 取崩モードの切替\n"
-            "P: 株価・配当の更新\n"
-            "U: USDJPYレートの更新\n"
-            "N: 新規登録\n"
-            "E: 選択銘柄の編集（ダブルクリックでも可）\n"
-            "D: 選択銘柄の削除\n"
-            "S: カーソル列でソート\n"
-            "1〜4: タブ切替（評価額 / 配当金 / 株価関連 / 配当関連）\n"
-            "Ctrl+F: 絞り込みボックスへフォーカス\n"
+            "F5: 株価・配当を取得\n"
+            "Ctrl+U: USDJPYレートを取得\n"
+            "Ctrl+R: 再読込（ローカルCSV）\n"
+            "\n"
+            "Ctrl+N: 新規登録\n"
+            "Ctrl+E: 選択銘柄の編集（ダブルクリック / Enter でも可）\n"
+            "Ctrl+D / Delete: 選択銘柄の削除\n"
+            "\n"
+            "Ctrl+M: 税引前 / 税引後 の切替\n"
+            "Ctrl+I: 収入モードの切替（配当 → 定額取崩 → 定率取崩）\n"
+            "Ctrl+Shift+I: 無効銘柄の表示切替\n"
+            "\n"
+            "Ctrl+1〜4: タブ切替（評価額 / 配当金 / 株価関連 / 配当関連）\n"
+            "Ctrl+F: 絞り込みボックスへ移動\n"
             "Esc: 絞り込みのクリア\n"
-            "\n※テキスト入力中は一文字ショートカットが無効になります。",
+            "F1: このヘルプ\n"
+            "Ctrl+Q: 終了\n"
+            "\n※列のソートはヘッダークリック、Tab キーで各操作へ移動できます。",
         )
 
     def _make_table(self, columns: list[tuple[str, str]]):
@@ -514,14 +611,32 @@ class DividendWindow(QMainWindow):
         view.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
         view.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
         view.setAlternatingRowColors(True)
-        view.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Interactive)
-        view.horizontalHeader().setStretchLastSection(True)
+        header = view.horizontalHeader()
+        header.setSectionResizeMode(QHeaderView.ResizeMode.Interactive)
+        # どの列も引き伸ばさず内容幅のまま並べる。最終列（損益率）を伸ばすと
+        # 損益(円) との間に数百px の空白ができ、1行を読むのに視線が大きく飛ぶ。
+        # 余りは表の右端に残す＝行の途中に空洞を作らない方が圧倒的に読みやすい
+        # （実データ 1536px 幅で描き比べて決定）。列幅は各自ドラッグで調整できる。
+        header.setStretchLastSection(False)
         view.verticalHeader().setVisible(False)
         view.sortByColumn(0, Qt.SortOrder.AscendingOrder)
         view.doubleClicked.connect(lambda _idx: self.action_edit())
         view.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         view.customContextMenuRequested.connect(
             lambda pos, v=view: self._show_table_context_menu(v, pos)
+        )
+        # 表の上でだけ効くキー（WidgetShortcut）。Delete/Enter は GUI の標準操作だが、
+        # ウィンドウ全体に効かせるとグラフタブや入力欄で誤爆するため文脈を絞る。
+        for sequence, slot in (
+            (QKeySequence(Qt.Key.Key_Delete), self.action_delete),
+            (QKeySequence(Qt.Key.Key_Return), self.action_edit),
+            (QKeySequence(Qt.Key.Key_Enter), self.action_edit),
+        ):
+            shortcut = QShortcut(sequence, view, activated=slot)
+            shortcut.setContext(Qt.ShortcutContext.WidgetShortcut)
+        # 選択が変わるたびに編集・削除の可否を更新する。
+        view.selectionModel().selectionChanged.connect(
+            lambda *_args: self._sync_action_states()
         )
         return view, model, proxy
 
@@ -534,21 +649,15 @@ class DividendWindow(QMainWindow):
         idx = view.indexAt(pos)
         if idx.isValid():
             view.selectRow(idx.row())
-        has_row = view.currentIndex().isValid()
+        # メニュー・ツールバーと同じ QAction を並べる。選択に応じた有効/無効は
+        # selectionChanged → _sync_action_states が済ませているため、ここでは
+        # 状態を触らない。項目の実行は QAction の triggered が直接担う。
         menu = QMenu(self)
-        act_edit = menu.addAction("編集 (E)")
-        act_delete = menu.addAction("削除 (D)")
+        menu.addAction(self._actions["edit"])
+        menu.addAction(self._actions["delete"])
         menu.addSeparator()
-        act_new = menu.addAction("新規登録 (N)")
-        act_edit.setEnabled(has_row)
-        act_delete.setEnabled(has_row)
-        chosen = menu.exec(view.viewport().mapToGlobal(pos))
-        if chosen is act_edit:
-            self.action_edit()
-        elif chosen is act_delete:
-            self.action_delete()
-        elif chosen is act_new:
-            self.action_new_holding()
+        menu.addAction(self._actions["new"])
+        menu.exec(view.viewport().mapToGlobal(pos))
 
     def _make_pie_tab(self, kind: str, piechart: PieChartWidget) -> QWidget:
         """閾値スピンボックス付きの円グラフコンテナを生成して返す。
@@ -592,31 +701,105 @@ class DividendWindow(QMainWindow):
         spin.valueChanged.connect(on_threshold)
         return container
 
-    def _build_button_bar(self, root: QVBoxLayout) -> None:
-        """主要アクションを GUI ボタンとして並べる（キーボードショートカットと等価）。"""
-        bar = QWidget()
-        layout = QHBoxLayout(bar)
-        layout.setContentsMargins(0, 0, 0, 2)
-        layout.setSpacing(4)
-        # (ラベル, スロット) ※ラベル末尾の (X) は対応ショートカット
-        defs = [
-            ("再読込 (R)", self._reload_all),
-            ("税引前後 (M)", self.action_toggle_mode),
-            ("取崩切替 (W)", self.action_toggle_withdrawal),
-            ("株価更新 (P)", self.action_update_market),
-            ("USDJPY (U)", self.action_update_fx),
-            ("新規 (N)", self.action_new_holding),
-            ("編集 (E)", self.action_edit),
-            ("削除 (D)", self.action_delete),
-        ]
-        for label, slot in defs:
-            btn = QPushButton(label)
-            btn.setFocusPolicy(Qt.FocusPolicy.NoFocus)  # 一文字ショートカットを奪わない
-            # clicked は checked(bool) を渡すため、引数なしスロットへはラムダで吸収する。
-            btn.clicked.connect(lambda _checked=False, s=slot: s())
-            layout.addWidget(btn)
-        layout.addStretch()
-        root.addWidget(bar)
+    def _build_toolbar(self) -> None:
+        """主要アクションをツールバーへ並べる（メニューと同じ QAction を共有）。
+
+        取得系 / 編集系をセパレータで区切り、参照操作と破壊的操作（削除）が
+        同列に並ぶのを避ける。ボタンの有効/無効は QAction 側の状態に追随する
+        ため、_sync_action_states の1箇所で3者まとめて制御できる。
+
+        表示モードと絞り込みは2段目へ分ける。1段に詰めると最小ウィンドウ幅では
+        収まらず、あふれた項目（＝右端の絞り込みボックス）が Qt の拡張メニューへ
+        追いやられて画面から消えてしまう。
+        """
+        bar = QToolBar("操作")
+        bar.setObjectName("mainToolBar")
+        bar.setMovable(False)
+        bar.setFloatable(False)
+        bar.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextOnly)
+        act = self._actions
+
+        for key in ("update_market", "update_fx", "reload"):
+            bar.addAction(act[key])
+        bar.addSeparator()
+        for key in ("new", "edit", "delete"):
+            bar.addAction(act[key])
+        # 削除は取り消せない操作なので、ホバー時の配色で他と区別する。
+        delete_button = bar.widgetForAction(act["delete"])
+        if delete_button is not None:
+            delete_button.setObjectName("dangerAction")
+        # ボタン面にはショートカットを書かないので、ツールチップで補う。
+        for key in ("update_market", "update_fx", "reload", "new", "edit", "delete"):
+            action = act[key]
+            sequence = action.shortcut().toString()
+            action.setToolTip(
+                f"{action.text().rstrip('.')} ({sequence})" if sequence else action.text()
+            )
+
+        self.addToolBar(bar)
+        self._toolbar = bar
+
+        self.addToolBarBreak()
+        view_bar = QToolBar("表示")
+        view_bar.setObjectName("viewToolBar")
+        view_bar.setMovable(False)
+        view_bar.setFloatable(False)
+        self._build_mode_controls(view_bar)
+        self.addToolBar(view_bar)
+        self._view_toolbar = view_bar
+
+    def _build_mode_controls(self, bar: QToolBar) -> None:
+        """表示モードの切替と絞り込みを2段目のツールバーへ配置する。
+
+        トグルをドロップダウンにして現在のモードを常時可視にする（従来は情報
+        ラベルの1行テキストにしか出ず、今どちらのモードか分からなかった）。
+        Ctrl+M / Ctrl+I のサイクル操作でもここの表示が追随する。
+        """
+        bar.addWidget(QLabel("税引: "))
+        self._mode_combo = self._make_combo(
+            [("gross", "税引前"), ("net", "税引後")],
+            self.dividend_mode,
+            lambda key: self._set_dividend_mode(key),
+        )
+        bar.addWidget(self._mode_combo)
+        bar.addWidget(QLabel("   収入: "))
+        self._withdrawal_combo = self._make_combo(
+            WITHDRAWAL_CHOICES,
+            self.withdrawal_mode or "none",
+            lambda key: self._set_withdrawal_mode(None if key == "none" else key),
+        )
+        bar.addWidget(self._withdrawal_combo)
+
+        spacer = QWidget()
+        spacer.setSizePolicy(
+            QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred
+        )
+        bar.addWidget(spacer)
+
+        bar.addWidget(QLabel("絞り込み: "))
+        self._filter = QLineEdit()
+        self._filter.setPlaceholderText("コード / 銘柄名 / 口座")
+        self._filter.setClearButtonEnabled(True)
+        # 固定幅にすると狭いウィンドウで収まらず拡張メニューへ飛んで消えるため、
+        # 下限を決めたうえで縮められるようにする。
+        self._filter.setMinimumWidth(150)
+        self._filter.setMaximumWidth(260)
+        # proxy は後段で生成されるが、textChanged は実行時にしか発火しないため接続順は問題ない。
+        self._filter.textChanged.connect(self._on_filter_changed)
+        bar.addWidget(self._filter)
+
+    def _sync_mode_controls(self) -> None:
+        """ショートカット経由でモードを変えたとき、ドロップダウンの表示を揃える。
+
+        setCurrentIndex は activated を発火しないため、再保存・再描画のループに
+        ならない（_make_combo が activated で接続しているのが前提）。
+        """
+        combo = getattr(self, "_mode_combo", None)
+        if combo is not None:
+            combo.setCurrentIndex(combo.findData(self.dividend_mode))
+        combo = getattr(self, "_withdrawal_combo", None)
+        if combo is not None:
+            combo.setCurrentIndex(combo.findData(self.withdrawal_mode or "none"))
 
     def _make_combo(
         self, defs: list[tuple[str, str]], current_key: str, on_select
@@ -628,7 +811,6 @@ class DividendWindow(QMainWindow):
         誤った保存・再描画が起きない。
         """
         combo = QComboBox()
-        combo.setFocusPolicy(Qt.FocusPolicy.NoFocus)
         selected = 0
         for i, (key, label) in enumerate(defs):
             combo.addItem(label, key)
@@ -782,32 +964,54 @@ class DividendWindow(QMainWindow):
         """タブ切替時に再描画し、最後に開いたタブとして設定へ保存する。"""
         self._save_or_notify(lambda: save_settings(last_tab=index))
         self._refresh_view()
+        # タブによって編集・削除・絞り込みの可否が変わるため状態を取り直す。
+        self._sync_action_states()
 
     def _register_shortcuts(self) -> None:
-        binds = [
-            ("Q", self.close),
-            ("R", self._reload_all),
-            ("M", self.action_toggle_mode),
-            ("W", self.action_toggle_withdrawal),
-            ("P", self.action_update_market),
-            ("U", self.action_update_fx),
-            ("N", self.action_new_holding),
-            ("E", self.action_edit),
-            ("D", self.action_delete),
-            ("S", self.action_sort_by_cursor),
-            ("1", lambda: self._tabs.setCurrentIndex(0)),
-            ("2", lambda: self._tabs.setCurrentIndex(1)),
-            ("3", lambda: self._tabs.setCurrentIndex(2)),
-            ("4", lambda: self._tabs.setCurrentIndex(3)),
-        ]
-        for key, slot in binds:
-            QShortcut(QKeySequence(key), self, activated=self._guard_shortcut(slot))
-        # 修飾キー付き・Esc は入力中でも安全なためガード無しで直結する。
-        QShortcut(QKeySequence("Ctrl+F"), self, activated=self._focus_filter)
+        """QAction で表現できないショートカットだけを登録する。
+
+        主要操作は _build_actions の QAction が持つ（メニューへ自動表示される）。
+        ここに残るのは Esc（メニュー項目にしても意味が無い取り消し操作）のみ。
+        """
         QShortcut(QKeySequence(Qt.Key.Key_Escape), self, activated=self._on_escape)
 
+    def _sync_action_states(self) -> None:
+        """選択状態・実行中フラグに応じてアクションの有効/無効を同期する。
+
+        メニュー・ツールバー・ショートカットが同じ QAction を共有しているため、
+        ここ1箇所で3者すべてが揃う。「押せるのに何も起きない」（グラフタブでの
+        編集・削除、取得中の更新ボタン）を無くすのが目的。
+        """
+        if not self._actions:
+            return
+        tab_key = self._active_tab_key()
+        has_row = (
+            tab_key != "dashboard"
+            and self._view_for_tab(tab_key).currentIndex().isValid()
+        )
+        for key in ("edit", "delete"):
+            self._actions[key].setEnabled(has_row)
+        # 取得中は CSV を書き換える操作を一律で伏せる（多重実行と競合を防ぐ）。
+        idle = not self._busy
+        for key in ("update_market", "update_fx", "reload", "new",
+                    "import_holdings", "import_history"):
+            self._actions[key].setEnabled(idle)
+        # 出力対象が無いエクスポートは押せないようにする。
+        self._actions["export_holdings"].setEnabled(idle and bool(self.holdings))
+        self._actions["export_history"].setEnabled(idle and bool(self.history))
+        # 絞り込みはテーブルにしか効かないため、グラフタブでは無効にする。
+        filter_box = getattr(self, "_filter", None)
+        if filter_box is not None:
+            filter_box.setEnabled(tab_key != "dashboard")
+
     def _focus_filter(self) -> None:
-        """絞り込みボックスへフォーカスを移す（Ctrl+F）。"""
+        """絞り込みボックスへフォーカスを移す（Ctrl+F）。
+
+        絞り込みは表にしか効かないため、グラフタブなら株価関連タブへ切り替えて
+        からフォーカスする（押しても何も起きない状態を作らない）。
+        """
+        if self._active_tab_key() == "dashboard":
+            self._tabs.setCurrentIndex(2)
         self._filter.setFocus()
         self._filter.selectAll()
 
@@ -822,19 +1026,6 @@ class DividendWindow(QMainWindow):
                 self._tabs.setFocus()
             else:
                 self._view_for_tab(tab_key).setFocus()
-
-    def _guard_shortcut(self, slot):
-        """テキスト/数値入力中は単一キーショートカットを無効化するラッパを返す。
-
-        絞り込みボックスや閾値スピンボックスに「7203」「Apple」等を入力する際、
-        1/2/3（タブ切替）や p/n/e/d 等の一文字アクションが誤発火するのを防ぐ。
-        """
-        def wrapper() -> None:
-            focus = QApplication.focusWidget()
-            if isinstance(focus, (QLineEdit, QAbstractSpinBox, QComboBox)):
-                return
-            slot()
-        return wrapper
 
     # ---- データ読み込み / 再描画（legacy DividendApp から移植） ----
     def _reload_all(self) -> None:
@@ -859,10 +1050,13 @@ class DividendWindow(QMainWindow):
     def _refresh_view(self) -> None:
         rows, summary = compute_rows(
             self.holdings, self.market_data_map, self.fx_rate, self.dividend_mode,
-            self.withdrawal_mode,
+            self.withdrawal_mode, include_inactive=self.show_inactive,
         )
-        active_indices = [i for i, h in enumerate(self.holdings) if h.active]
-        self._render_table("price", PRICE_COLUMNS, self._price_model, self._price_view, rows, active_indices)
+        # rows と同じ条件・同じ順序で holdings インデックスを組む（表示行 ↔ 保有の対応）。
+        visible_indices = [
+            i for i, h in enumerate(self.holdings) if h.active or self.show_inactive
+        ]
+        self._render_table("price", PRICE_COLUMNS, self._price_model, self._price_view, rows, visible_indices)
         income_cols = list(INCOME_COLUMNS)
         if self.withdrawal_mode is not None:
             income_cols = [
@@ -870,32 +1064,35 @@ class DividendWindow(QMainWindow):
                 for lbl, key in income_cols
             ]
         self._income_model.setHorizontalHeaderLabels([lbl for lbl, _ in income_cols])
-        self._render_table("income", income_cols, self._income_model, self._income_view, rows, active_indices)
-        self._treemap.set_data(rows)
-        self._piechart.set_data(rows)
+        self._render_table("income", income_cols, self._income_model, self._income_view, rows, visible_indices)
+        # 構成グラフは集計と揃えるため常に有効銘柄のみを対象にする
+        # （無効銘柄は Summary に含まれず、構成比に混ぜると割合が狂う）。
+        chart_rows = [r for r in rows if r.get("active") is not False]
+        self._treemap.set_data(chart_rows)
+        self._piechart.set_data(chart_rows)
         # 配当額ベース: 面積 = 年間配当（取崩モード時は「年間収入」に上書きされた額）
         div_label = "年間収入" if self.withdrawal_mode is not None else "年間配当"
-        div_empty = f"{div_label}データがありません（'p' で取得 / 配当のある銘柄が必要です）"
+        div_empty = f"{div_label}データがありません（F5 で取得 / 配当のある銘柄が必要です）"
         self._treemap_div.set_data(
-            rows, value_key="annual_dividend_jpy", value_label=div_label,
+            chart_rows, value_key="annual_dividend_jpy", value_label=div_label,
             empty_message=div_empty,
         )
         self._piechart_div.set_data(
-            rows, value_key="annual_dividend_jpy", value_label=div_label,
+            chart_rows, value_key="annual_dividend_jpy", value_label=div_label,
             empty_message=div_empty,
         )
         # 推移グラフ（履歴スナップショット）
         self._refresh_trend()
 
-        withdrawal_label = {None: "配当", "fixed": "定額取崩", "rate": "定率取崩"}[self.withdrawal_mode]
+        # 税引・収入モードはツールバーのドロップダウンが示すため、ここでは
+        # 他に表示場所の無い恒久情報だけを載せる。
         missing_note = (
-            f"   |   評価額未算出: {summary.missing_market_value_count}銘柄"
+            f" | 未算出 {summary.missing_market_value_count}銘柄"
             if summary.missing_market_value_count else ""
         )
         self._info.setText(
-            f"税引: {'後' if self.dividend_mode == 'net' else '前'}  収入: {withdrawal_label}   |   "
-            f"USDJPY: {fmt_number(self.fx_rate, 4)}   |   "
-            f"株価・配当取得: {self.market_fetched_at or 'N/A'} "
+            f"USDJPY {fmt_number(self.fx_rate, 4)} | "
+            f"取得 {self._compact_timestamp(self.market_fetched_at)} "
             f"({self.market_source or 'N/A'}){missing_note}"
         )
         income_kpi_label = "年間収入" if self.withdrawal_mode is not None else "年間配当"
@@ -915,6 +1112,8 @@ class DividendWindow(QMainWindow):
             fmt_percent(summary.profit_rate, 2),
             profit_text_qcolor(summary.profit_rate),
         )
+        # 行数・選択状態が変わり得るのでアクションの可否を取り直す。
+        self._sync_action_states()
 
     # ---- 履歴（推移グラフ） ----
     def _refresh_trend(self) -> None:
@@ -1002,6 +1201,17 @@ class DividendWindow(QMainWindow):
             return
         self.history = history
         self._refresh_trend()  # 追加した当日点を推移グラフへ即時反映
+
+    @staticmethod
+    def _compact_timestamp(value: str | None) -> str:
+        """ISO 日時を "YYYY-MM-DD HH:MM" へ詰める（秒・タイムゾーンは落とす）。
+
+        ステータスバーの恒久情報は一時通知（showMessage）と横幅を分け合うため、
+        狭いウィンドウで通知が潰れないよう短く保つ。
+        """
+        if not value:
+            return "N/A"
+        return value[:16].replace("T", " ")
 
     @staticmethod
     def _with_csv_suffix(path: str) -> str:
@@ -1134,15 +1344,17 @@ class DividendWindow(QMainWindow):
         """列幅を初回描画時のみ調整する（以降はユーザーの手動調整幅を維持）。
 
         保存済みの列幅（前回終了時）があればそれを適用し、無ければ内容に合わせる。
+        保存値の要素数が現在の列数と食い違う場合（列の追加・削除をまたいだ設定）は
+        列ごとに幅がずれるため、保存値を捨てて内容に合わせ直す。
         """
         if self._columns_sized[tab_key]:
             return
         self._columns_sized[tab_key] = True
+        header = view.horizontalHeader()
         saved = self._saved_column_widths.get(tab_key) or []
-        if saved:
-            header = view.horizontalHeader()
-            for col in range(min(len(saved), header.count())):
-                header.resizeSection(col, saved[col])
+        if len(saved) == header.count():
+            for col, width in enumerate(saved):
+                header.resizeSection(col, width)
         else:
             view.resizeColumnsToContents()
 
@@ -1188,16 +1400,49 @@ class DividendWindow(QMainWindow):
         view.verticalScrollBar().setValue(state.get("scroll", 0))
 
     # ---- アクション ----
-    def action_toggle_mode(self) -> None:
-        self.dividend_mode = "net" if self.dividend_mode == "gross" else "gross"
-        self._save_or_notify(lambda: save_settings(dividend_mode=self.dividend_mode))
+    def _set_dividend_mode(self, mode: str) -> None:
+        """税引前/税引後を設定する（ドロップダウン選択とショートカットの共通経路）。"""
+        if mode == self.dividend_mode:
+            return
+        self.dividend_mode = mode
+        self._save_or_notify(lambda: save_settings(dividend_mode=mode))
+        self._sync_mode_controls()
         self._refresh_view()
+
+    def _set_withdrawal_mode(self, mode: str | None) -> None:
+        """収入モードを設定する（ドロップダウン選択とショートカットの共通経路）。"""
+        if mode == self.withdrawal_mode:
+            return
+        self.withdrawal_mode = mode
+        self._save_or_notify(lambda: save_settings(withdrawal_mode=mode))
+        self._sync_mode_controls()
+        self._refresh_view()
+
+    def action_toggle_mode(self) -> None:
+        self._set_dividend_mode("net" if self.dividend_mode == "gross" else "gross")
 
     def action_toggle_withdrawal(self) -> None:
         cycle: dict[str | None, str | None] = {None: "fixed", "fixed": "rate", "rate": None}
-        self.withdrawal_mode = cycle[self.withdrawal_mode]
-        self._save_or_notify(lambda: save_settings(withdrawal_mode=self.withdrawal_mode))
+        self._set_withdrawal_mode(cycle[self.withdrawal_mode])
+
+    def action_toggle_inactive(self) -> None:
+        """無効銘柄をテーブルへ表示するかを切り替える。
+
+        無効銘柄は集計・構成グラフの対象外のまま、テーブルにだけ淡色で並ぶ。
+        これが無いと編集ダイアログで「有効」を外した銘柄へ二度と到達できない。
+        """
+        self.show_inactive = not self.show_inactive
+        self._save_or_notify(lambda: save_settings(show_inactive=self.show_inactive))
+        action = self._actions.get("toggle_inactive")
+        if action is not None:
+            # setChecked は triggered を発火しないので再入しない。
+            action.setChecked(self.show_inactive)
         self._refresh_view()
+        self._notify(
+            "無効銘柄を表示します（淡色＝集計対象外）"
+            if self.show_inactive
+            else "無効銘柄を非表示にしました"
+        )
 
     def _active_tab_key(self) -> str:
         # タブ構成: [評価額(0), 配当金(1), 株価関連(2), 配当関連(3)]。
@@ -1214,24 +1459,6 @@ class DividendWindow(QMainWindow):
 
     def _proxy_for_tab(self, tab_key: str):
         return self._income_proxy if tab_key == "income" else self._price_proxy
-
-    def action_sort_by_cursor(self) -> None:
-        tab_key = self._active_tab_key()
-        if tab_key == "dashboard":
-            return
-        view = self._view_for_tab(tab_key)
-        idx = view.currentIndex()
-        if not idx.isValid():
-            return
-        col = idx.column()
-        header = view.horizontalHeader()
-        same = header.sortIndicatorSection() == col
-        order = (
-            Qt.SortOrder.DescendingOrder
-            if same and header.sortIndicatorOrder() == Qt.SortOrder.AscendingOrder
-            else Qt.SortOrder.AscendingOrder
-        )
-        view.sortByColumn(col, order)
 
     def action_edit(self) -> None:
         tab_key = self._active_tab_key()
@@ -1352,6 +1579,7 @@ class DividendWindow(QMainWindow):
         thread.finished.connect(self._on_thread_done)
         self._thread = thread
         self._worker = worker
+        self._sync_action_states()  # 実行中は更新系アクションを伏せる
         thread.start()
 
     def _on_thread_done(self) -> None:
@@ -1359,6 +1587,7 @@ class DividendWindow(QMainWindow):
         self._worker = None
         self._thread = None
         self._progress.setVisible(False)
+        self._sync_action_states()
 
     def _on_worker_error(self, message: str) -> None:
         self._progress.setVisible(False)
@@ -1448,10 +1677,17 @@ class DividendWindow(QMainWindow):
             self._notify("USDJPYレートを取得できませんでした", error=True)
 
     def _notify(self, message: str, error: bool = False) -> None:
-        # エラーは警告色＋⚠ で差別化。通常通知のたびに既定色へ戻す。
-        color = TEXT_STATUS_ERROR if error else TEXT_STATUS
-        self.statusBar().setStyleSheet(f"QStatusBar {{ background: {BG_INPUT}; color: {color}; }}")
-        self.statusBar().showMessage(f"⚠ {message}" if error else message, 6000)
+        """ステータスバーへ一時メッセージを出す（エラーは警告色＋⚠ で差別化）。
+
+        配色は theme.build_app_qss の QStatusBar[error="true"] が持つ。動的
+        プロパティは unpolish/polish を挟まないと QSS へ反映されない
+        （dialogs._revalidate の赤枠切替と同じ手順）。
+        """
+        bar = self.statusBar()
+        bar.setProperty("error", bool(error))
+        bar.style().unpolish(bar)
+        bar.style().polish(bar)
+        bar.showMessage(f"⚠ {message}" if error else message, 6000)
 
     def _save_or_notify(self, action) -> bool:
         try:

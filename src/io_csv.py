@@ -263,6 +263,8 @@ _SETTINGS_VALIDATORS: dict[str, set | Callable[[object], bool]] = {
     "pie_threshold_income": lambda v: _is_number(v) and 0 <= v <= 20,
     "column_widths_price": _is_column_widths,
     "column_widths_income": _is_column_widths,
+    # 無効（active=false）銘柄をテーブルに表示するか。既定 False。
+    "show_inactive": lambda v: isinstance(v, bool),
 }
 
 
