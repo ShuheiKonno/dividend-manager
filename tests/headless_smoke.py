@@ -15,7 +15,11 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from PySide6.QtWidgets import QApplication  # noqa: E402
 
-from src.dialogs import EditHoldingDialog, NewHoldingDialog  # noqa: E402
+from src.dialogs import (  # noqa: E402
+    ACCOUNT_CHOICES,
+    EditHoldingDialog,
+    NewHoldingDialog,
+)
 from src.gui import build_window  # noqa: E402
 from src.models import Holding  # noqa: E402
 
@@ -126,6 +130,33 @@ def _check_inactive_toggle(w) -> None:
     assert w.show_inactive is before_state
 
 
+def _check_account_combo() -> None:
+    """口座が選択式で、既存値・未知値・未設定を取りこぼさないこと。"""
+    dlg = EditHoldingDialog(_holding(account="特定"))
+    combo = dlg._account
+    assert [combo.itemData(i) for i in range(combo.count())] == ACCOUNT_CHOICES
+    assert combo.currentData() == "特定", "既存の口座が選択状態にならない"
+
+    # 空欄は「（未設定）」として表示し、保存値は空文字のまま
+    empty = EditHoldingDialog(_holding(account=""))
+    assert empty._account.currentData() == ""
+    assert empty._account.currentText() == "（未設定）"
+
+    # CSV を手編集して一覧に無い値が入っていても、開いただけで消さない
+    unknown = EditHoldingDialog(_holding(account="旧口座XYZ"))
+    assert unknown._account.currentData() == "旧口座XYZ", "未知の口座が保持されない"
+
+    # 選択 → 保存で holding へ反映されること
+    target = _holding(account="")
+    save_dlg = EditHoldingDialog(target)
+    index = save_dlg._account.findData("NISA（成長）")
+    assert index >= 0
+    save_dlg._account.setCurrentIndex(index)
+    save_dlg._on_save()
+    assert save_dlg.result_holding is not None
+    assert save_dlg.result_holding.account == "NISA（成長）"
+
+
 def main() -> None:
     w = build_window()
 
@@ -166,6 +197,8 @@ def main() -> None:
     assert nd._asset_type.currentData() == "stock"
     assert {nd._asset_type.itemData(i) for i in range(nd._asset_type.count())} == {"stock", "fund"}
     assert {nd._currency.itemData(i) for i in range(nd._currency.count())} == {"JPY", "USD"}
+
+    _check_account_combo()
 
     print("headless smoke: OK")
 

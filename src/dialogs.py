@@ -119,6 +119,32 @@ def validate_optional_date(text: str) -> str | None:
 
 # ---- ダイアログ部品 ----
 
+# 口座の選択肢（CSV 上の値）。空文字＝未設定。表記ゆれ（"NISA" と "ＮＩＳＡ"、
+# 全角/半角括弧など）が混ざると同じ口座が別物として集計・絞り込みされるため、
+# 自由入力をやめて選択式にする（資産種別・通貨と同じ方針）。
+ACCOUNT_CHOICES = ["", "特定", "一般", "NISA（成長）", "NISA（積立）", "旧NISA"]
+_ACCOUNT_EMPTY_LABEL = "（未設定）"
+
+
+def _build_account_combo(current: str | None) -> QComboBox:
+    """口座の選択コンボを生成する。
+
+    CSV を手で編集するなどして一覧に無い値が入っていた場合は、その値を選択肢へ
+    追加して選択状態にする（編集ダイアログを開いて保存しただけで、既存の口座が
+    別の値に化けたり消えたりするのを防ぐ）。
+    """
+    combo = QComboBox()
+    for value in ACCOUNT_CHOICES:
+        combo.addItem(value or _ACCOUNT_EMPTY_LABEL, value)
+    text = (current or "").strip()
+    index = combo.findData(text)
+    if index < 0:
+        combo.addItem(text, text)
+        index = combo.count() - 1
+    combo.setCurrentIndex(index)
+    return combo
+
+
 def _build_section(title: str, rows: list[tuple[str, QWidget]]) -> QGroupBox:
     """（ラベル, ウィジェット）の行リストから QGroupBox セクションを生成する。"""
     box = QGroupBox(title)
@@ -181,7 +207,7 @@ class EditHoldingDialog(_HoldingDialogBase):
 
         # 基本情報
         self._name = QLineEdit(holding.name)
-        self._account = QLineEdit(holding.account)
+        self._account = _build_account_combo(holding.account)
         self._shares = QLineEdit(str(holding.shares))
         self._avg_cost = QLineEdit(str(holding.avg_cost))
         self._active = QCheckBox("有効")
@@ -237,7 +263,7 @@ class EditHoldingDialog(_HoldingDialogBase):
         layout = QVBoxLayout(self)
         layout.addWidget(_build_section("基本情報", [
             ("銘柄名", self._name),
-            ("口座（NISA等）", self._account),
+            ("口座", self._account),
             ("保有株数", self._shares),
             ("取得単価", self._avg_cost),
             ("", self._active),
@@ -292,7 +318,7 @@ class EditHoldingDialog(_HoldingDialogBase):
             QMessageBox.warning(self, "入力エラー", str(exc))
             return
         self.holding.name = name
-        self.holding.account = self._account.text().strip()
+        self.holding.account = str(self._account.currentData() or "")
         self.holding.shares = shares
         self.holding.avg_cost = avg_cost
         self.holding.annual_div_ps_gross_override = div_gross
@@ -326,7 +352,7 @@ class NewHoldingDialog(_HoldingDialogBase):
         self._symbol.setPlaceholderText("JPY株は .T 不要 / 投信は ISIN 可")
         self._name = QLineEdit(holding.name)
         self._name.setPlaceholderText("空欄=株価更新時に自動取得")
-        self._account = QLineEdit(holding.account)
+        self._account = _build_account_combo(holding.account)
         # 自由入力だった資産種別・通貨はコンボボックスで選択式に（誤入力防止）。
         self._asset_type = QComboBox()
         self._asset_type.addItem("株式 (stock)", "stock")
@@ -372,7 +398,7 @@ class NewHoldingDialog(_HoldingDialogBase):
         layout.addWidget(_build_section("基本情報", [
             ("銘柄コード/ティッカー", self._symbol),
             ("銘柄名", self._name),
-            ("口座（NISA等）", self._account),
+            ("口座", self._account),
             ("資産種別", self._asset_type),
             ("通貨", self._currency),
             ("保有株数", self._shares),
@@ -391,7 +417,7 @@ class NewHoldingDialog(_HoldingDialogBase):
     def _on_save(self) -> None:
         symbol = self._symbol.text().strip()
         name = self._name.text().strip()
-        account = self._account.text().strip()
+        account = str(self._account.currentData() or "")
         asset_type = str(self._asset_type.currentData())
         currency = str(self._currency.currentData())
         if not symbol:

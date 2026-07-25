@@ -611,8 +611,13 @@ class DividendWindow(QMainWindow):
         view.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
         view.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
         view.setAlternatingRowColors(True)
-        view.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Interactive)
-        view.horizontalHeader().setStretchLastSection(True)
+        header = view.horizontalHeader()
+        header.setSectionResizeMode(QHeaderView.ResizeMode.Interactive)
+        # どの列も引き伸ばさず内容幅のまま並べる。最終列（損益率）を伸ばすと
+        # 損益(円) との間に数百px の空白ができ、1行を読むのに視線が大きく飛ぶ。
+        # 余りは表の右端に残す＝行の途中に空洞を作らない方が圧倒的に読みやすい
+        # （実データ 1536px 幅で描き比べて決定）。列幅は各自ドラッグで調整できる。
+        header.setStretchLastSection(False)
         view.verticalHeader().setVisible(False)
         view.sortByColumn(0, Qt.SortOrder.AscendingOrder)
         view.doubleClicked.connect(lambda _idx: self.action_edit())
