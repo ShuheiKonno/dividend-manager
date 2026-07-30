@@ -35,6 +35,7 @@ def test_build_app_qss_returns_str_with_required_selectors():
         "#kpiValue",
         "#infoLabel",
         "#dialogError",
+        "#primaryAction",
     ]
     for selector in required:
         assert selector in qss, f"QSS に {selector} がありません"
@@ -51,6 +52,7 @@ def test_color_tokens_are_hex():
     for name in (
         "BG_WINDOW", "BG_PANEL", "BG_INPUT", "BG_TABLE", "BG_HOVER",
         "BORDER", "BORDER_FOCUS", "ACCENT",
+        "ACCENT_HOVER", "ACCENT_PRESSED", "ACCENT_TEXT", "ACCENT_FOCUS",
         "TEXT_PRIMARY", "TEXT_SECONDARY", "TEXT_BRIGHT",
         "ERROR", "CHART_BG",
     ):

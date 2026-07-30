@@ -85,6 +85,8 @@ def _check_toolbar(w) -> None:
     assert len(separators) >= 1, f"ツールバーの区切りが無い: {len(separators)}"
     delete_button = w._toolbar.widgetForAction(w._actions["delete"])
     assert delete_button is not None and delete_button.objectName() == "dangerAction"
+    primary_button = w._toolbar.widgetForAction(w._actions["update_market"])
+    assert primary_button is not None and primary_button.objectName() == "primaryAction"
 
     # 最小幅でも絞り込みが拡張メニューへ飛ばず画面に残ること
     # （1段に詰め込むと狭い幅であふれ、右端の絞り込みが消える回帰があった）。
@@ -112,6 +114,38 @@ def _check_toolbar(w) -> None:
     assert w._mode_combo.currentData() == w.dividend_mode != before
     w.action_toggle_mode()  # 元へ戻す（設定を汚さない）
     assert w.dividend_mode == before
+
+
+def _check_kpi_cards(w) -> None:
+    """KPI カードが9枚とも存在し、1行目4枚・2行目5枚の行分けが崩れていないこと。"""
+    expected_row1 = ("評価額計", "簿価計", "損益", "損益率")
+    expected_row2 = ("年間配当", "優待", "合計", "簿価利回り", "時価利回り")
+    assert set(w._cards) == set(expected_row1) | set(expected_row2), (
+        f"KPI カードの過不足: {sorted(w._cards)}"
+    )
+
+    # 座標判定には実レイアウトが要るので show() する（他の座標系チェックと同じ作法）。
+    original = w.size()
+    w.show()
+    QApplication.processEvents()
+
+    row1_y = {title: w._cards[title].y() for title in expected_row1}
+    row2_y = {title: w._cards[title].y() for title in expected_row2}
+    assert len(set(row1_y.values())) == 1, (
+        f"1行目のカードが同じ行に並んでいない: {row1_y}"
+    )
+    assert len(set(row2_y.values())) == 1, (
+        f"2行目のカードが同じ行に並んでいない: {row2_y}"
+    )
+    y1 = next(iter(row1_y.values()))
+    y2 = next(iter(row2_y.values()))
+    assert y1 < y2, (
+        f"「損益率」(1行目, y={y1}) が「合計」(2行目, y={y2}) より下に来ている"
+    )
+
+    w.resize(original)
+    w.hide()
+    QApplication.processEvents()
 
 
 def _check_inactive_toggle(w) -> None:
@@ -180,6 +214,7 @@ def main() -> None:
 
     _check_actions(w)
     _check_toolbar(w)
+    _check_kpi_cards(w)
     _check_inactive_toggle(w)
 
     # 編集ダイアログ: 即時バリデーション（赤枠プロパティ＋集約エラーラベル）
