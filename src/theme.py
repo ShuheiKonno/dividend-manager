@@ -27,6 +27,10 @@ BORDER = "#3a3a3a"           # 標準の枠線
 BORDER_LIGHT = "#4a4a4a"     # ボタン等のやや明るい枠線
 BORDER_FOCUS = "#4f8cc9"     # フォーカスリング（アクセント淡色）
 ACCENT = "#1565c0"           # アクセント（選択タブ下線・プログレスバー・チェック）
+ACCENT_HOVER = "#1976d2"     # アクセントボタンのホバー
+ACCENT_PRESSED = "#0d47a1"   # 同・押下
+ACCENT_TEXT = "#ffffff"      # アクセント塗り上の文字
+ACCENT_FOCUS = "#bbdefb"     # アクセント塗り上のフォーカスリング
 TEXT_PRIMARY = "#e0e0e0"     # 標準テキスト
 TEXT_SECONDARY = "#9e9e9e"   # 補助テキスト（KPI タイトル・注記）
 TEXT_BRIGHT = "#f5f5f5"      # 強調テキスト（KPI 値）
@@ -186,6 +190,23 @@ QToolBar QToolButton:focus {{ border-color: {BORDER_FOCUS}; outline: none; }}
 QToolBar QToolButton#dangerAction:hover {{
     border-color: {ERROR}; color: {TEXT_STATUS_ERROR};
 }}
+/* 最頻出の操作（株価・配当を取得）はアクセント塗りで見つけやすくする。 */
+QToolBar QToolButton#primaryAction {{
+    background: {ACCENT}; color: {ACCENT_TEXT}; border: 1px solid {ACCENT};
+}}
+QToolBar QToolButton#primaryAction:hover {{
+    background: {ACCENT_HOVER}; border-color: {ACCENT_HOVER};
+}}
+QToolBar QToolButton#primaryAction:pressed {{
+    background: {ACCENT_PRESSED}; border-color: {ACCENT_PRESSED};
+}}
+/* id セレクタは既存の QToolBar QToolButton:disabled に特異度で勝つため、
+   無効時の見え方をここで明示する（取得中に青のままだと押せそうに見える）。 */
+QToolBar QToolButton#primaryAction:disabled {{
+    background: #282828; color: {TEXT_DISABLED}; border-color: {BORDER};
+}}
+/* 既定の BORDER_FOCUS は青塗りの上では青on青でほぼ見えないため淡色を使う。 */
+QToolBar QToolButton#primaryAction:focus {{ border-color: {ACCENT_FOCUS}; outline: none; }}
 QToolBar QLabel {{ color: {TEXT_SECONDARY}; padding: 0px 2px; }}
 
 /* ---- ステータスバー・プログレスバー・ツールチップ ---- */

@@ -27,7 +27,6 @@ from PySide6.QtWidgets import (
     QWidget,
     QVBoxLayout,
     QHBoxLayout,
-    QGridLayout,
     QTabWidget,
     QTableView,
     QLabel,
@@ -399,27 +398,27 @@ class DividendWindow(QMainWindow):
         central = QWidget()
         root = QVBoxLayout(central)
 
+        # 1行目＝ポートフォリオ資産の要約、2行目＝収入の内訳と利回り。
+        # 「合計」は年間配当＋優待の合算なので収入側（2行目）へ置く。
+        # 4枚と5枚では行をまたいだ列境界を揃えられないため、グリッドではなく
+        # 行ごとの QHBoxLayout にして行内を均等割りする。
+        row_defs = (
+            ("評価額計", "簿価計", "損益", "損益率"),
+            ("年間配当", "優待", "合計", "簿価利回り", "時価利回り"),
+        )
         kpi_bar = QWidget()
-        grid = QGridLayout(kpi_bar)
-        grid.setContentsMargins(0, 0, 0, 0)
-        grid.setSpacing(6)
+        outer = QVBoxLayout(kpi_bar)
+        outer.setContentsMargins(0, 0, 0, 0)
+        outer.setSpacing(6)  # 行間。省くと Qt 既定の ~11px になり2行が離れて見える
         self._cards: dict[str, KpiCard] = {}
-        # 1行目＝ポートフォリオ全体の要約、2行目＝収入の内訳と利回り。
-        # 最初に見たい指標（評価額・損益）を左上に置く。
-        card_defs = [
-            "評価額計", "簿価計", "損益", "損益率", "合計",
-            "年間配当", "優待", "簿価利回り", "時価利回り",
-        ]
-        columns = 5
-        for idx, title in enumerate(card_defs):
-            card = KpiCard(title)
-            self._cards[title] = card
-            # 9枚は 5+4 に割れるため、2行目の最後を2列ぶんに広げて右端の穴を埋める。
-            span = 2 if idx == len(card_defs) - 1 else 1
-            grid.addWidget(card, idx // columns, idx % columns, 1, span)
-        # 幅の変化を全列で均等に吸収する（伸縮指定が無いとカードが潰れる）。
-        for col in range(columns):
-            grid.setColumnStretch(col, 1)
+        for titles in row_defs:
+            row = QHBoxLayout()
+            row.setSpacing(6)  # カード間
+            for title in titles:
+                card = KpiCard(title)
+                self._cards[title] = card
+                row.addWidget(card, 1)  # 伸縮1で行内を均等割り
+            outer.addLayout(row)
         root.addWidget(kpi_bar)
 
         self._tabs = QTabWidget()
@@ -728,6 +727,10 @@ class DividendWindow(QMainWindow):
         delete_button = bar.widgetForAction(act["delete"])
         if delete_button is not None:
             delete_button.setObjectName("dangerAction")
+        # 最頻出の操作なのでアクセント色で他と区別する（配色は theme.py の #primaryAction）。
+        primary_button = bar.widgetForAction(act["update_market"])
+        if primary_button is not None:
+            primary_button.setObjectName("primaryAction")
         # ボタン面にはショートカットを書かないので、ツールチップで補う。
         for key in ("update_market", "update_fx", "reload", "new", "edit", "delete"):
             action = act[key]
