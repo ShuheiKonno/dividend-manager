@@ -191,6 +191,31 @@ def _check_account_combo() -> None:
     assert save_dlg.result_holding.account == "NISA（成長）"
 
 
+def _check_tax_rate_placeholder() -> None:
+    """源泉税率欄のプレースホルダが口座・通貨の自動判定値へ追随すること。"""
+    dlg = EditHoldingDialog(_holding(account="特定", currency="JPY"))
+    assert "20.315%" in dlg._tax_rate.placeholderText(), dlg._tax_rate.placeholderText()
+    dlg._account.setCurrentIndex(dlg._account.findData("NISA（成長）"))
+    assert "0%" in dlg._tax_rate.placeholderText(), "NISA へ切替えても率が更新されない"
+
+    # 米国株（USD）の NISA は米国源泉 10% が残る
+    usd = EditHoldingDialog(_holding(account="旧NISA", currency="USD"))
+    assert "10%" in usd._tax_rate.placeholderText(), usd._tax_rate.placeholderText()
+
+    # 課税口座の米国株は 米国10%＋国内20.315% の二段課税（単純加算の30.315%ではない）
+    taxable_usd = EditHoldingDialog(_holding(account="特定", currency="USD"))
+    assert "28.2835%" in taxable_usd._tax_rate.placeholderText(), (
+        taxable_usd._tax_rate.placeholderText()
+    )
+
+    # 新規ダイアログは通貨コンボの変更でも追随する
+    nd = NewHoldingDialog(_holding(symbol="", name="", account="", currency="JPY"))
+    nd._account.setCurrentIndex(nd._account.findData("旧NISA"))
+    assert "0%" in nd._tax_rate.placeholderText()
+    nd._currency.setCurrentIndex(nd._currency.findData("USD"))
+    assert "10%" in nd._tax_rate.placeholderText(), "通貨切替で率が更新されない"
+
+
 def main() -> None:
     w = build_window()
 
@@ -234,6 +259,7 @@ def main() -> None:
     assert {nd._currency.itemData(i) for i in range(nd._currency.count())} == {"JPY", "USD"}
 
     _check_account_combo()
+    _check_tax_rate_placeholder()
 
     print("headless smoke: OK")
 
