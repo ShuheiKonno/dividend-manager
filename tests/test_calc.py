@@ -4,7 +4,15 @@ from __future__ import annotations
 
 import pytest
 
-from src.calc import _DEFAULT_TAX_RATE, _pick_div_ps, compute_rows
+from src.calc import (
+    _DEFAULT_TAX_RATE,
+    _US_TAXABLE_COMBINED_RATE,
+    _US_WITHHOLDING_RATE,
+    _pick_div_ps,
+    compute_rows,
+    default_tax_rate,
+    is_nisa_account,
+)
 from src.models import Holding, MarketData
 
 
@@ -108,6 +116,84 @@ def test_net_mode_auto_tax_default():
 def test_net_mode_tax_rate_zero_is_gross():
     h = _holding(annual_div_ps_gross_override=100.0, tax_rate=0.0)
     rows, _ = compute_rows([h], {}, 150.0, "net")
+    assert rows[0]["annual_div_ps"] == pytest.approx(100.0)
+
+
+# ---- 口座・通貨からの源泉税率の自動判定（NISA / 米国源泉10%） ----
+
+@pytest.mark.parametrize(
+    "account, expected",
+    [
+        ("", False),
+        ("特定", False),
+        ("一般", False),
+        ("NISA（成長）", True),
+        ("NISA（積立）", True),
+        ("旧NISA", True),
+        # 口座は CSV 上は自由文字列なので手編集の表記ゆれも拾う。
+        ("つみたてNISA", True),
+        ("nisa", True),
+        ("ＮＩＳＡ", True),
+    ],
+)
+def test_is_nisa_account(account, expected):
+    assert is_nisa_account(account) is expected
+
+
+def test_default_tax_rate_by_account_and_currency():
+    assert default_tax_rate("特定", "JPY") == pytest.approx(_DEFAULT_TAX_RATE)
+    assert default_tax_rate("", "JPY") == pytest.approx(_DEFAULT_TAX_RATE)
+    # 課税口座の米国株は米国10%を引いた残額に国内20.315%＝合成で約28.2835%。
+    assert default_tax_rate("特定", "USD") == pytest.approx(0.282835)
+    assert default_tax_rate("一般", "USD") == pytest.approx(_US_TAXABLE_COMBINED_RATE)
+    # 単純加算（30.315%）ではないことを明示する。
+    assert default_tax_rate("特定", "USD") < _DEFAULT_TAX_RATE + _US_WITHHOLDING_RATE
+    # NISA は国内非課税。ただし米国株は米国源泉 10% が控除できず残る。
+    assert default_tax_rate("NISA（成長）", "JPY") == pytest.approx(0.0)
+    assert default_tax_rate("旧NISA", "USD") == pytest.approx(_US_WITHHOLDING_RATE)
+
+
+def test_net_mode_taxable_usd_is_two_stage():
+    """課税口座の米国株は 米国10% → 残額に国内20.315% の順で引かれる。"""
+    h = _holding(
+        symbol="HDV", currency="USD", account="特定", shares=10.0, avg_cost=100.0,
+        annual_div_ps_gross_override=4.0,
+    )
+    rows, _ = compute_rows([h], {}, 150.0, "net")
+    assert rows[0]["annual_div_ps"] == pytest.approx(4.0 * 0.9 * (1 - _DEFAULT_TAX_RATE))
+
+
+def test_net_mode_nisa_jpy_is_untaxed():
+    h = _holding(account="NISA（成長）", annual_div_ps_gross_override=100.0)
+    rows, _ = compute_rows([h], {}, 150.0, "net")
+    assert rows[0]["annual_div_ps"] == pytest.approx(100.0)
+
+
+def test_net_mode_nisa_usd_keeps_us_withholding():
+    h = _holding(
+        symbol="HDV", currency="USD", account="旧NISA", shares=10.0, avg_cost=100.0,
+        annual_div_ps_gross_override=4.0,
+    )
+    rows, _ = compute_rows([h], {}, 150.0, "net")
+    assert rows[0]["annual_div_ps"] == pytest.approx(4.0 * 0.9)
+    # 円換算も 10% 引き後の額になる。
+    assert rows[0]["annual_dividend_jpy"] == pytest.approx(4.0 * 0.9 * 10 * 150.0)
+
+
+def test_explicit_tax_rate_wins_over_account_derivation():
+    """銘柄ごとの明示指定は口座からの自動判定より優先される。"""
+    h = _holding(
+        currency="USD", account="NISA（成長）", annual_div_ps_gross_override=100.0,
+        tax_rate=0.3,
+    )
+    rows, _ = compute_rows([h], {}, 150.0, "net")
+    assert rows[0]["annual_div_ps"] == pytest.approx(70.0)
+
+
+def test_gross_mode_ignores_account():
+    """税引前モードは口座に関係なく gross をそのまま使う。"""
+    h = _holding(account="NISA（成長）", annual_div_ps_gross_override=100.0)
+    rows, _ = compute_rows([h], {}, 150.0, "gross")
     assert rows[0]["annual_div_ps"] == pytest.approx(100.0)
 
 

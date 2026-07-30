@@ -22,6 +22,55 @@ class Summary:
 
 
 _DEFAULT_TAX_RATE = 0.20315  # 日本の源泉税率（所得税15.315% + 住民税5%）
+# 米国株の配当は日米租税条約により米国側で 10% 源泉徴収される。NISA は国内が
+# 非課税＝外国税額控除に充てる国内税額が無いため、この 10% は引かれたまま残る。
+# よって NISA でも USD 建て（米国上場）銘柄の税引後は 0% ではなくこの率を使う。
+_US_WITHHOLDING_RATE = 0.10
+# 課税口座（特定・一般）の米国株は、米国 10% を引いた「残額」に国内 20.315% が
+# 課される二段構えなので、合成税率は単純加算（30.315%）ではなく
+# 1-(1-0.10)(1-0.20315) ≒ 28.2835%。確定申告の外国税額控除で米国分の一部を
+# 取り戻せる場合があるが、還付額は他の所得に依存して一意に決まらないため、
+# ここでは「取り戻さない場合」＝源泉徴収されたままの額を税引後として表示する。
+_US_TAXABLE_COMBINED_RATE = 1.0 - (1.0 - _US_WITHHOLDING_RATE) * (1.0 - _DEFAULT_TAX_RATE)
+
+# 口座名の全角英字を半角へ畳むための変換表（"ＮＩＳＡ" → "NISA"）。
+_NISA_TRANS = str.maketrans("ＮＩＳＡｎｉｓａ", "NISANISA")
+
+
+def is_nisa_account(account: str | None) -> bool:
+    """口座名が NISA 口座を指すかを判定する。
+
+    account はモデル・CSV 上は自由文字列のまま（手編集した値も保持する方針）
+    なので、選択肢の "NISA（成長）" / "NISA（積立）" / "旧NISA" だけでなく
+    "つみたてNISA" や全角 "ＮＩＳＡ"、小文字 "nisa" も拾えるよう、全角を畳んで
+    大文字化した部分一致で判定する。
+    """
+    if not account:
+        return False
+    return "NISA" in account.translate(_NISA_TRANS).upper()
+
+
+def default_tax_rate(account: str | None, currency: str) -> float:
+    """口座と通貨から税引後計算の既定源泉税率を導く。
+
+    JPY: NISA=0% / 課税口座=20.315%。
+    USD: NISA=10%（米国源泉のみ）/ 課税口座=約28.2835%（米国10%＋国内20.315%の
+    二段課税。定数のコメント参照）。
+    """
+    if currency == "USD":
+        return (
+            _US_WITHHOLDING_RATE
+            if is_nisa_account(account)
+            else _US_TAXABLE_COMBINED_RATE
+        )
+    return 0.0 if is_nisa_account(account) else _DEFAULT_TAX_RATE
+
+
+def resolve_tax_rate(holding: Holding) -> float:
+    """銘柄に適用する源泉税率を決める（銘柄ごとの明示指定 > 口座・通貨の自動判定）。"""
+    if holding.tax_rate is not None:
+        return holding.tax_rate
+    return default_tax_rate(holding.account, holding.currency)
 
 
 def _pick_div_ps(
@@ -38,12 +87,7 @@ def _pick_div_ps(
             if gross is None:
                 gross = market.annual_div_ps_gross if market else None
             if gross is not None:
-                rate = (
-                    holding.tax_rate
-                    if holding.tax_rate is not None
-                    else _DEFAULT_TAX_RATE
-                )
-                result = gross * (1.0 - rate)
+                result = gross * (1.0 - resolve_tax_rate(holding))
     else:
         override = holding.annual_div_ps_gross_override
         market_value = market.annual_div_ps_gross if market else None

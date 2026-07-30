@@ -31,6 +31,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from .calc import default_tax_rate
 from .models import Holding
 
 
@@ -145,6 +146,16 @@ def _build_account_combo(current: str | None) -> QComboBox:
     return combo
 
 
+def tax_rate_placeholder(account: str | None, currency: str) -> str:
+    """源泉税率欄のプレースホルダ（空欄時に効く自動判定値）を組み立てる。
+
+    自動判定は calc.default_tax_rate が唯一の実装なので、ここでは表示だけを担い
+    率をこのモジュールへ書き写さない（NISA/米国 10% の規則が二重定義になるのを
+    避ける）。口座・通貨の選択を変えたら _sync_tax_placeholder で追随させる。
+    """
+    return f"空欄={default_tax_rate(account, currency) * 100:g}%（口座・通貨から自動判定）"
+
+
 def _build_section(title: str, rows: list[tuple[str, QWidget]]) -> QGroupBox:
     """（ラベル, ウィジェット）の行リストから QGroupBox セクションを生成する。"""
     box = QGroupBox(title)
@@ -160,6 +171,10 @@ class _HoldingDialogBase(QDialog):
     _attach_validator で登録したフィールドは textChanged のたびに検証され、
     エラー時は QSS の QLineEdit[error="true"]（赤枠）とツールチップ、
     フォーム下部の集約エラーラベル（先頭エラーのみ）へ反映される。
+
+    サブクラスは `self._account`（口座コンボ）と `self._tax_rate`（源泉税率欄）を
+    持ち、`_currency_value()` を実装すること（_sync_tax_placeholder がこの3つを
+    前提に源泉税率の自動判定値を表示する）。
     """
 
     def __init__(self, parent=None) -> None:
@@ -184,6 +199,18 @@ class _HoldingDialogBase(QDialog):
         edit.style().unpolish(edit)
         edit.style().polish(edit)
         self._update_error_label()
+
+    def _currency_value(self) -> str:
+        """源泉税率の自動判定に使う通貨。サブクラスが実装する。"""
+        raise NotImplementedError
+
+    def _sync_tax_placeholder(self) -> None:
+        """源泉税率欄のプレースホルダを現在の口座・通貨の自動判定値へ追随させる。"""
+        self._tax_rate.setPlaceholderText(
+            tax_rate_placeholder(
+                str(self._account.currentData() or ""), self._currency_value()
+            )
+        )
 
     def _update_error_label(self) -> None:
         for edit, validate in self._validators.items():
@@ -241,7 +268,9 @@ class EditHoldingDialog(_HoldingDialogBase):
             "" if holding.tax_rate is None
             else str(holding.tax_rate)
         )
-        self._tax_rate.setPlaceholderText("未入力=20.315%（NISA口座は0）")
+        self._sync_tax_placeholder()
+        # 口座を変えると自動判定の率（NISA=0 / NISA×USD=10% / 他=20.315%）が変わる。
+        self._account.currentIndexChanged.connect(self._sync_tax_placeholder)
 
         # 即時バリデーション登録
         self._attach_validator(self._shares, lambda t: validate_required_number(t, "保有株数"))
@@ -277,7 +306,7 @@ class EditHoldingDialog(_HoldingDialogBase):
             ("優待換算額(円/年)", self._benefit),
             ("定額取崩額(円/年)", self._withdrawal_fixed),
             ("定率取崩率(例: 0.04)", self._withdrawal_rate),
-            ("源泉税率(例: 0 でNISA)", self._tax_rate),
+            ("源泉税率(空欄=自動判定)", self._tax_rate),
         ]))
         layout.addWidget(self._error_label)
         layout.addWidget(buttons)
@@ -332,6 +361,10 @@ class EditHoldingDialog(_HoldingDialogBase):
         self.result_holding = self.holding
         self.accept()
 
+    def _currency_value(self) -> str:
+        # 編集ダイアログは通貨を変更できない（登録時に確定）。
+        return self.holding.currency
+
 
 class NewHoldingDialog(_HoldingDialogBase):
     def __init__(self, holding: Holding, parent=None) -> None:
@@ -377,7 +410,10 @@ class NewHoldingDialog(_HoldingDialogBase):
         self._withdrawal_fixed = QLineEdit("")
         self._withdrawal_rate = QLineEdit("")
         self._tax_rate = QLineEdit("")
-        self._tax_rate.setPlaceholderText("未入力=20.315%（NISA口座は0）")
+        self._sync_tax_placeholder()
+        # 口座・通貨のどちらを変えても自動判定の率が変わる（NISA×USD だけ 10%）。
+        self._account.currentIndexChanged.connect(self._sync_tax_placeholder)
+        self._currency.currentIndexChanged.connect(self._sync_tax_placeholder)
 
         # 即時バリデーション登録
         self._attach_validator(self._shares, lambda t: validate_required_number(t, "保有株数"))
@@ -409,7 +445,7 @@ class NewHoldingDialog(_HoldingDialogBase):
             ("優待換算額(円/年)", self._benefit),
             ("定額取崩額(円/年)", self._withdrawal_fixed),
             ("定率取崩率(例: 0.04)", self._withdrawal_rate),
-            ("源泉税率(例: 0 でNISA)", self._tax_rate),
+            ("源泉税率(空欄=自動判定)", self._tax_rate),
         ]))
         layout.addWidget(self._error_label)
         layout.addWidget(buttons)
@@ -466,3 +502,6 @@ class NewHoldingDialog(_HoldingDialogBase):
         self.holding.active = bool(active)
         self.result_holding = self.holding
         self.accept()
+
+    def _currency_value(self) -> str:
+        return str(self._currency.currentData())
