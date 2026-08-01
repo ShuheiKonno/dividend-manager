@@ -139,8 +139,13 @@ def test_export_csv_writes_bom_and_canonical_headers(monkeypatch, tmp_path):
 def test_export_holdings_csv_roundtrips(monkeypatch, tmp_path):
     _configure_tmp_dirs(monkeypatch, tmp_path)
     target = tmp_path / "holdings.csv"
-    holdings = [_holding("7203"), _holding("AAPL", currency="USD", account="NISA")]
+    holdings = [
+        # 月リストはカンマを含むため、csv のクォート往復もここで確認する。
+        _holding("7203", dividend_months=[6, 12], benefit_months=[3]),
+        _holding("AAPL", currency="USD", account="NISA"),
+    ]
     io_csv.export_holdings_csv(target, holdings)
+    assert '"6,12"' in target.read_text(encoding="utf-8-sig")
     rows = io_csv._read_csv(target)
     restored = [Holding.from_dict(r) for r in rows]
     assert restored == holdings
@@ -252,8 +257,18 @@ def test_settings_last_tab_rejects_bool_and_out_of_range(monkeypatch, tmp_path):
     io_csv.save_settings(last_tab=2)
     assert io_csv.load_settings()["last_tab"] == 2
     io_csv.save_settings(last_tab=True)  # bool は拒否（int のサブクラス）
-    io_csv.save_settings(last_tab=4)     # 範囲外は拒否
+    io_csv.save_settings(last_tab=5)     # 範囲外は拒否（タブは 0〜4 の5枚）
     assert io_csv.load_settings()["last_tab"] == 2
+    io_csv.save_settings(last_tab=4)     # 月別配当タブは受理する
+    assert io_csv.load_settings()["last_tab"] == 4
+
+
+def test_settings_monthly_sort_roundtrip(monkeypatch, tmp_path):
+    _configure_tmp_dirs(monkeypatch, tmp_path)
+    io_csv.save_settings(monthly_sort="asc")
+    assert io_csv.load_settings()["monthly_sort"] == "asc"
+    io_csv.save_settings(monthly_sort="sideways")  # 未知の値は拒否
+    assert io_csv.load_settings()["monthly_sort"] == "asc"
 
 
 def test_settings_show_inactive_roundtrip(monkeypatch, tmp_path):

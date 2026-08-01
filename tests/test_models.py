@@ -5,7 +5,7 @@
 
 from __future__ import annotations
 
-from src.models import Holding, MarketData
+from src.models import HOLDINGS_FIELDS, MARKET_DATA_FIELDS, Holding, MarketData
 
 
 def _full_holding(**overrides) -> Holding:
@@ -25,6 +25,8 @@ def _full_holding(**overrides) -> Holding:
         withdrawal_rate=None,
         tax_rate=None,
         active=True,
+        dividend_months=[6, 12],
+        benefit_months=[3],
     )
     base.update(overrides)
     return Holding(**base)
@@ -80,6 +82,7 @@ def test_market_data_roundtrip():
         div_forecast_as_of="2026-05-01",
         source="yfinance",
         fetched_at="2026-05-29T09:00:00+09:00",
+        div_ex_month_ratios={2: 0.25, 5: 0.25, 8: 0.25, 11: 0.25},
     )
     restored = MarketData.from_dict(m.to_dict())
     assert restored == m
@@ -99,3 +102,63 @@ def test_market_data_zero_values_are_preserved():
     )
     restored = MarketData.from_dict(m.to_dict())
     assert restored == m
+
+
+def test_month_fields_roundtrip():
+    """月リストがカンマ区切りで往復すること（csv のクォート往復は test_io_csv 側）。"""
+    h = _full_holding(dividend_months=[6, 12], benefit_months=[])
+    assert h.to_dict()["dividend_months"] == "6,12"
+    assert h.to_dict()["benefit_months"] == ""
+    restored = Holding.from_dict(h.to_dict())
+    assert restored == h
+
+
+def test_month_fields_are_normalized_on_write():
+    """順不同・重複・範囲外を含む入力が昇順の正規形へ寄ること。"""
+    h = _full_holding(dividend_months=[12, 6, 6, 0, 13])
+    assert h.to_dict()["dividend_months"] == "6,12"
+
+
+def test_legacy_rows_without_month_columns():
+    """月列を持たない旧 CSV 行が読めること（新列は空扱い）。"""
+    row = _full_holding().to_dict()
+    del row["dividend_months"]
+    del row["benefit_months"]
+    restored = Holding.from_dict(row)
+    assert restored.dividend_months == []
+    assert restored.benefit_months == []
+
+    market_row = MarketData(
+        symbol="7203",
+        currency="JPY",
+        last_price=3000.0,
+        price_as_of="2026-05-28",
+        annual_div_ps_gross=95.0,
+        annual_div_ps_net=None,
+        div_forecast_as_of=None,
+        source="yfinance",
+        fetched_at="2026-05-29T09:00:00+09:00",
+    ).to_dict()
+    del market_row["div_ex_month_ratios"]
+    assert MarketData.from_dict(market_row).div_ex_month_ratios is None
+
+
+def test_to_dict_keys_match_csv_fields():
+    """to_dict のキーが FIELDS と一致すること。
+
+    csv.DictWriter の extrasaction は既定 'raise' なので、片方だけ更新すると
+    保存のたびに ValueError で落ちる。
+    """
+    assert list(_full_holding().to_dict()) == HOLDINGS_FIELDS
+    market = MarketData(
+        symbol="7203",
+        currency="JPY",
+        last_price=3000.0,
+        price_as_of="2026-05-28",
+        annual_div_ps_gross=95.0,
+        annual_div_ps_net=None,
+        div_forecast_as_of=None,
+        source="yfinance",
+        fetched_at="2026-05-29T09:00:00+09:00",
+    )
+    assert list(market.to_dict()) == MARKET_DATA_FIELDS

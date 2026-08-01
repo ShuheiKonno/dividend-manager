@@ -14,6 +14,7 @@
 from __future__ import annotations
 
 import math
+from dataclasses import replace
 from datetime import date
 from typing import Callable, Optional
 
@@ -23,6 +24,7 @@ from PySide6.QtWidgets import (
     QDialog,
     QDialogButtonBox,
     QFormLayout,
+    QGridLayout,
     QGroupBox,
     QLabel,
     QLineEdit,
@@ -31,8 +33,8 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from .calc import default_tax_rate
-from .models import Holding
+from .calc import default_tax_rate, resolve_payment_month_ratios
+from .models import Holding, MarketData
 
 
 # ---- 数値・日付の検証ヘルパー（例外ベース、保存時の一括検証で使用） ----
@@ -165,6 +167,105 @@ def _build_section(title: str, rows: list[tuple[str, QWidget]]) -> QGroupBox:
     return box
 
 
+class MonthCheckboxGroup(QWidget):
+    """1〜12月のチェックボックス群（3行×4列）。
+
+    auto_months に自動判定された月を渡すと先頭へ「自動判定を使う」チェックが付き、
+    ON の間は12個を自動判定値でチェックしたまま無効化して見せる（読み取り専用の
+    プレビュー）。この状態で months() は [] を返す＝「未設定＝自動に従う」を保存する。
+
+    このトグルが無いと、ダイアログを開いて保存しただけでその時点の自動判定値が
+    手動値として凍結され、以降 F5 で配当実績が変わっても月が更新されなくなる。
+    源泉税率欄が「空欄のままにするのが既定運用で、プレースホルダが自動判定値を
+    表示する」としているのと同じ意味論を、チェックボックスで表現したもの。
+
+    auto_months が空（＝自動判定できない）ときはトグルを出さない。ON なのに12個
+    すべて未チェックのグレーアウト、という無言で無意味な状態を作らないため。
+    """
+
+    _AUTO_LABEL = "自動判定を使う（配当実績から推定）"
+
+    def __init__(
+        self,
+        months: list[int] | None = None,
+        auto_months: list[int] | None = None,
+        parent: QWidget | None = None,
+    ) -> None:
+        super().__init__(parent)
+        self._auto_months = sorted(auto_months or [])
+
+        outer = QVBoxLayout(self)
+        outer.setContentsMargins(0, 0, 0, 0)
+        outer.setSpacing(2)
+
+        self._auto: QCheckBox | None = None
+        if self._auto_months:
+            self._auto = QCheckBox(self._AUTO_LABEL)
+            # 月が未設定なら自動に従う（＝既定運用）。
+            self._auto.setChecked(not months)
+            self._auto.toggled.connect(self._on_auto_toggled)
+            outer.addWidget(self._auto)
+
+        grid_host = QWidget()
+        grid = QGridLayout(grid_host)
+        grid.setContentsMargins(0, 0, 0, 0)
+        grid.setHorizontalSpacing(8)
+        grid.setVerticalSpacing(2)
+        self._boxes: list[QCheckBox] = []
+        for i in range(12):
+            box = QCheckBox(f"{i + 1}月")
+            grid.addWidget(box, i // 4, i % 4)
+            self._boxes.append(box)
+        outer.addWidget(grid_host)
+
+        self.set_months(months or [])
+        if self._auto is not None:
+            self._on_auto_toggled(self._auto.isChecked())
+
+    def _on_auto_toggled(self, checked: bool) -> None:
+        if checked:
+            # 自動判定値をプレビュー表示する（保存はしない）。
+            self._apply(self._auto_months)
+        for box in self._boxes:
+            box.setEnabled(not checked)
+
+    def _apply(self, months: list[int]) -> None:
+        selected = set(months)
+        for i, box in enumerate(self._boxes):
+            box.setChecked(i + 1 in selected)
+
+    def is_auto(self) -> bool:
+        return self._auto is not None and self._auto.isChecked()
+
+    def months(self) -> list[int]:
+        """保存する月リスト。自動判定モード中は [] を返す。
+
+        毎回新しいリストを返す。Holding は dataclasses.replace（浅いコピー）で
+        複製されるため、元インスタンスと共有したリストを返すと編集をキャンセル
+        しても元データが変わってしまう。
+        """
+        if self.is_auto():
+            return []
+        return [i + 1 for i, box in enumerate(self._boxes) if box.isChecked()]
+
+    def set_months(self, months: list[int]) -> None:
+        if self._auto is not None:
+            self._auto.setChecked(not months)
+        self._apply(sorted(months or []))
+
+
+def auto_dividend_months(
+    holding: Holding, market: MarketData | None
+) -> list[int]:
+    """銘柄の手動設定を無視して、自動判定される支払月を求める。
+
+    手動設定済みの銘柄でも「自動ならこうなる」を見せたいので、月を空にした複製で
+    解決する。率と同じく判定ロジックは calc に一本化し、表示層へ書き写さない。
+    """
+    probe = replace(holding, dividend_months=[])
+    return sorted(resolve_payment_month_ratios(probe, market) or {})
+
+
 class _HoldingDialogBase(QDialog):
     """編集/新規ダイアログ共通の即時バリデーション基盤。
 
@@ -226,7 +327,9 @@ class _HoldingDialogBase(QDialog):
 # ---- 編集 / 新規ダイアログ ----
 
 class EditHoldingDialog(_HoldingDialogBase):
-    def __init__(self, holding: Holding, parent=None) -> None:
+    def __init__(
+        self, holding: Holding, parent=None, *, market: MarketData | None = None
+    ) -> None:
         super().__init__(parent)
         self.setWindowTitle("銘柄編集")
         self.holding = holding
@@ -253,6 +356,20 @@ class EditHoldingDialog(_HoldingDialogBase):
         self._div_net.setPlaceholderText("空欄=税引前×(1−税率)で自動計算")
         self._div_date = QLineEdit(holding.div_forecast_as_of_override or "")
         self._div_date.setPlaceholderText("YYYY-MM-DD")
+
+        # 支払月・受取月（月別配当タブの按分に使う）
+        auto_months = auto_dividend_months(holding, market)
+        self._div_months = MonthCheckboxGroup(holding.dividend_months, auto_months)
+        # 優待には自動判定の材料が無いため常に手動（auto_months を渡さない）。
+        self._benefit_months = MonthCheckboxGroup(holding.benefit_months)
+        self._months_note = QLabel(
+            "配当の支払月は権利落ち月からの推定です"
+            "（JPY 建ては +3ヶ月 / USD 建ては同月）。"
+            if auto_months
+            else "配当実績が無いため支払月を自動判定できません。手動で指定できます。"
+        )
+        self._months_note.setObjectName("dialogNote")
+        self._months_note.setWordWrap(True)
 
         # 優待・取崩・税率
         self._benefit = QLineEdit(str(holding.annual_benefit_jpy))
@@ -302,6 +419,12 @@ class EditHoldingDialog(_HoldingDialogBase):
             ("配当(税引後) 上書き", self._div_net),
             ("配当予想更新日", self._div_date),
         ]))
+        months_section = _build_section("支払月・受取月", [
+            ("配当の支払月", self._div_months),
+            ("優待の受取月", self._benefit_months),
+        ])
+        months_section.layout().addRow(self._months_note)
+        layout.addWidget(months_section)
         layout.addWidget(_build_section("優待・取崩・税率", [
             ("優待換算額(円/年)", self._benefit),
             ("定額取崩額(円/年)", self._withdrawal_fixed),
@@ -358,6 +481,10 @@ class EditHoldingDialog(_HoldingDialogBase):
         self.holding.withdrawal_rate = withdrawal_rate
         self.holding.tax_rate = tax_rate
         self.holding.active = bool(active)
+        # months() は毎回新しいリストを返す。replace() の浅いコピーで元インスタンスと
+        # 共有されたリストを in-place で書き換えないこと。
+        self.holding.dividend_months = self._div_months.months()
+        self.holding.benefit_months = self._benefit_months.months()
         self.result_holding = self.holding
         self.accept()
 

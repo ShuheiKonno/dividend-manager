@@ -4,12 +4,14 @@ from __future__ import annotations
 
 from src.dialogs import (
     ACCOUNT_CHOICES,
+    auto_dividend_months,
     tax_rate_placeholder,
     validate_optional_date,
     validate_optional_number,
     validate_optional_rate,
     validate_required_number,
 )
+from src.models import Holding, MarketData
 
 
 def test_account_choices():
@@ -56,3 +58,25 @@ def test_validate_optional_date():
     assert validate_optional_date("2026-06-11") is None
     assert validate_optional_date("2026-02-30") is not None
     assert validate_optional_date("11/06/2026") is not None
+
+
+# ---- 支払月の自動判定 ----
+
+def test_auto_dividend_months_ignores_manual_setting():
+    """手動指定済みでも「自動ならこうなる」を返すこと（プレビュー表示に使う）。"""
+    holding = Holding(
+        symbol="7203", name="トヨタ", asset_type="stock", currency="JPY",
+        shares=100.0, avg_cost=2000.0, account="特定",
+        annual_div_ps_gross_override=None, annual_div_ps_net_override=None,
+        div_forecast_as_of_override=None, annual_benefit_jpy=0.0,
+        withdrawal_fixed_jpy=None, withdrawal_rate=None, tax_rate=None, active=True,
+        dividend_months=[1, 2],
+    )
+    market = MarketData(
+        symbol="7203", currency="JPY", last_price=3000.0, price_as_of=None,
+        annual_div_ps_gross=95.0, annual_div_ps_net=None, div_forecast_as_of=None,
+        source="yfinance", fetched_at=None, div_ex_month_ratios={3: 0.5, 9: 0.5},
+    )
+    # 権利落ち 3月/9月 → 支払 6月/12月。手動の [1, 2] には引きずられない。
+    assert auto_dividend_months(holding, market) == [6, 12]
+    assert auto_dividend_months(holding, None) == []

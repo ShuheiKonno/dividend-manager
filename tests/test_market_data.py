@@ -127,3 +127,80 @@ def test_fetch_usdjpy_reports_failure_reason(monkeypatch):
     monkeypatch.setattr(md, "_yf", lambda: BrokenYFinance())
     with pytest.raises(RuntimeError, match="cache unavailable"):
         md.fetch_usdjpy()
+
+
+# ---- 権利落ち月の構成比 ----
+
+class _FakeSeries:
+    """yfinance の dividends（DatetimeIndex 付き Series）の最小スタブ。"""
+
+    def __init__(self, pairs):
+        self._pairs = list(pairs)
+
+    def __len__(self):
+        return len(self._pairs)
+
+    def items(self):
+        return iter(self._pairs)
+
+
+class _FakeStamp:
+    def __init__(self, d):
+        self._d = d
+
+    def date(self):
+        return self._d
+
+
+def _series(pairs):
+    from datetime import date as _date
+
+    return _FakeSeries([(_FakeStamp(_date(*ymd)), value) for ymd, value in pairs])
+
+
+def test_dividend_month_ratios_use_actual_amounts():
+    """中間と期末で額が違う日本株が、月数の等分ではなく実績比率で按分されること。"""
+    from datetime import date, timedelta
+
+    recent = date.today() - timedelta(days=30)
+    older = date.today() - timedelta(days=200)
+    series = _series([
+        ((older.year, older.month, older.day), 15.25),
+        ((recent.year, recent.month, recent.day), 24.75),
+    ])
+    total, latest, ratios = md._parse_yfinance_dividends(series)
+    assert total == pytest.approx(40.0)
+    assert latest == recent.isoformat()
+    assert ratios is not None
+    assert abs(sum(ratios.values()) - 1.0) < 1e-9
+    assert ratios[recent.month] == pytest.approx(24.75 / 40.0)
+
+
+def test_dividends_outside_window_are_ignored():
+    from datetime import date, timedelta
+
+    recent = date.today() - timedelta(days=10)
+    stale = date.today() - timedelta(days=500)
+    series = _series([
+        ((stale.year, stale.month, stale.day), 100.0),
+        ((recent.year, recent.month, recent.day), 50.0),
+    ])
+    total, _, ratios = md._parse_yfinance_dividends(series)
+    assert total == pytest.approx(50.0)
+    assert ratios == {recent.month: pytest.approx(1.0)}
+
+
+def test_no_dividends_returns_all_none():
+    assert md._parse_yfinance_dividends(None) == (None, None, None)
+    assert md._parse_yfinance_dividends(_series([])) == (None, None, None)
+
+
+def test_only_stale_dividends_yield_no_ratios():
+    from datetime import date, timedelta
+
+    stale = date.today() - timedelta(days=500)
+    total, _, ratios = md._parse_yfinance_dividends(
+        _series([((stale.year, stale.month, stale.day), 100.0)])
+    )
+    assert total is None
+    assert ratios is None

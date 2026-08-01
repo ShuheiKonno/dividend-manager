@@ -74,18 +74,20 @@ from .io_csv import (
     read_holdings_csv,
 )
 from .models import Holding, HistoryRecord
-from .calc import compute_rows
+from .calc import compute_rows, monthly_breakdown
 from .history import upsert_record, merge_records, combine_income
 # market_data は yfinance / ToushinReader / pandas を芋づる式に読み込み起動を数秒遅らせる。
 # 取得は p / u キーのワーカースレッドでしか走らないため、import を run() 内へ遅延させる。
 from .theme import (
+    ACCENT,
     build_app_qss,
     FONT_FAMILY_PRIMARY,
     FONT_SIZE_PT,
     TEXT_DISABLED,
 )
-from .utils import fmt_number, fmt_percent, safe_float, today_jst_str
+from .utils import fmt_number, fmt_percent, now_jst, safe_float, today_jst_str
 from .widgets import (
+    BarChartWidget,
     TreemapWidget,
     PieChartWidget,
     LineChartWidget,
@@ -139,6 +141,21 @@ ASSET_TREND_SERIES = [
 ]
 # 配当タブの推移は優待/取崩の選択で合成した単一系列（_refresh_trend で構築）。
 INCOME_TREND_COLOR = QColor("#66bb6a")
+# 月別配当タブの積み上げ系列 (ラベル, バケットのキー, 塗り色)。下から順に積む。
+# 緑は配当推移の線が使っているため、優待は橙にして系列の取り違えを避ける。
+MONTHLY_SERIES = [
+    ("配当", "dividend_jpy", QColor(ACCENT)),
+    ("優待", "benefit_jpy", QColor("#ffa726")),
+]
+# 月別内訳リストの列。編集導線を持たない読み取り専用テーブル。
+MONTHLY_COLUMNS = [
+    ("コード", "symbol"),
+    ("銘柄名", "name"),
+    ("口座", "account"),
+    ("配当(円)", "dividend_jpy"),
+    ("優待(円)", "benefit_jpy"),
+    ("合計(円)", "total_jpy"),
+]
 NUMERIC_SORT_COLUMNS = {
     "shares",
     "avg_cost",
@@ -152,6 +169,9 @@ NUMERIC_SORT_COLUMNS = {
     "yield_on_value",
     "profit_jpy",
     "profit_rate",
+    "dividend_jpy",
+    "benefit_jpy",
+    "total_jpy",
 }
 
 
@@ -307,6 +327,12 @@ class DividendWindow(QMainWindow):
         # 無効銘柄をテーブルへ表示するか。既定は非表示（従来どおり）だが、
         # 表示できないと編集ダイアログで無効化した銘柄を復帰できなくなる。
         self.show_inactive: bool = bool(_saved.get("show_inactive", False))
+        # 月別配当タブ: 内訳リストの並び順は永続化し、選択月は当月から始める
+        # （前回終了時の月を復元しても翌月には陳腐化するため保存しない）。
+        self.monthly_sort: str = _saved.get("monthly_sort", "desc")
+        self.monthly_month: int = now_jst().date().month
+        self._monthly_label: str = "年間配当"
+        self._monthly_columns_sized: bool = False
         self._initial_tab: int = _saved.get("last_tab", 0)
         # テーブル列幅: 保存値があれば初回描画で適用、無ければ内容に合わせて自動調整。
         self._saved_column_widths: dict[str, list[int]] = {
@@ -320,6 +346,7 @@ class DividendWindow(QMainWindow):
         self.market_source: str | None = None
         self.market_fetched_at: str | None = None
         self.history: list[HistoryRecord] = []
+        self._monthly = monthly_breakdown([])
         self.row_holding_indices: dict[str, list[int]] = {"price": [], "income": []}
         # メニュー・ツールバー・ショートカットが共有する QAction（_build_actions が充填）
         self._actions: dict[str, QAction] = {}
@@ -449,6 +476,8 @@ class DividendWindow(QMainWindow):
         self._income_view, self._income_model, self._income_proxy = self._make_table(INCOME_COLUMNS)
         self._tabs.addTab(self._price_view, "株価関連")
         self._tabs.addTab(self._income_view, "配当関連")
+        # 月別配当タブ（上=支払月ごとの積み上げ棒 / 下=選択月の銘柄別内訳）
+        self._tabs.addTab(self._make_monthly_tab(), "月別配当")
         # 前回終了時のタブを復元してからシグナル接続する（起動時の無駄な保存を避ける）。
         if 0 <= self._initial_tab < self._tabs.count():
             self._tabs.setCurrentIndex(self._initial_tab)
@@ -489,8 +518,8 @@ class DividendWindow(QMainWindow):
         ("help_shortcuts", "キーボードショートカット一覧...", "F1", "_show_shortcut_help"),
         ("quit", "終了", "Ctrl+Q", "close"),
     ]
-    # タブ切替（Ctrl+1〜4）。ラベルは QTabWidget のタブ名と揃える。
-    _TAB_ACTION_LABELS = ["評価額", "配当金", "株価関連", "配当関連"]
+    # タブ切替（Ctrl+1〜5）。ラベルは QTabWidget のタブ名と揃える。
+    _TAB_ACTION_LABELS = ["評価額", "配当金", "株価関連", "配当関連", "月別配当"]
 
     def _build_actions(self) -> None:
         """メニュー・ツールバー・ショートカットが共有する QAction を生成する。
@@ -589,7 +618,7 @@ class DividendWindow(QMainWindow):
             "Ctrl+I: 収入モードの切替（配当 → 定額取崩 → 定率取崩）\n"
             "Ctrl+Shift+I: 無効銘柄の表示切替\n"
             "\n"
-            "Ctrl+1〜4: タブ切替（評価額 / 配当金 / 株価関連 / 配当関連）\n"
+            "Ctrl+1〜5: タブ切替（評価額 / 配当金 / 株価関連 / 配当関連 / 月別配当）\n"
             "Ctrl+F: 絞り込みボックスへ移動\n"
             "Esc: 絞り込みのクリア\n"
             "F1: このヘルプ\n"
@@ -883,6 +912,103 @@ class DividendWindow(QMainWindow):
         outer.addWidget(split, 1)
         return tab
 
+    def _make_monthly_tab(self) -> QWidget:
+        """月別の積み上げ棒グラフと、選択月の銘柄別内訳を縦に並べたタブを返す。
+
+        棒が横に12本並ぶため、評価額/配当金タブのような左右分割ではなく上下分割に
+        する（左右だとグラフと表の双方が潰れる）。
+        """
+        self._monthly_bar = BarChartWidget()
+        self._monthly_bar.month_clicked.connect(self._on_monthly_month)
+        self._monthly_view, self._monthly_model, self._monthly_proxy = (
+            self._make_breakdown_table()
+        )
+
+        tab = QWidget()
+        outer = QVBoxLayout(tab)
+        outer.setContentsMargins(0, 4, 0, 0)
+        outer.setSpacing(4)
+
+        top = QWidget()
+        top_v = QVBoxLayout(top)
+        top_v.setContentsMargins(0, 0, 0, 0)
+        top_v.setSpacing(2)
+        top_v.addWidget(self._monthly_bar, 1)
+        self._monthly_note = QLabel("")
+        self._monthly_note.setObjectName("dialogNote")
+        self._monthly_note.setWordWrap(True)
+        top_v.addWidget(self._monthly_note)
+
+        bottom = QWidget()
+        bottom_v = QVBoxLayout(bottom)
+        bottom_v.setContentsMargins(0, 0, 0, 0)
+        bottom_v.setSpacing(2)
+        head = QHBoxLayout()
+        self._monthly_head = QLabel("")
+        head.addWidget(self._monthly_head)
+        head.addStretch()
+        head.addWidget(QLabel("並び替え:"))
+        head.addWidget(self._make_combo(
+            [("desc", "金額の多い順"), ("asc", "金額の少ない順")],
+            self.monthly_sort, self._on_monthly_sort,
+        ))
+        bottom_v.addLayout(head)
+        bottom_v.addWidget(self._monthly_view, 1)
+
+        split = QSplitter(Qt.Orientation.Vertical)
+        split.addWidget(top)
+        split.addWidget(bottom)
+        split.setSizes([440, 300])
+        outer.addWidget(split, 1)
+        return tab
+
+    def _make_breakdown_table(self):
+        """月別内訳の読み取り専用テーブルを生成する。
+
+        _make_table は doubleClicked→編集 / Delete / 右クリックメニューを配線するが、
+        月別タブは _active_tab_key が "dashboard" を返すので action_edit は即 return
+        する。あれを使い回すと「押せるのに何も起きない」導線が生まれるため、
+        表示専用のビルダを分ける（_render_table も同じ理由で通さない）。
+        """
+        model = QStandardItemModel()
+        model.setHorizontalHeaderLabels([label for label, _ in MONTHLY_COLUMNS])
+        numeric_cols = {
+            i for i, (_, key) in enumerate(MONTHLY_COLUMNS)
+            if key in NUMERIC_SORT_COLUMNS
+        }
+        proxy = NumericSortProxy(numeric_cols)
+        proxy.setSourceModel(model)
+        view = QTableView()
+        view.setModel(proxy)
+        view.setSortingEnabled(True)
+        view.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
+        view.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
+        view.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
+        view.setAlternatingRowColors(True)
+        header = view.horizontalHeader()
+        header.setSectionResizeMode(QHeaderView.ResizeMode.Interactive)
+        header.setStretchLastSection(False)
+        view.verticalHeader().setVisible(False)
+        return view, model, proxy
+
+    def _on_monthly_month(self, month: int) -> None:
+        """棒グラフのクリックで内訳の対象月を切り替える（グラフ側は選択済み）。"""
+        self.monthly_month = month
+        self._render_monthly_breakdown()
+
+    def _on_monthly_sort(self, key: str) -> None:
+        self.monthly_sort = key
+        self._save_or_notify(lambda: save_settings(monthly_sort=key))
+        self._apply_monthly_sort()
+
+    def _apply_monthly_sort(self) -> None:
+        # proxy.sort ではなく view 経由で並べ替える（ヘッダのソート矢印も追随させる）。
+        order = (
+            Qt.SortOrder.AscendingOrder if self.monthly_sort == "asc"
+            else Qt.SortOrder.DescendingOrder
+        )
+        self._monthly_view.sortByColumn(len(MONTHLY_COLUMNS) - 1, order)  # 合計列
+
     def _make_trend_controls(self, kind: str, line_chart: LineChartWidget) -> QWidget:
         """推移グラフ上部の操作行（期間・Y軸下限、配当タブは優待・取崩）を生成する。
 
@@ -1084,6 +1210,9 @@ class DividendWindow(QMainWindow):
             chart_rows, value_key="annual_dividend_jpy", value_label=div_label,
             empty_message=div_empty,
         )
+        # 月別配当（構成グラフと同じく有効銘柄のみ）
+        self._monthly = monthly_breakdown(chart_rows)
+        self._refresh_monthly(div_label, div_empty)
         # 推移グラフ（履歴スナップショット）
         self._refresh_trend()
 
@@ -1315,6 +1444,99 @@ class DividendWindow(QMainWindow):
         self._refresh_view()
         self._notify(f"履歴を取り込みました（新規 {added} 日分 / 計 {len(self.history)} 日分）")
 
+    def _refresh_monthly(self, div_label: str, div_empty: str) -> None:
+        """月別タブ（棒グラフ・注記・内訳）を最新の集計で描き直す。"""
+        buckets = [
+            {
+                "month": b.month,
+                "dividend_jpy": b.dividend_jpy,
+                "benefit_jpy": b.benefit_jpy,
+            }
+            for b in self._monthly.buckets
+        ]
+        self._monthly_bar.set_data(
+            buckets,
+            MONTHLY_SERIES,
+            average=self._monthly.monthly_average_jpy,
+            empty_message=div_empty,
+        )
+        self._monthly_bar.set_selected_month(self.monthly_month)
+        self._monthly_note.setText(self._monthly_note_text(div_label))
+        # 内訳の見出しは月の切替でも描き直すため、収入ラベルを保持しておく。
+        self._monthly_label = div_label
+        self._render_monthly_breakdown()
+
+    def _monthly_note_text(self, div_label: str) -> str:
+        """推定である旨と、按分できなかった額を注記にまとめる。
+
+        月不明を黙って落とすと Σ(棒グラフ) と KPI「合計」が食い違い、その差が画面の
+        どこにも現れない。0 の項目は出さず、必要なときだけ行を足す。
+        """
+        parts = [
+            "※支払月は権利落ち月からの推定です（JPY 建ては +3ヶ月 / USD 建ては同月）。"
+            f"月平均は按分できた{div_label}を12で割った額です。"
+        ]
+        unknown = (
+            self._monthly.unknown_dividend_jpy + self._monthly.unknown_benefit_jpy
+        )
+        if unknown > 0:
+            parts.append(
+                f"月不明 ¥{fmt_number(unknown, 0)}"
+                f"（{len(self._monthly.unknown_symbols)}銘柄・グラフ未計上）"
+            )
+        if self._monthly.na_symbols:
+            parts.append(f"{div_label}が N/A {len(self._monthly.na_symbols)}銘柄")
+        if self.withdrawal_mode is not None:
+            parts.append(
+                "取崩額は支払月が定まらないため月不明に入ります"
+                "（銘柄編集で支払月を指定すると按分されます）"
+            )
+        return " / ".join(parts)
+
+    def _render_monthly_breakdown(self) -> None:
+        """選択中の月の銘柄別内訳を描き直す（読み取り専用テーブル）。"""
+        bucket = next(
+            (b for b in self._monthly.buckets if b.month == self.monthly_month), None
+        )
+        items = bucket.items if bucket is not None else []
+        total = bucket.total_jpy if bucket is not None else 0.0
+        label = "配当" if self._monthly_label == "年間配当" else "収入"
+        self._monthly_head.setText(
+            f"{self.monthly_month}月の{label}内訳: ¥{fmt_number(total, 0)}"
+            f"（{len(items)}銘柄）"
+        )
+
+        self._monthly_model.setRowCount(0)
+        for item in items:
+            cells: list[QStandardItem] = []
+            values = {
+                "symbol": item.symbol,
+                "name": item.name,
+                "account": item.account,
+                "dividend_jpy": item.dividend_jpy,
+                "benefit_jpy": item.benefit_jpy,
+                "total_jpy": item.total_jpy,
+            }
+            for _label, key in MONTHLY_COLUMNS:
+                value = values[key]
+                if key in NUMERIC_SORT_COLUMNS:
+                    cell = QStandardItem(fmt_number(value, 0))
+                    cell.setData(float(value), Qt.ItemDataRole.UserRole)
+                    cell.setTextAlignment(
+                        Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter
+                    )
+                else:
+                    cell = QStandardItem(str(value))
+                cells.append(cell)
+            self._monthly_model.appendRow(cells)
+        self._apply_monthly_sort()
+        # 列幅は「中身が入った最初の1回」だけ調整する。毎回呼ぶと、バーをクリックする
+        # たびユーザーが広げた列幅が元へ戻ってしまう（他テーブルの _size_columns_once
+        # と同じ方針。ただし永続化はしないのでフラグだけで足りる）。
+        if items and not self._monthly_columns_sized:
+            self._monthly_columns_sized = True
+            self._monthly_view.resizeColumnsToContents()
+
     def _render_table(self, tab_key, columns, model, view, rows, holding_indices: list[int] | None = None) -> None:
         state = self._capture_table_state(tab_key)
         header = view.horizontalHeader()
@@ -1448,8 +1670,10 @@ class DividendWindow(QMainWindow):
         )
 
     def _active_tab_key(self) -> str:
-        # タブ構成: [評価額(0), 配当金(1), 株価関連(2), 配当関連(3)]。
-        # 0/1 はグラフタブで編集・削除・ソート対象外（dashboard 扱い）。
+        # タブ構成: [評価額(0), 配当金(1), 株価関連(2), 配当関連(3), 月別配当(4)]。
+        # 0/1/4 はグラフタブで編集・削除・ソート対象外（dashboard 扱い）。
+        # 月別配当の内訳テーブルは読み取り専用なので、ここで拾わないのが正しい
+        # （拾うと _view_for_tab が株価テーブルを返し、別タブの行を編集してしまう）。
         idx = self._tabs.currentIndex()
         if idx == 2:
             return "price"
@@ -1480,7 +1704,10 @@ class DividendWindow(QMainWindow):
         if holding_idx < 0 or holding_idx >= len(self.holdings):
             return
         holding = self.holdings[holding_idx]
-        dlg = EditHoldingDialog(replace(holding), self)
+        # market は支払月の自動判定プレビューに使う（率と同じく表示層で算出しない）。
+        dlg = EditHoldingDialog(
+            replace(holding), self, market=self.market_data_map.get(holding.symbol)
+        )
         if dlg.exec() == QDialog.DialogCode.Accepted and dlg.result_holding is not None:
             holdings = list(self.holdings)
             holdings[holding_idx] = dlg.result_holding

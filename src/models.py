@@ -1,9 +1,16 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any
 
-from .utils import safe_float, safe_str
+from .utils import (
+    format_month_ratios,
+    format_months,
+    parse_month_ratios,
+    parse_months,
+    safe_float,
+    safe_str,
+)
 
 
 def _csv_num(value: float | None) -> float | str:
@@ -27,6 +34,8 @@ HOLDINGS_FIELDS = [
     "withdrawal_rate",
     "tax_rate",
     "active",
+    "dividend_months",
+    "benefit_months",
 ]
 
 MARKET_DATA_FIELDS = [
@@ -39,6 +48,7 @@ MARKET_DATA_FIELDS = [
     "div_forecast_as_of",
     "source",
     "fetched_at",
+    "div_ex_month_ratios",
 ]
 
 FX_FIELDS = [
@@ -82,6 +92,11 @@ class Holding:
     withdrawal_rate: float | None
     tax_rate: float | None
     active: bool
+    # 配当の支払月（1〜12・手動指定）。空なら market_data の権利落ち実績から自動判定する。
+    # 源泉税率と同じく「空欄＝自動に従う」が既定運用で、自動値を書き写さない。
+    dividend_months: list[int] = field(default_factory=list)
+    # 優待の受取月（1〜12）。優待には自動判定の材料が無いため常に手動。
+    benefit_months: list[int] = field(default_factory=list)
 
     @classmethod
     def from_dict(cls, row: dict[str, Any]) -> "Holding":
@@ -107,6 +122,8 @@ class Holding:
             withdrawal_rate=safe_float(row.get("withdrawal_rate")),
             tax_rate=safe_float(row.get("tax_rate")),
             active=str(row.get("active", "true")).strip().lower() != "false",
+            dividend_months=parse_months(row.get("dividend_months")),
+            benefit_months=parse_months(row.get("benefit_months")),
         )
 
     def to_dict(self) -> dict[str, Any]:
@@ -127,6 +144,8 @@ class Holding:
             "withdrawal_rate": _csv_num(self.withdrawal_rate),
             "tax_rate": _csv_num(self.tax_rate),
             "active": "true" if self.active else "false",
+            "dividend_months": format_months(self.dividend_months),
+            "benefit_months": format_months(self.benefit_months),
         }
 
 
@@ -141,6 +160,10 @@ class MarketData:
     div_forecast_as_of: str | None
     source: str | None
     fetched_at: str | None
+    # 直近約1年の各回配当から算出した「権利落ち月」別の構成比（合計 1.0）。
+    # 支払月ではない——ここは取得結果のキャッシュなので観測値をそのまま保持し、
+    # 支払月への変換は calc.shift_ex_month_to_payment が担う。
+    div_ex_month_ratios: dict[int, float] | None = None
 
     @classmethod
     def from_dict(cls, row: dict[str, Any]) -> "MarketData":
@@ -154,6 +177,7 @@ class MarketData:
             div_forecast_as_of=safe_str(row.get("div_forecast_as_of")),
             source=safe_str(row.get("source")),
             fetched_at=safe_str(row.get("fetched_at")),
+            div_ex_month_ratios=parse_month_ratios(row.get("div_ex_month_ratios")),
         )
 
     def to_dict(self) -> dict[str, Any]:
@@ -168,6 +192,7 @@ class MarketData:
             "div_forecast_as_of": self.div_forecast_as_of or "",
             "source": self.source or "",
             "fetched_at": self.fetched_at or "",
+            "div_ex_month_ratios": format_month_ratios(self.div_ex_month_ratios),
         }
 
 

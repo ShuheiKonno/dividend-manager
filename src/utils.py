@@ -50,6 +50,84 @@ def normalize_iso_date(raw: object) -> str | None:
     return None
 
 
+def parse_months(raw: object) -> list[int]:
+    """ "3,9" 形式の月リストを [3, 9] へ。1〜12 以外・数値以外は捨てる。
+
+    normalize_iso_date と同じく「壊れた入力を救済し、復元不能な要素は捨てる」方針。
+    重複を除いて昇順に正規化するため、往復すると入力順は保存されない。
+    """
+    if raw is None:
+        return []
+    if isinstance(raw, (list, tuple, set)):
+        parts: list[str] = [str(item) for item in raw]
+    else:
+        text = str(raw).strip()
+        if not text:
+            return []
+        parts = text.replace("，", ",").split(",")
+    months: set[int] = set()
+    for part in parts:
+        try:
+            month = int(str(part).strip())
+        except (TypeError, ValueError):
+            continue
+        if 1 <= month <= 12:
+            months.add(month)
+    return sorted(months)
+
+
+def format_months(months: object) -> str:
+    """[9, 3, 9] → "3,9"（parse_months で正規化して出力）。空/None は ""。"""
+    return ",".join(str(m) for m in parse_months(months))
+
+
+def parse_month_ratios(raw: object) -> dict[int, float] | None:
+    """ "6:0.62,12:0.38" → {6: 0.62, 12: 0.38}。有効要素が無ければ None。
+
+    不正な要素は捨て、残った比率の合計が 1.0 になるよう再正規化する。
+    比率 0 だけが残る状態は「月が決まったのに額が乗らない」という無意味な
+    結果になるため、合計が 0 以下なら None（＝月不明）を返す。
+    """
+    if raw is None:
+        return None
+    if isinstance(raw, dict):
+        items = [(k, v) for k, v in raw.items()]
+    else:
+        text = str(raw).strip()
+        if not text:
+            return None
+        items = []
+        for chunk in text.replace("，", ",").split(","):
+            key, sep, value = chunk.partition(":")
+            if not sep:
+                continue
+            items.append((key, value))
+    ratios: dict[int, float] = {}
+    for key, value in items:
+        try:
+            month = int(str(key).strip())
+        except (TypeError, ValueError):
+            continue
+        if not 1 <= month <= 12:
+            continue
+        ratio = safe_float(value)
+        if ratio is None or ratio < 0:
+            continue
+        ratios[month] = ratios.get(month, 0.0) + ratio
+    total = sum(ratios.values())
+    if not ratios or total <= 0:
+        return None
+    return {month: ratio / total for month, ratio in sorted(ratios.items())}
+
+
+def format_month_ratios(ratios: object) -> str:
+    """{6: 0.62, 12: 0.38} → "6:0.6200,12:0.3800"。None/空は ""。"""
+    parsed = parse_month_ratios(ratios)
+    if not parsed:
+        return ""
+    return ",".join(f"{month}:{ratio:.4f}" for month, ratio in sorted(parsed.items()))
+
+
 def safe_float(value: Any) -> float | None:
     if value is None:
         return None

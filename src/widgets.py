@@ -4,6 +4,7 @@
 - 損益に応じた配色ヘルパー（日本式: プラス=赤 / マイナス=青、3段階濃淡）
 - TreemapWidget: 面積比例ツリーマップ（面積 ∝ 指定額[既定=評価額]、色 = 損益率）
 - PieChartWidget: 円グラフ（面積 ∝ 指定額[既定=評価額]、色 = 損益率）
+- BarChartWidget: 月別の積み上げ棒グラフ（クリックで月を選択）
 - KpiCard: サマリー指標カード
 """
 
@@ -12,7 +13,7 @@ from __future__ import annotations
 import math
 from typing import Optional
 
-from PySide6.QtCore import Qt, QRectF, QPoint
+from PySide6.QtCore import Qt, QRectF, QPoint, Signal
 from PySide6.QtGui import QColor, QPainter, QPen, QFont
 from PySide6.QtWidgets import (
     QWidget,
@@ -800,6 +801,261 @@ class LineChartWidget(QWidget):
         frac = (px - plot.left()) / plot.width()
         idx = round(frac * (n - 1))
         return max(0, min(n - 1, idx))
+
+
+class BarChartWidget(QWidget):
+    """月別の積み上げ棒グラフ（純 QPainter・依存追加なし）。
+
+    LineChartWidget と同じく外部グラフライブラリを使わず、起動パスに重量級 import を
+    持ち込まない方針に従う。
+
+    set_data(buckets, series):
+      buckets … 12件の dict。各要素に "month"（1〜12）と各系列の数値キーを持つ。
+      series  … (ラベル, キー, 塗り色 QColor) のタプルのリスト。下から順に積む。
+
+    バーの色は損益ではなく系列（配当/優待）の区別なので、日本式の損益カラー
+    （profit_text_qcolor / profit_tile_colors）は通さず呼び出し側から受け取る。
+    """
+
+    month_clicked = Signal(int)
+
+    _MARGIN_LEFT = 64
+    _MARGIN_RIGHT = 16
+    # 上部に「月平均」の行を出すぶん、折れ線グラフより広く取る。
+    _MARGIN_TOP = 44
+    _MARGIN_BOTTOM = 34
+    _BAND_FILL = 0.62  # 1ヶ月ぶんの帯幅に対する棒の幅
+
+    def __init__(self, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self._buckets: list[dict] = []
+        self._series: list[tuple[str, str, QColor]] = []
+        self._empty_message: str = "配当データがありません（F5 で株価・配当を取得してください）"
+        self._average: float | None = None
+        self._selected: int | None = None
+        self._hover_month: int | None = None
+        self._top: float = 1.0
+        self.setMinimumSize(480, 300)
+        self.setMouseTracking(True)
+        self.setAutoFillBackground(True)
+
+    def set_data(
+        self,
+        buckets: list[dict],
+        series: list[tuple[str, str, QColor]],
+        average: float | None = None,
+        empty_message: str | None = None,
+    ) -> None:
+        self._buckets = list(buckets)
+        self._series = list(series)
+        self._average = average
+        if empty_message is not None:
+            self._empty_message = empty_message
+        self._hover_month = None
+        self._recompute()
+        self.update()
+
+    def set_selected_month(self, month: int | None) -> None:
+        if month == self._selected:
+            return
+        self._selected = month
+        self.update()
+
+    def _recompute(self) -> None:
+        totals = [self._total_of(b) for b in self._buckets]
+        # 棒グラフは常にゼロ基準（途中から始めると高さの比が嘘になる）。
+        _floor, self._top = axis_bounds(totals, "zero")
+
+    def _total_of(self, bucket: dict) -> float:
+        return sum(safe_float(bucket.get(key)) or 0.0 for _label, key, _color in self._series)
+
+    # ---- 座標変換 ----
+    def _plot_rect(self) -> QRectF:
+        rect = self.rect()
+        return QRectF(
+            self._MARGIN_LEFT,
+            self._MARGIN_TOP,
+            max(1.0, rect.width() - self._MARGIN_LEFT - self._MARGIN_RIGHT),
+            max(1.0, rect.height() - self._MARGIN_TOP - self._MARGIN_BOTTOM),
+        )
+
+    def _band_width(self, plot: QRectF) -> float:
+        return plot.width() / max(1, len(self._buckets))
+
+    def _band_left(self, idx: int, plot: QRectF) -> float:
+        return plot.left() + self._band_width(plot) * idx
+
+    def _y_for(self, value: float, plot: QRectF) -> float:
+        if self._top <= 0:
+            return plot.bottom()
+        return plot.bottom() - plot.height() * (value / self._top)
+
+    # ---- 描画 ----
+    def paintEvent(self, event) -> None:  # noqa: N802 (Qt API)
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+        rect = self.rect()
+        painter.fillRect(rect, QColor(CHART_BG))
+
+        totals = [self._total_of(b) for b in self._buckets]
+        if not self._buckets or not self._series or sum(totals) <= 0:
+            painter.setPen(QPen(QColor("#9e9e9e")))
+            painter.drawText(rect, Qt.AlignmentFlag.AlignCenter, self._empty_message)
+            painter.end()
+            return
+
+        plot = self._plot_rect()
+        band = self._band_width(plot)
+        bar_w = band * self._BAND_FILL
+        small_font = QFont(self.font())
+        small_font.setPointSize(max(7, self.font().pointSize() - 1))
+
+        # 選択中の月の帯を淡く塗る（どの月の内訳を見ているか分かるように）
+        if self._selected is not None:
+            for idx, bucket in enumerate(self._buckets):
+                if bucket.get("month") != self._selected:
+                    continue
+                painter.fillRect(
+                    QRectF(self._band_left(idx, plot), plot.top(), band, plot.height()),
+                    QColor(255, 255, 255, 16),
+                )
+
+        # 横グリッド線 + Y 軸ラベル（0 〜 上限を 4 分割）
+        painter.setFont(small_font)
+        for i in range(5):
+            frac = i / 4.0
+            y = plot.bottom() - plot.height() * frac
+            painter.setPen(QPen(QColor("#2f2f2f"), 1))
+            painter.drawLine(int(plot.left()), int(y), int(plot.right()), int(y))
+            painter.setPen(QPen(QColor("#9e9e9e")))
+            painter.drawText(
+                QRectF(0, y - 8, self._MARGIN_LEFT - 6, 16),
+                Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter,
+                _fmt_compact(self._top * frac),
+            )
+
+        # 積み上げ棒（series の順に下から積む）
+        painter.setPen(Qt.PenStyle.NoPen)
+        for idx, bucket in enumerate(self._buckets):
+            month = bucket.get("month")
+            bx = self._band_left(idx, plot) + (band - bar_w) / 2.0
+            baseline = 0.0
+            for _label, key, color in self._series:
+                value = safe_float(bucket.get(key)) or 0.0
+                if value <= 0:
+                    continue
+                y_top = self._y_for(baseline + value, plot)
+                y_bottom = self._y_for(baseline, plot)
+                fill = color.lighter(115) if month == self._hover_month else color
+                painter.fillRect(
+                    QRectF(bx, y_top, bar_w, max(1.0, y_bottom - y_top)), fill
+                )
+                baseline += value
+
+        # 各棒の上に金額（万/億丸めだと月額の差が潰れるので実数のまま）
+        painter.setPen(QPen(QColor("#d0d0d0")))
+        for idx, (bucket, total) in enumerate(zip(self._buckets, totals)):
+            if total <= 0:
+                continue
+            y = self._y_for(total, plot)
+            painter.drawText(
+                QRectF(self._band_left(idx, plot), y - 16, band, 14),
+                Qt.AlignmentFlag.AlignCenter,
+                fmt_number(total, 0),
+            )
+
+        # X 軸ラベル（1月〜12月）
+        painter.setPen(QPen(QColor("#9e9e9e")))
+        for idx, bucket in enumerate(self._buckets):
+            painter.drawText(
+                QRectF(self._band_left(idx, plot), plot.bottom() + 4, band, 16),
+                Qt.AlignmentFlag.AlignCenter,
+                f"{bucket.get('month', idx + 1)}月",
+            )
+
+        # 月平均の水平線（按分できた年額 ÷ 12）
+        if self._average and self._average > 0:
+            ay = self._y_for(self._average, plot)
+            painter.setPen(QPen(QColor("#6f6f6f"), 1, Qt.PenStyle.DashLine))
+            painter.drawLine(int(plot.left()), int(ay), int(plot.right()), int(ay))
+            painter.setPen(QPen(QColor("#9e9e9e")))
+            painter.drawText(
+                QRectF(plot.left(), 6, plot.width() / 2.0, 16),
+                Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter,
+                f"月平均 ¥{fmt_number(self._average, 0)}",
+            )
+
+        # 凡例（右上）。系列と同じ左→右の順に並べるため、先に総幅を測って左端を決める。
+        sw = 14  # 色見本の幅
+        gap = 12  # 系列間の間隔
+        widths = [
+            sw + 4 + painter.fontMetrics().horizontalAdvance(label)
+            for label, _key, _color in self._series
+        ]
+        legend_x = plot.right() - 8 - sum(widths) - gap * (len(widths) - 1)
+        legend_y = 6
+        for (label, _key, color), row_w in zip(self._series, widths):
+            painter.fillRect(QRectF(legend_x, legend_y + 3, sw, 10), color)
+            painter.setPen(QPen(QColor("#d0d0d0")))
+            painter.drawText(
+                QRectF(legend_x + sw + 4, legend_y, row_w - sw, 16),
+                Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter,
+                label,
+            )
+            legend_x += row_w + gap
+
+        painter.end()
+
+    # ---- 対話 ----
+    def _month_at(self, px: float) -> int | None:
+        """x 座標を月に対応させる。棒の外側でも帯の内側なら拾う（押しやすさ優先）。"""
+        if not self._buckets:
+            return None
+        plot = self._plot_rect()
+        if px < plot.left() or px > plot.right():
+            return None
+        idx = int((px - plot.left()) / self._band_width(plot))
+        idx = max(0, min(len(self._buckets) - 1, idx))
+        month = self._buckets[idx].get("month")
+        return int(month) if month is not None else None
+
+    def mousePressEvent(self, event) -> None:  # noqa: N802 (Qt API)
+        if event.button() != Qt.MouseButton.LeftButton:
+            super().mousePressEvent(event)
+            return
+        pos = event.position().toPoint() if hasattr(event, "position") else event.pos()
+        month = self._month_at(pos.x())
+        if month is not None and month != self._selected:
+            self._selected = month
+            self.update()
+            self.month_clicked.emit(month)
+        super().mousePressEvent(event)
+
+    def mouseMoveEvent(self, event) -> None:  # noqa: N802 (Qt API)
+        pos = event.position().toPoint() if hasattr(event, "position") else event.pos()
+        month = self._month_at(pos.x())
+        if month != self._hover_month:
+            self._hover_month = month
+            self.update()
+        if month is None:
+            QToolTip.hideText()
+            super().mouseMoveEvent(event)
+            return
+        bucket = next((b for b in self._buckets if b.get("month") == month), None)
+        if bucket is not None:
+            lines = [f"{month}月"]
+            for label, key, _color in self._series:
+                value = safe_float(bucket.get(key)) or 0.0
+                lines.append(f"{label}: {fmt_number(value, 0)} 円")
+            QToolTip.showText(event.globalPosition().toPoint(), "\n".join(lines), self)
+        super().mouseMoveEvent(event)
+
+    def leaveEvent(self, event) -> None:  # noqa: N802 (Qt API)
+        if self._hover_month is not None:
+            self._hover_month = None
+            self.update()
+        QToolTip.hideText()
+        super().leaveEvent(event)
 
 
 class KpiCard(QFrame):
