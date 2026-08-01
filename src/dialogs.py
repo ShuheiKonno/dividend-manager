@@ -317,17 +317,14 @@ class EditHoldingDialog(_HoldingDialogBase):
         self._active = QCheckBox("有効")
         self._active.setChecked(holding.active)
 
-        # 配当の上書き
+        # 配当の上書き（税引後は gross × (1 − 税率) で自動計算するため欄を持たない。
+        # 一部だけ非課税の分配金など率で表せない例外は holdings.csv の
+        # annual_div_ps_net_override 列を手編集する運用）。
         self._div_gross = QLineEdit(
             "" if holding.annual_div_ps_gross_override is None
             else str(holding.annual_div_ps_gross_override)
         )
         self._div_gross.setPlaceholderText("空欄=自動取得値を使用")
-        self._div_net = QLineEdit(
-            "" if holding.annual_div_ps_net_override is None
-            else str(holding.annual_div_ps_net_override)
-        )
-        self._div_net.setPlaceholderText("空欄=税引前×(1−税率)で自動計算")
         self._div_date = QLineEdit(holding.div_forecast_as_of_override or "")
         self._div_date.setPlaceholderText("YYYY-MM-DD")
 
@@ -363,7 +360,6 @@ class EditHoldingDialog(_HoldingDialogBase):
         self._attach_validator(self._shares, lambda t: validate_required_number(t, "保有株数"))
         self._attach_validator(self._avg_cost, lambda t: validate_required_number(t, "取得単価"))
         self._attach_validator(self._div_gross, lambda t: validate_optional_number(t, "配当(税引前)"))
-        self._attach_validator(self._div_net, lambda t: validate_optional_number(t, "配当(税引後)"))
         self._attach_validator(self._div_date, validate_optional_date)
         self._attach_validator(self._benefit, lambda t: validate_required_number(t, "優待換算額"))
         self._attach_validator(self._withdrawal_fixed, lambda t: validate_optional_number(t, "定額取崩額"))
@@ -385,7 +381,6 @@ class EditHoldingDialog(_HoldingDialogBase):
         ]))
         layout.addWidget(_build_section("配当の上書き", [
             ("配当(税引前) 上書き", self._div_gross),
-            ("配当(税引後) 上書き", self._div_net),
             ("配当予想更新日", self._div_date),
         ]))
         months_section = _build_section("支払月・受取月", [
@@ -408,7 +403,6 @@ class EditHoldingDialog(_HoldingDialogBase):
             shares = _non_negative(_parse_num(self._shares.text()), "保有株数")
             avg_cost = _non_negative(_parse_num(self._avg_cost.text()), "取得単価")
             div_gross_text = self._div_gross.text().strip()
-            div_net_text = self._div_net.text().strip()
             div_date = _optional_iso_date(self._div_date.text().strip() or None)
             benefit = _non_negative(_parse_num(self._benefit.text()), "優待換算額")
             withdrawal_fixed_text = self._withdrawal_fixed.text().strip()
@@ -416,10 +410,6 @@ class EditHoldingDialog(_HoldingDialogBase):
             div_gross = (
                 _non_negative(_parse_num(div_gross_text), "配当(税引前)")
                 if div_gross_text else None
-            )
-            div_net = (
-                _non_negative(_parse_num(div_net_text), "配当(税引後)")
-                if div_net_text else None
             )
             withdrawal_fixed = (
                 _non_negative(_parse_num(withdrawal_fixed_text), "定額取崩額")
@@ -438,13 +428,13 @@ class EditHoldingDialog(_HoldingDialogBase):
         self.holding.shares = shares
         self.holding.avg_cost = avg_cost
         self.holding.annual_div_ps_gross_override = div_gross
-        self.holding.annual_div_ps_net_override = div_net
         self.holding.div_forecast_as_of_override = div_date
         self.holding.annual_benefit_jpy = benefit
         self.holding.withdrawal_fixed_jpy = withdrawal_fixed
         self.holding.withdrawal_rate = withdrawal_rate
-        # tax_rate は入力欄が無いので触らない。代入すると CSV を手編集した銘柄が
-        # 「開いて保存しただけ」で自動判定へ戻ってしまう（黙って値が消える）。
+        # annual_div_ps_net_override / tax_rate は入力欄が無いので触らない。代入すると
+        # CSV を手編集した銘柄が「開いて保存しただけ」で自動計算へ戻ってしまう
+        # （エラーも出ないまま税引後の額だけが変わる）。
         self.holding.active = bool(active)
         # months() は毎回新しいリストを返す。replace() の浅いコピーで元インスタンスと
         # 共有されたリストを in-place で書き換えないこと。

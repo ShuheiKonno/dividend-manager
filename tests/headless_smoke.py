@@ -200,25 +200,32 @@ def _check_account_combo() -> None:
     assert save_dlg.result_holding.account == "NISA（成長）"
 
 
-def _check_tax_rate_is_untouched() -> None:
-    """源泉税率はダイアログに欄が無く、保存しても既存値を書き換えないこと。
+def _check_auto_fields_are_untouched() -> None:
+    """自動計算に任せた項目はダイアログに欄が無く、保存で既存値を消さないこと。
 
-    率は calc.resolve_tax_rate が口座・通貨から自動判定する。CSV を手編集して
-    例外の率を入れた銘柄が「開いて保存しただけ」で自動判定へ戻ると、エラーも
-    出ないまま税引後の額だけが変わるため、代入しないことを固定する。
+    税引後配当は gross × (1 − 税率)、税率は calc.resolve_tax_rate が口座・通貨から
+    自動判定する。CSV を手編集して例外値を入れた銘柄が「開いて保存しただけ」で
+    自動値へ戻ると、エラーも出ないまま税引後の額だけが変わるため代入しない。
     """
-    dlg = EditHoldingDialog(_holding(tax_rate=0.15))
+    dlg = EditHoldingDialog(
+        _holding(tax_rate=0.15, annual_div_ps_net_override=42.0)
+    )
     assert not hasattr(dlg, "_tax_rate"), "源泉税率の入力欄が残っている"
+    assert not hasattr(dlg, "_div_net"), "配当(税引後)上書きの入力欄が残っている"
     dlg._on_save()
     assert dlg.result_holding is not None
     assert dlg.result_holding.tax_rate == 0.15, "保存で手編集の源泉税率が消えた"
+    assert dlg.result_holding.annual_div_ps_net_override == 42.0, (
+        "保存で手編集の税引後上書きが消えた"
+    )
 
-    # 新規登録は None のまま（＝自動判定）で追加される
+    # 新規登録は両方 None のまま（＝自動計算に任せる）で追加される
     nd = NewHoldingDialog(_holding(symbol="8306", name="三菱UFJ"))
     assert not hasattr(nd, "_tax_rate"), "新規ダイアログに源泉税率の欄が残っている"
     nd._on_save()
     assert nd.result_holding is not None
     assert nd.result_holding.tax_rate is None
+    assert nd.result_holding.annual_div_ps_net_override is None
 
 
 def _market(**overrides) -> MarketData:
@@ -359,7 +366,7 @@ def main() -> None:
     assert {nd._currency.itemData(i) for i in range(nd._currency.count())} == {"JPY", "USD"}
 
     _check_account_combo()
-    _check_tax_rate_is_untouched()
+    _check_auto_fields_are_untouched()
     _check_month_checkboxes()
 
     print("headless smoke: OK")
