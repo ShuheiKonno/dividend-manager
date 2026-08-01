@@ -62,6 +62,10 @@ FX_FIELDS = [
 # record_date は ISO 日付 "YYYY-MM-DD"（1日1レコード）。
 # total_dividend_jpy は「取崩無しの通常配当」（記録時の表示モードに依存させない）。
 # total_withdrawal_income_jpy は「投信を定率取崩した収入」（fund を時価×rate に置換）。
+# total_fixed_withdrawal_income_jpy は「投信を定額取崩した収入」（fund を定額に置換）。
+# 取崩の 2 列は収入モード（fixed / rate）と 1 対 1 で対応する。1 列だけにして
+# 両モードで使い回すと、定額を選んでいるのに定率の線が出る（値も凡例も尤もらしい
+# まま間違う）。列を足したのは後からなので、それ以前の日は空＝線を引かない。
 # Android バックアップ取込分は簿価・損益・取崩収入を持たない（None）。
 HISTORY_FIELDS = [
     "record_date",
@@ -71,6 +75,7 @@ HISTORY_FIELDS = [
     "total_benefit_jpy",
     "total_profit_jpy",
     "total_withdrawal_income_jpy",
+    "total_fixed_withdrawal_income_jpy",
     "source",
 ]
 
@@ -206,7 +211,8 @@ class HistoryRecord:
     total_dividend_jpy: float | None
     total_benefit_jpy: float | None
     total_profit_jpy: float | None
-    total_withdrawal_income_jpy: float | None
+    total_withdrawal_income_jpy: float | None  # 定率取崩
+    total_fixed_withdrawal_income_jpy: float | None  # 定額取崩
     source: str | None
 
     @classmethod
@@ -221,6 +227,10 @@ class HistoryRecord:
             total_withdrawal_income_jpy=safe_float(
                 row.get("total_withdrawal_income_jpy")
             ),
+            # 列を後から足したので、それ以前に書いた CSV には無い（→ None）。
+            total_fixed_withdrawal_income_jpy=safe_float(
+                row.get("total_fixed_withdrawal_income_jpy")
+            ),
             source=safe_str(row.get("source")),
         )
 
@@ -234,6 +244,9 @@ class HistoryRecord:
             "total_benefit_jpy": _csv_num(self.total_benefit_jpy),
             "total_profit_jpy": _csv_num(self.total_profit_jpy),
             "total_withdrawal_income_jpy": _csv_num(self.total_withdrawal_income_jpy),
+            "total_fixed_withdrawal_income_jpy": _csv_num(
+                self.total_fixed_withdrawal_income_jpy
+            ),
             "source": self.source or "",
         }
 

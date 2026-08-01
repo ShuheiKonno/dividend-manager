@@ -75,6 +75,7 @@ def _history(date: str, **kw) -> HistoryRecord:
         total_benefit_jpy=None,
         total_profit_jpy=None,
         total_withdrawal_income_jpy=None,
+        total_fixed_withdrawal_income_jpy=None,
         source="app",
     )
     base.update(kw)
@@ -263,12 +264,14 @@ def test_settings_last_tab_rejects_bool_and_out_of_range(monkeypatch, tmp_path):
     assert io_csv.load_settings()["last_tab"] == 4
 
 
-def test_settings_monthly_sort_roundtrip(monkeypatch, tmp_path):
+def test_settings_drops_retired_keys(monkeypatch, tmp_path):
+    """廃止した設定キーは保存されないこと（並び替えはヘッダクリックのみ、
+    取崩の有無は withdrawal_mode が唯一の入口）。"""
     _configure_tmp_dirs(monkeypatch, tmp_path)
-    io_csv.save_settings(monthly_sort="asc")
-    assert io_csv.load_settings()["monthly_sort"] == "asc"
-    io_csv.save_settings(monthly_sort="sideways")  # 未知の値は拒否
-    assert io_csv.load_settings()["monthly_sort"] == "asc"
+    io_csv.save_settings(monthly_sort="asc", income_withdrawal="with")
+    loaded = io_csv.load_settings()
+    assert "monthly_sort" not in loaded
+    assert "income_withdrawal" not in loaded
 
 
 def test_settings_show_inactive_roundtrip(monkeypatch, tmp_path):

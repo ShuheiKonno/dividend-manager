@@ -42,18 +42,28 @@ def upsert_record(
     return merge_records(records, [record], prefer="incoming")
 
 
-def combine_income(
-    rec: dict, with_benefit: bool, with_withdrawal: bool
-) -> float | None:
-    """配当推移グラフの 1 点の表示値を、優待・取崩の選択に応じて合成して返す。
+# 収入モード → 履歴の基準列。取崩の 2 モードはそれぞれ専用の列を持つ（1 列で
+# 兼ねると定額を選んでいるのに定率の値が出て、凡例まで含めて尤もらしく間違う）。
+INCOME_BASE_KEYS = {
+    None: "total_dividend_jpy",
+    "fixed": "total_fixed_withdrawal_income_jpy",
+    "rate": "total_withdrawal_income_jpy",
+}
 
-    with_withdrawal=False: 取崩無しの通常配当（total_dividend_jpy）を基準。
-    with_withdrawal=True : 取崩込み収入（total_withdrawal_income_jpy）を基準。
-    with_benefit=True    : 上記へ優待（total_benefit_jpy）を加算。
-    基準値が None（取崩込みだが取崩収入未記録＝過去の取込分など）の場合は None を
+
+def combine_income(
+    rec: dict, with_benefit: bool, withdrawal_mode: str | None
+) -> float | None:
+    """配当推移グラフの 1 点の表示値を、優待・収入モードに応じて合成して返す。
+
+    withdrawal_mode=None   : 取崩無しの通常配当（total_dividend_jpy）を基準。
+    withdrawal_mode="fixed": 定額取崩の収入を基準。
+    withdrawal_mode="rate" : 定率取崩の収入を基準。
+    with_benefit=True      : 上記へ優待（total_benefit_jpy）を加算。
+    基準値が None（その列を記録する前の日＝過去の取込分など）の場合は None を
     返し、折れ線を分断する。優待が None の日は 0 として扱う。
     """
-    key = "total_withdrawal_income_jpy" if with_withdrawal else "total_dividend_jpy"
+    key = INCOME_BASE_KEYS.get(withdrawal_mode, "total_dividend_jpy")
     base = safe_float(rec.get(key))
     if base is None:
         return None
