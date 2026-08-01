@@ -52,7 +52,7 @@ def _check_actions(w) -> None:
             assert len(text) > 1, f"{key} に一文字キーが残っている: {text!r}"
     assert actions["update_market"].shortcut().toString() == "F5"
     assert actions["edit"].shortcut().toString() == "Ctrl+E"
-    assert actions["tab4"].shortcut().toString() == "Ctrl+5", "月別配当タブのキーが無い"
+    assert actions["tab4"].shortcut().toString() == "Ctrl+5", "配当詳細タブのキーが無い"
 
     original_tab = w._tabs.currentIndex()
 
@@ -62,16 +62,16 @@ def _check_actions(w) -> None:
     assert not actions["delete"].isEnabled(), "グラフタブで削除が有効のまま"
     assert not w._filter.isEnabled(), "グラフタブで絞り込みが有効のまま"
 
-    # 表タブ: 行を選ぶと編集・削除が有効になる
-    w._tabs.setCurrentIndex(2)
+    # 表タブ（株価詳細=3）: 行を選ぶと編集・削除が有効になる
+    w._tabs.setCurrentIndex(3)
     assert w._filter.isEnabled(), "表タブで絞り込みが無効のまま"
     if w._price_proxy.rowCount() > 0:
         w._price_view.selectRow(0)
         assert actions["edit"].isEnabled(), "行を選んでも編集が有効にならない"
         assert actions["delete"].isEnabled(), "行を選んでも削除が有効にならない"
 
-    # 月別配当タブ: 内訳は読み取り専用なのでグラフタブと同じ扱い
-    w._tabs.setCurrentIndex(4)
+    # 月別配当タブ（=2）: 内訳は読み取り専用なのでグラフタブと同じ扱い
+    w._tabs.setCurrentIndex(2)
     assert not actions["edit"].isEnabled(), "月別配当タブで編集が有効のまま"
     assert not actions["delete"].isEnabled(), "月別配当タブで削除が有効のまま"
     assert not w._filter.isEnabled(), "月別配当タブで絞り込みが有効のまま"
@@ -319,7 +319,11 @@ def main() -> None:
 
     # タブ・メニュー構成
     assert w._tabs.count() == 5, "タブが5つ生成されていない"
-    assert w._tabs.tabText(4) == "月別配当", w._tabs.tabText(4)
+    # 並びはグラフ系3枚（評価額 / 配当金 / 月別配当）→ 明細2枚（株価詳細 / 配当詳細）。
+    # _active_tab_key が index 3/4 だけを表タブとして拾うので順序ごと固定する。
+    assert [w._tabs.tabText(i) for i in range(5)] == [
+        "評価額", "配当金", "月別配当", "株価詳細", "配当詳細"
+    ], [w._tabs.tabText(i) for i in range(5)]
     menus = [a for a in w.menuBar().actions() if a.menu() is not None]
     assert len(menus) == 4, f"メニューが4つでない: {len(menus)}"
     file_actions = [a.text() for a in menus[0].menu().actions() if a.text()]
