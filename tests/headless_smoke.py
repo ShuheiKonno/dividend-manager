@@ -200,29 +200,25 @@ def _check_account_combo() -> None:
     assert save_dlg.result_holding.account == "NISA（成長）"
 
 
-def _check_tax_rate_placeholder() -> None:
-    """源泉税率欄のプレースホルダが口座・通貨の自動判定値へ追随すること。"""
-    dlg = EditHoldingDialog(_holding(account="特定", currency="JPY"))
-    assert "20.315%" in dlg._tax_rate.placeholderText(), dlg._tax_rate.placeholderText()
-    dlg._account.setCurrentIndex(dlg._account.findData("NISA（成長）"))
-    assert "0%" in dlg._tax_rate.placeholderText(), "NISA へ切替えても率が更新されない"
+def _check_tax_rate_is_untouched() -> None:
+    """源泉税率はダイアログに欄が無く、保存しても既存値を書き換えないこと。
 
-    # 米国株（USD）の NISA は米国源泉 10% が残る
-    usd = EditHoldingDialog(_holding(account="旧NISA", currency="USD"))
-    assert "10%" in usd._tax_rate.placeholderText(), usd._tax_rate.placeholderText()
+    率は calc.resolve_tax_rate が口座・通貨から自動判定する。CSV を手編集して
+    例外の率を入れた銘柄が「開いて保存しただけ」で自動判定へ戻ると、エラーも
+    出ないまま税引後の額だけが変わるため、代入しないことを固定する。
+    """
+    dlg = EditHoldingDialog(_holding(tax_rate=0.15))
+    assert not hasattr(dlg, "_tax_rate"), "源泉税率の入力欄が残っている"
+    dlg._on_save()
+    assert dlg.result_holding is not None
+    assert dlg.result_holding.tax_rate == 0.15, "保存で手編集の源泉税率が消えた"
 
-    # 課税口座の米国株は 米国10%＋国内20.315% の二段課税（単純加算の30.315%ではない）
-    taxable_usd = EditHoldingDialog(_holding(account="特定", currency="USD"))
-    assert "28.2835%" in taxable_usd._tax_rate.placeholderText(), (
-        taxable_usd._tax_rate.placeholderText()
-    )
-
-    # 新規ダイアログは通貨コンボの変更でも追随する
-    nd = NewHoldingDialog(_holding(symbol="", name="", account="", currency="JPY"))
-    nd._account.setCurrentIndex(nd._account.findData("旧NISA"))
-    assert "0%" in nd._tax_rate.placeholderText()
-    nd._currency.setCurrentIndex(nd._currency.findData("USD"))
-    assert "10%" in nd._tax_rate.placeholderText(), "通貨切替で率が更新されない"
+    # 新規登録は None のまま（＝自動判定）で追加される
+    nd = NewHoldingDialog(_holding(symbol="8306", name="三菱UFJ"))
+    assert not hasattr(nd, "_tax_rate"), "新規ダイアログに源泉税率の欄が残っている"
+    nd._on_save()
+    assert nd.result_holding is not None
+    assert nd.result_holding.tax_rate is None
 
 
 def _market(**overrides) -> MarketData:
@@ -363,7 +359,7 @@ def main() -> None:
     assert {nd._currency.itemData(i) for i in range(nd._currency.count())} == {"JPY", "USD"}
 
     _check_account_combo()
-    _check_tax_rate_placeholder()
+    _check_tax_rate_is_untouched()
     _check_month_checkboxes()
 
     print("headless smoke: OK")

@@ -5,7 +5,6 @@ from __future__ import annotations
 from src.dialogs import (
     ACCOUNT_CHOICES,
     auto_dividend_months,
-    tax_rate_placeholder,
     validate_optional_date,
     validate_optional_number,
     validate_optional_rate,
@@ -19,15 +18,6 @@ def test_account_choices():
     assert ACCOUNT_CHOICES == [
         "", "特定", "一般", "NISA（成長）", "NISA（積立）", "旧NISA"
     ]
-
-
-def test_tax_rate_placeholder_follows_account_and_currency():
-    """空欄時に効く自動判定率をそのまま見せる（率は calc 側の一箇所が唯一の実装）。"""
-    assert tax_rate_placeholder("特定", "JPY").startswith("空欄=20.315%")
-    assert tax_rate_placeholder("NISA（成長）", "JPY").startswith("空欄=0%")
-    assert tax_rate_placeholder("旧NISA", "USD").startswith("空欄=10%")
-    # 課税口座の米国株は二段課税の合成率（浮動小数の桁が漏れないこと）。
-    assert tax_rate_placeholder("特定", "USD").startswith("空欄=28.2835%")
 
 
 def test_validate_required_number():
