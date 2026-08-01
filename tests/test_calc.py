@@ -38,7 +38,13 @@ def _holding(**overrides) -> Holding:
     return Holding(**base)
 
 
-def _market(symbol="7203", currency="JPY", last_price=2500.0, gross=60.0) -> MarketData:
+def _market(
+    symbol="7203",
+    currency="JPY",
+    last_price=2500.0,
+    gross=60.0,
+    ex_month_ratios=None,
+) -> MarketData:
     return MarketData(
         symbol=symbol,
         currency=currency,
@@ -49,6 +55,7 @@ def _market(symbol="7203", currency="JPY", last_price=2500.0, gross=60.0) -> Mar
         div_forecast_as_of="2026-03-31",
         source="yfinance",
         fetched_at="2026-05-29T09:00:00+09:00",
+        div_ex_month_ratios=ex_month_ratios,
     )
 
 
@@ -328,3 +335,36 @@ def test_rows_expose_account_and_asset_type():
     rows, _ = compute_rows(holdings, {}, 150.0, "gross")
     assert [r["account"] for r in rows] == ["特定", "NISA"]
     assert [r["asset_type"] for r in rows] == ["stock", "stock"]
+
+
+# ---- 月別ビュー用のキー ----
+
+def test_rows_expose_month_keys_from_market():
+    """market の権利落ち月が支払月へシフトされて row に載ること。"""
+    h = _holding(annual_div_ps_gross_override=60.0)
+    rows, _ = compute_rows(
+        [h], {"7203": _market(ex_month_ratios={3: 0.6, 9: 0.4})}, 150.0, "gross"
+    )
+    assert rows[0]["dividend_month_ratios"] == {6: 0.6, 12: 0.4}
+    assert rows[0]["dividend_months_manual"] is False
+    assert rows[0]["benefit_months"] == []
+
+
+def test_rows_prefer_manual_months_over_market():
+    h = _holding(
+        annual_div_ps_gross_override=60.0,
+        dividend_months=[3, 9],
+        benefit_months=[12],
+    )
+    rows, _ = compute_rows(
+        [h], {"7203": _market(ex_month_ratios={3: 1.0})}, 150.0, "gross"
+    )
+    assert rows[0]["dividend_month_ratios"] == {3: 0.5, 9: 0.5}
+    assert rows[0]["dividend_months_manual"] is True
+    assert rows[0]["benefit_months"] == [12]
+
+
+def test_rows_month_ratios_none_when_unknown():
+    h = _holding(annual_div_ps_gross_override=60.0)
+    rows, _ = compute_rows([h], {"7203": _market()}, 150.0, "gross")
+    assert rows[0]["dividend_month_ratios"] is None

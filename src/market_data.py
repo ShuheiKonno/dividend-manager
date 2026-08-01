@@ -66,12 +66,25 @@ def _yfinance_company_name(symbol: str) -> str | None:
     return None
 
 
-def _parse_yfinance_dividends(series) -> tuple[float | None, str | None]:
+def _parse_yfinance_dividends(
+    series,
+) -> tuple[float | None, str | None, dict[int, float] | None]:
+    """直近約370日の配当合計・最新権利落ち日・権利落ち月別の構成比を返す。
+
+    比率は支払月ではなく**権利落ち月**ベース（yfinance のインデックスは ex-date）。
+    支払月への変換は calc.shift_ex_month_to_payment が担う——ここで焼き込むと、
+    取得結果キャッシュである market_data.csv が推定値の入れ物に化けてしまい、
+    推定ルールを変えるたび全銘柄の再取得が要る。
+
+    中間配当と期末配当は額が違う（例 1723: 期末24.75円 / 中間15.25円）ため、
+    月数で等分せずこの実績比率で按分する。
+    """
     if series is None or len(series) == 0:
-        return None, None
+        return None, None, None
     cutoff = date.today() - timedelta(days=370)
     total = 0.0
     latest_date = None
+    by_month: dict[int, float] = {}
     for idx, value in series.items():
         d = idx.date() if hasattr(idx, "date") else None
         if d is None or d < cutoff:
@@ -81,9 +94,13 @@ def _parse_yfinance_dividends(series) -> tuple[float | None, str | None]:
         except (TypeError, ValueError):
             continue
         total += val
+        by_month[d.month] = by_month.get(d.month, 0.0) + val
         if latest_date is None or d.isoformat() > latest_date:
             latest_date = d.isoformat()
-    return (total if total > 0 else None), latest_date
+    if total <= 0:
+        return None, latest_date, None
+    ratios = {month: amount / total for month, amount in sorted(by_month.items())}
+    return total, latest_date, ratios
 
 
 def _is_isin(symbol: str) -> bool:
@@ -125,7 +142,7 @@ def _fetch_one(
     errors: list[str] = []
     name_update: tuple[str, str] | None = None
     price, price_date = None, None
-    div_ps, div_date = None, None
+    div_ps, div_date, div_ratios = None, None, None
 
     if holding.asset_type == "fund" and _is_isin(holding.symbol):
         # 投資信託 ISIN → ToushinReader で基準価額を取得
@@ -152,7 +169,7 @@ def _fetch_one(
         if ticker is not None:
             try:
                 series = ticker.dividends
-                div_ps, div_date = _parse_yfinance_dividends(series)
+                div_ps, div_date, div_ratios = _parse_yfinance_dividends(series)
             except Exception as exc:
                 errors.append(f"配当取得失敗: {holding.symbol} ({exc})")
 
@@ -171,6 +188,7 @@ def _fetch_one(
         div_forecast_as_of=div_date,
         source=source,
         fetched_at=fetched_at,
+        div_ex_month_ratios=div_ratios,
     )
     return md, errors, name_update
 
@@ -237,6 +255,7 @@ def fetch_market_data(
                         div_forecast_as_of=None,
                         source=source,
                         fetched_at=fetched_at,
+                        div_ex_month_ratios=None,
                     )
                     errs = [f"取得失敗: {holding.symbol} ({exc})"]
                     name_update = None

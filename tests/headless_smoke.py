@@ -13,15 +13,17 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
+from PySide6.QtCore import Qt  # noqa: E402
 from PySide6.QtWidgets import QApplication  # noqa: E402
 
 from src.dialogs import (  # noqa: E402
     ACCOUNT_CHOICES,
     EditHoldingDialog,
+    MonthCheckboxGroup,
     NewHoldingDialog,
 )
 from src.gui import build_window  # noqa: E402
-from src.models import Holding  # noqa: E402
+from src.models import Holding, MarketData  # noqa: E402
 
 
 def _holding(**overrides) -> Holding:
@@ -50,6 +52,7 @@ def _check_actions(w) -> None:
             assert len(text) > 1, f"{key} に一文字キーが残っている: {text!r}"
     assert actions["update_market"].shortcut().toString() == "F5"
     assert actions["edit"].shortcut().toString() == "Ctrl+E"
+    assert actions["tab4"].shortcut().toString() == "Ctrl+5", "月別配当タブのキーが無い"
 
     original_tab = w._tabs.currentIndex()
 
@@ -66,6 +69,12 @@ def _check_actions(w) -> None:
         w._price_view.selectRow(0)
         assert actions["edit"].isEnabled(), "行を選んでも編集が有効にならない"
         assert actions["delete"].isEnabled(), "行を選んでも削除が有効にならない"
+
+    # 月別配当タブ: 内訳は読み取り専用なのでグラフタブと同じ扱い
+    w._tabs.setCurrentIndex(4)
+    assert not actions["edit"].isEnabled(), "月別配当タブで編集が有効のまま"
+    assert not actions["delete"].isEnabled(), "月別配当タブで削除が有効のまま"
+    assert not w._filter.isEnabled(), "月別配当タブで絞り込みが有効のまま"
 
     # 取得中は更新系を伏せる（_busy を直接立てて同期だけ確認する）
     w._busy = True
@@ -216,11 +225,101 @@ def _check_tax_rate_placeholder() -> None:
     assert "10%" in nd._tax_rate.placeholderText(), "通貨切替で率が更新されない"
 
 
+def _market(**overrides) -> MarketData:
+    base = dict(
+        symbol="7203", currency="JPY", last_price=3000.0, price_as_of=None,
+        annual_div_ps_gross=95.0, annual_div_ps_net=None, div_forecast_as_of=None,
+        source="yfinance", fetched_at=None,
+    )
+    base.update(overrides)
+    return MarketData(**base)
+
+
+def _check_monthly_tab(w) -> None:
+    """月別配当タブ: 初期選択月・バークリック配線・並び替えを検証する。"""
+    from src.utils import now_jst
+
+    assert w._monthly_bar._selected == now_jst().date().month, "初期選択月が当月でない"
+    assert "月の配当内訳" in w._monthly_head.text(), w._monthly_head.text()
+    assert "推定" in w._monthly_note.text(), "推定である旨の注記が無い"
+
+    original_month = w.monthly_month
+    w._monthly_bar.month_clicked.emit(3)
+    assert w.monthly_month == 3, "バークリックで対象月が切り替わらない"
+    assert w._monthly_head.text().startswith("3月の配当内訳"), w._monthly_head.text()
+
+    # 並び替えは合計列（最終列）を降順/昇順に切り替える
+    original_sort = w.monthly_sort
+    w._on_monthly_sort("asc")
+    header = w._monthly_view.horizontalHeader()
+    assert header.sortIndicatorSection() == 5, header.sortIndicatorSection()
+    assert header.sortIndicatorOrder() == Qt.SortOrder.AscendingOrder
+    w._on_monthly_sort("desc")
+    assert header.sortIndicatorOrder() == Qt.SortOrder.DescendingOrder
+
+    w._on_monthly_sort(original_sort)  # 設定（monthly_sort）を元へ戻す
+    w._on_monthly_month(original_month)
+
+
+def _check_month_checkboxes() -> None:
+    """支払月チェックボックス群の自動判定トグルと保存値を検証する。"""
+    group = MonthCheckboxGroup([3, 9])
+    assert group.months() == [3, 9]
+    group.set_months([6, 12])
+    assert group.months() == [6, 12]
+
+    # months() は毎回新しいリストを返す（replace の浅いコピーでの共有事故を防ぐ）
+    taken = group.months()
+    taken.append(1)
+    assert group.months() == [6, 12], "months() が内部リストを露出している"
+
+    # 自動判定 ON の間は [] を保存する（自動値を手動値として凍結しない）
+    auto = MonthCheckboxGroup([], auto_months=[6, 12])
+    assert auto.is_auto() is True
+    assert auto.months() == []
+    auto._auto.setChecked(False)
+    assert auto.months() == [6, 12], "自動を外すと自動値が起点にならない"
+
+    # 手動指定済みの銘柄は自動モードで開かない
+    manual = MonthCheckboxGroup([3], auto_months=[6, 12])
+    assert manual.is_auto() is False
+    assert manual.months() == [3]
+
+    # 自動判定できないときはトグルを出さない（ON なのに全部空、を作らない）
+    no_auto = MonthCheckboxGroup([], auto_months=[])
+    assert no_auto._auto is None
+    assert no_auto.months() == []
+
+    # 編集ダイアログへの組み込み: 権利落ち 3月/9月 → 支払 6月/12月 をプレビュー
+    dlg = EditHoldingDialog(
+        _holding(), market=_market(div_ex_month_ratios={3: 0.5, 9: 0.5})
+    )
+    assert dlg._div_months.is_auto() is True
+    assert dlg._div_months._auto_months == [6, 12], dlg._div_months._auto_months
+    assert dlg._benefit_months._auto is None, "優待に自動判定トグルが付いている"
+    dlg._on_save()
+    assert dlg.result_holding is not None
+    assert dlg.result_holding.dividend_months == [], "自動モードで月が凍結された"
+
+    # 自動を外して手動指定すると保存される
+    dlg2 = EditHoldingDialog(
+        _holding(), market=_market(div_ex_month_ratios={3: 1.0})
+    )
+    dlg2._div_months._auto.setChecked(False)
+    dlg2._div_months.set_months([6, 12])
+    dlg2._benefit_months.set_months([3])
+    dlg2._on_save()
+    assert dlg2.result_holding is not None
+    assert dlg2.result_holding.dividend_months == [6, 12]
+    assert dlg2.result_holding.benefit_months == [3]
+
+
 def main() -> None:
     w = build_window()
 
     # タブ・メニュー構成
-    assert w._tabs.count() == 4, "タブが4つ生成されていない"
+    assert w._tabs.count() == 5, "タブが5つ生成されていない"
+    assert w._tabs.tabText(4) == "月別配当", w._tabs.tabText(4)
     menus = [a for a in w.menuBar().actions() if a.menu() is not None]
     assert len(menus) == 4, f"メニューが4つでない: {len(menus)}"
     file_actions = [a.text() for a in menus[0].menu().actions() if a.text()]
@@ -241,6 +340,7 @@ def main() -> None:
     _check_toolbar(w)
     _check_kpi_cards(w)
     _check_inactive_toggle(w)
+    _check_monthly_tab(w)
 
     # 編集ダイアログ: 即時バリデーション（赤枠プロパティ＋集約エラーラベル）
     dlg = EditHoldingDialog(_holding())
@@ -260,6 +360,7 @@ def main() -> None:
 
     _check_account_combo()
     _check_tax_rate_placeholder()
+    _check_month_checkboxes()
 
     print("headless smoke: OK")
 

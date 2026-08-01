@@ -98,6 +98,58 @@ def _pick_div_ps(
     return result
 
 
+# 権利落ち月から支払月までのラグ（月数）。JPY 建て（日本株・国内 ETF）は権利確定
+# から支払まで概ね3ヶ月（3月末権利→6月下旬、9月末権利→12月）。USD 建ては yfinance
+# の ex-date と実支払日がほぼ同月に収まるため 0。
+#
+# いずれも推定である点に注意。実支払日を持つ info["dividendDate"] は日本株では常に
+# None を返し、ETF は quoteSummary が 404 を返すため、yfinance から支払日そのものを
+# 取ることはできない（実測で確認済み）。
+_PAYMENT_LAG_MONTHS = {"JPY": 3, "USD": 0}
+
+
+def shift_ex_month_to_payment(month: int, currency: str) -> int:
+    """権利落ち月から支払月を推定する（1〜12。12月を越えたら翌年へ回り込む）。"""
+    lag = _PAYMENT_LAG_MONTHS.get(currency, 0)
+    return (month - 1 + lag) % 12 + 1
+
+
+def resolve_payment_month_ratios(
+    holding: Holding, market: MarketData | None
+) -> dict[int, float] | None:
+    """支払月ごとの配分比率（合計 1.0）を返す。決まらなければ None。
+
+    優先順位は _pick_div_ps と同じく「銘柄の明示指定 → market_data → 無し」。
+
+    holding.dividend_months は**支払月そのもの**（ユーザーが「6月に入金される」と
+    入力した値）なので月をずらさない。ずらすと手動入力が3ヶ月後ろへ動き、エラーも
+    出ないまま尤もらしい誤ったグラフになる。比率を表現できない入力なので等分する。
+
+    market.div_ex_month_ratios は**権利落ち月**なので支払月へシフトする。シフトで
+    同じ月へ落ちた比率は合算し、合計 1.0 へ正規化し直す。
+    """
+    if holding.dividend_months:
+        share = 1.0 / len(holding.dividend_months)
+        return {month: share for month in holding.dividend_months}
+
+    ex_ratios = market.div_ex_month_ratios if market else None
+    if not ex_ratios:
+        return None
+    shifted: dict[int, float] = {}
+    for month, ratio in ex_ratios.items():
+        pay_month = shift_ex_month_to_payment(month, holding.currency)
+        shifted[pay_month] = shifted.get(pay_month, 0.0) + ratio
+    total = sum(shifted.values())
+    if total <= 0:
+        return None
+    return {month: ratio / total for month, ratio in sorted(shifted.items())}
+
+
+def resolve_benefit_months(holding: Holding) -> list[int]:
+    """優待の受取月。自動判定の材料が無いため銘柄の手動設定のみを見る。"""
+    return list(holding.benefit_months)
+
+
 def _to_jpy(value: float | None, currency: str, fx_rate: float | None) -> float | None:
     if value is None:
         return None
@@ -219,6 +271,12 @@ def compute_rows(
                 "profit_rate": profit_rate,
                 "div_forecast_as_of": holding.div_forecast_as_of_override
                 or (market.div_forecast_as_of if market else None),
+                # 月別ビュー用。年額と月配分の両方を1箇所で解決するため row へ載せる
+                # （別関数へ holdings と market_map を渡し直すと _pick_div_ps と同じ
+                # 解決を calc の外へ二重実装することになる）。
+                "dividend_month_ratios": resolve_payment_month_ratios(holding, market),
+                "dividend_months_manual": bool(holding.dividend_months),
+                "benefit_months": resolve_benefit_months(holding),
             }
         )
 
@@ -280,6 +338,150 @@ def compute_rows(
         missing_market_value_count=active_count - known_market_count,
     )
     return rows, summary
+
+
+@dataclass
+class MonthlyItem:
+    """月別内訳の1行（ある月に、ある銘柄から入る配当・優待）。"""
+
+    symbol: str
+    name: str
+    account: str
+    dividend_jpy: float  # 年額 × その月の比率
+    benefit_jpy: float  # 年額 ÷ 受取月の数（優待に比率の材料は無いので等分）
+    total_jpy: float
+    # 配当側のみを指す。権利落ち月からの推定なら True、銘柄で支払月を明示して
+    # いれば False。優待は常に手動なので判定に含めない。
+    estimated: bool
+
+
+@dataclass
+class MonthBucket:
+    month: int  # 1〜12
+    dividend_jpy: float
+    benefit_jpy: float
+    items: list[MonthlyItem]  # 入力順。並び替えは表示層の責務
+
+    @property
+    def total_jpy(self) -> float:
+        return self.dividend_jpy + self.benefit_jpy
+
+
+@dataclass
+class MonthlyBreakdown:
+    buckets: list[MonthBucket]  # 常に12件・1〜12月の昇順（空月も 0 で存在する）
+    known_dividend_jpy: float
+    known_benefit_jpy: float
+    unknown_dividend_jpy: float  # 額はあるが支払月が決まらなかった配当
+    unknown_benefit_jpy: float  # 額はあるが受取月が未設定の優待
+    unknown_symbols: list[str]  # 上記に該当した銘柄（重複なし・入力順）
+    na_symbols: list[str]  # 配当額そのものが N/A の銘柄
+
+    @property
+    def known_total_jpy(self) -> float:
+        return self.known_dividend_jpy + self.known_benefit_jpy
+
+    @property
+    def monthly_average_jpy(self) -> float:
+        """按分できた年額の月平均。月不明ぶんは分子に含めない。"""
+        return self.known_total_jpy / 12.0
+
+
+def monthly_breakdown(rows: Iterable[dict]) -> MonthlyBreakdown:
+    """compute_rows の row 列から、支払月ごとの配当・優待内訳を組む。
+
+    月が決まらない額を黙って捨てると Σ(月別) と Summary の合計が食い違い、その差が
+    画面のどこにも現れない。按分できなかった額は unknown_* へ積んで表示側が注記
+    できるようにする。取崩モードで annual_dividend_jpy が取崩額に置き換わった
+    ファンドは、支払月を手で指定していなければここに入る。
+
+    annual_dividend_jpy が None（配当額そのものが不明）の行は 0 として積まず
+    na_symbols へ回す。0 に潰すと「配当ゼロ」と「未取得」が区別できなくなる。
+    """
+    buckets = [
+        MonthBucket(month=m, dividend_jpy=0.0, benefit_jpy=0.0, items=[])
+        for m in range(1, 13)
+    ]
+    by_month = {b.month: b for b in buckets}
+    known_dividend = 0.0
+    known_benefit = 0.0
+    unknown_dividend = 0.0
+    unknown_benefit = 0.0
+    unknown_symbols: list[str] = []
+    na_symbols: list[str] = []
+    # 同一銘柄が配当と優待の両方で月不明になっても銘柄名は1度だけ数える。
+    seen_unknown: set[str] = set()
+
+    def _mark_unknown(symbol: str) -> None:
+        if symbol not in seen_unknown:
+            seen_unknown.add(symbol)
+            unknown_symbols.append(symbol)
+
+    for row in rows:
+        # 呼び出し側は有効銘柄のみを渡す前提だが、集計対象外が紛れ込まないよう防御する。
+        if row.get("active") is False:
+            continue
+        symbol = str(row.get("symbol") or "")
+        name = str(row.get("name") or "")
+        account = str(row.get("account") or "")
+        estimated = not row.get("dividend_months_manual")
+
+        # 月ごとの取り分をここでまとめてから items へ落とす（同じ銘柄が配当と優待で
+        # 同じ月に来たとき、行を2つに割らず1行にする）。
+        per_month: dict[int, list[float]] = {}
+
+        dividend_jpy = safe_float(row.get("annual_dividend_jpy"))
+        if dividend_jpy is None:
+            na_symbols.append(symbol)
+        else:
+            ratios = row.get("dividend_month_ratios")
+            if ratios:
+                known_dividend += dividend_jpy
+                for month, ratio in ratios.items():
+                    per_month.setdefault(month, [0.0, 0.0])[0] += dividend_jpy * ratio
+            elif dividend_jpy:
+                unknown_dividend += dividend_jpy
+                _mark_unknown(symbol)
+
+        benefit_jpy = safe_float(row.get("annual_benefit_jpy")) or 0.0
+        if benefit_jpy:
+            months = row.get("benefit_months") or []
+            if months:
+                known_benefit += benefit_jpy
+                share = benefit_jpy / len(months)
+                for month in months:
+                    per_month.setdefault(month, [0.0, 0.0])[1] += share
+            else:
+                unknown_benefit += benefit_jpy
+                _mark_unknown(symbol)
+
+        for month, (div_part, ben_part) in sorted(per_month.items()):
+            bucket = by_month.get(month)
+            if bucket is None:  # 範囲外の月はパーサが弾くはずだが念のため
+                continue
+            bucket.dividend_jpy += div_part
+            bucket.benefit_jpy += ben_part
+            bucket.items.append(
+                MonthlyItem(
+                    symbol=symbol,
+                    name=name,
+                    account=account,
+                    dividend_jpy=div_part,
+                    benefit_jpy=ben_part,
+                    total_jpy=div_part + ben_part,
+                    estimated=estimated,
+                )
+            )
+
+    return MonthlyBreakdown(
+        buckets=buckets,
+        known_dividend_jpy=known_dividend,
+        known_benefit_jpy=known_benefit,
+        unknown_dividend_jpy=unknown_dividend,
+        unknown_benefit_jpy=unknown_benefit,
+        unknown_symbols=unknown_symbols,
+        na_symbols=na_symbols,
+    )
 
 
 def latest_fx_rate(rows: Iterable[dict[str, str]]) -> float | None:
