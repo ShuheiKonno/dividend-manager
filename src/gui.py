@@ -75,7 +75,12 @@ from .io_csv import (
 )
 from .models import Holding, HistoryRecord
 from .calc import compute_rows, monthly_breakdown
-from .history import upsert_record, merge_records, combine_income
+from .history import (
+    INCOME_BASE_KEYS,
+    upsert_record,
+    merge_records,
+    combine_income,
+)
 # market_data は yfinance / ToushinReader / pandas を芋づる式に読み込み起動を数秒遅らせる。
 # 取得は p / u キーのワーカースレッドでしか走らないため、import を run() 内へ遅延させる。
 from .theme import (
@@ -156,6 +161,13 @@ MONTHLY_COLUMNS = [
     ("優待(円)", "benefit_jpy"),
     ("合計(円)", "total_jpy"),
 ]
+# 優待「含まない」で伏せる列と、そのときの並び替え基準列。列構成そのものを
+# 差し替えるとヘッダラベル・NumericSortProxy の数値列集合・並び替え列を毎回
+# 組み直すことになるため、モデルは固定して setColumnHidden で見せ方だけ変える。
+_MONTHLY_COL = {key: i for i, (_, key) in enumerate(MONTHLY_COLUMNS)}
+MONTHLY_COL_DIVIDEND = _MONTHLY_COL["dividend_jpy"]
+MONTHLY_COL_BENEFIT = _MONTHLY_COL["benefit_jpy"]
+MONTHLY_COL_TOTAL = _MONTHLY_COL["total_jpy"]
 NUMERIC_SORT_COLUMNS = {
     "shares",
     "avg_cost",
@@ -318,19 +330,21 @@ class DividendWindow(QMainWindow):
         self.income_trend_period: str = _saved.get("income_trend_period", "all")
         self.asset_trend_baseline: str = _saved.get("asset_trend_baseline", "zero")
         self.income_trend_baseline: str = _saved.get("income_trend_baseline", "zero")
-        # 配当推移グラフの系列選択（優待込み / 取崩込み）。既定は配当のみ。
+        # 優待を収入グラフ（配当推移・月別配当）へ含めるか。既定は配当のみ。
+        # 取崩の有無は「収入」モード（withdrawal_mode）が唯一の入口なので独立の
+        # 選択肢を持たない（二重に持つと表と推移で別々の状態になり食い違う）。
         self.income_benefit: str = _saved.get("income_benefit", "without")
-        self.income_withdrawal: str = _saved.get("income_withdrawal", "without")
         # 円グラフの「その他」集約閾値（評価額/配当タブで独立）と起動時の表示タブ。
         self.pie_threshold_asset: float = float(_saved.get("pie_threshold_asset", 2.0))
         self.pie_threshold_income: float = float(_saved.get("pie_threshold_income", 2.0))
         # 無効銘柄をテーブルへ表示するか。既定は非表示（従来どおり）だが、
         # 表示できないと編集ダイアログで無効化した銘柄を復帰できなくなる。
         self.show_inactive: bool = bool(_saved.get("show_inactive", False))
-        # 月別配当タブ: 内訳リストの並び順は永続化し、選択月は当月から始める
-        # （前回終了時の月を復元しても翌月には陳腐化するため保存しない）。
-        self.monthly_sort: str = _saved.get("monthly_sort", "desc")
+        # 月別配当タブ: 選択月は当月から始める（前回終了時の月を復元しても翌月には
+        # 陳腐化するため保存しない）。
         self.monthly_month: int = now_jst().date().month
+        # 並び替えはヘッダクリックのみ。初回だけ既定（合計の降順）を当てる。
+        self._monthly_sorted_once: bool = False
         self._monthly_label: str = "年間配当"
         self._monthly_columns_sized: bool = False
         self._initial_tab: int = _saved.get("last_tab", 0)
@@ -804,6 +818,15 @@ class DividendWindow(QMainWindow):
             lambda key: self._set_withdrawal_mode(None if key == "none" else key),
         )
         bar.addWidget(self._withdrawal_combo)
+        # 優待は税引・収入と同じ「収入の数え方」の設定なのでここへ並べる
+        # （推移グラフの操作行にあった頃はタブを開かないと存在に気付けなかった）。
+        bar.addWidget(QLabel("   優待: "))
+        self._benefit_combo = self._make_combo(
+            [("without", "含まない"), ("with", "含む")],
+            self.income_benefit,
+            self._on_income_benefit,
+        )
+        bar.addWidget(self._benefit_combo)
 
         spacer = QWidget()
         spacer.setSizePolicy(
@@ -946,16 +969,10 @@ class DividendWindow(QMainWindow):
         bottom_v = QVBoxLayout(bottom)
         bottom_v.setContentsMargins(0, 0, 0, 0)
         bottom_v.setSpacing(2)
-        head = QHBoxLayout()
+        # 並び替えの専用ドロップダウンは置かない（ヘッダクリックで足りる導線を
+        # 二重に持つと、片方だけ動かしたとき表示と選択が食い違う）。
         self._monthly_head = QLabel("")
-        head.addWidget(self._monthly_head)
-        head.addStretch()
-        head.addWidget(QLabel("並び替え:"))
-        head.addWidget(self._make_combo(
-            [("desc", "金額の多い順"), ("asc", "金額の少ない順")],
-            self.monthly_sort, self._on_monthly_sort,
-        ))
-        bottom_v.addLayout(head)
+        bottom_v.addWidget(self._monthly_head)
         bottom_v.addWidget(self._monthly_view, 1)
 
         split = QSplitter(Qt.Orientation.Vertical)
@@ -999,24 +1016,34 @@ class DividendWindow(QMainWindow):
         self.monthly_month = month
         self._render_monthly_breakdown()
 
-    def _on_monthly_sort(self, key: str) -> None:
-        self.monthly_sort = key
-        self._save_or_notify(lambda: save_settings(monthly_sort=key))
-        self._apply_monthly_sort()
-
     def _apply_monthly_sort(self) -> None:
+        """内訳テーブルの並び順を決める（ヘッダクリックの選択を保つ）。
+
+        並び替えの導線はヘッダクリックだけ（専用ドロップダウンは持たない）。
+        再描画のたびに既定へ戻すと、月を切り替えただけでユーザーの並びが消える
+        ため、現在のソート矢印を読み直して同じ列・同じ向きで並べ直す。
+        """
+        header = self._monthly_view.horizontalHeader()
+        column = header.sortIndicatorSection()
+        order = header.sortIndicatorOrder()
+        if not self._monthly_sorted_once:
+            # 初回だけ既定（金額の多い順）を当てる。setSortingEnabled 直後の
+            # 矢印は列0・昇順なので、読み取った値をそのまま使うと銘柄コード順になる。
+            self._monthly_sorted_once = True
+            column, order = MONTHLY_COL_TOTAL, Qt.SortOrder.DescendingOrder
+        if self._monthly_view.isColumnHidden(column):
+            # 優待を外して合計列を伏せた直後。伏せた列で並べると矢印がどこにも
+            # 出ず、何順なのか画面から読み取れなくなる。
+            column, order = MONTHLY_COL_DIVIDEND, Qt.SortOrder.DescendingOrder
         # proxy.sort ではなく view 経由で並べ替える（ヘッダのソート矢印も追随させる）。
-        order = (
-            Qt.SortOrder.AscendingOrder if self.monthly_sort == "asc"
-            else Qt.SortOrder.DescendingOrder
-        )
-        self._monthly_view.sortByColumn(len(MONTHLY_COLUMNS) - 1, order)  # 合計列
+        self._monthly_view.sortByColumn(column, order)
 
     def _make_trend_controls(self, kind: str, line_chart: LineChartWidget) -> QWidget:
-        """推移グラフ上部の操作行（期間・Y軸下限、配当タブは優待・取崩）を生成する。
+        """推移グラフ上部の操作行（期間・Y軸下限）を生成する。
 
-        全てドロップダウン。期間/底辺は self.{asset,income}_trend_{period,baseline}、
-        配当の優待/取崩は self.income_{benefit,withdrawal} に保持し設定へ永続化する。
+        全てドロップダウン。期間/底辺は self.{asset,income}_trend_{period,baseline}
+        に保持し設定へ永続化する。優待・取崩はこの行では扱わない——優待はツール
+        バーの「優待」、取崩は同じくツールバーの「収入」が唯一の入口。
         """
         period = self.asset_trend_period if kind == "asset" else self.income_trend_period
         baseline = (
@@ -1040,20 +1067,14 @@ class DividendWindow(QMainWindow):
             baseline, lambda k: self._on_trend_baseline(kind, line_chart, k),
         ))
 
-        # 配当タブのみ: 系列の優待込み・取崩込みをドロップダウンで切替
-        if kind == "income":
-            row.addWidget(QLabel("優待:"))
-            row.addWidget(self._make_combo(
-                [("without", "含まない"), ("with", "含む")],
-                self.income_benefit, lambda k: self._on_income_option("benefit", k),
-            ))
-            row.addWidget(QLabel("取崩:"))
-            row.addWidget(self._make_combo(
-                [("without", "無し"), ("with", "込み")],
-                self.income_withdrawal,
-                lambda k: self._on_income_option("withdrawal", k),
-            ))
         row.addStretch()
+        if kind == "income":
+            # 取崩収入の記録開始日を出す枠。収入モードを取崩にすると、記録前の日は
+            # combine_income が None を返して線が末尾だけになる——理由が画面に無いと
+            # 「切り替えたらグラフが消えた」という不具合に見える。
+            self._income_trend_note = QLabel("")
+            self._income_trend_note.setObjectName("dialogNote")
+            row.addWidget(self._income_trend_note)
 
         # 設定値をウィジェットへ初期反映（既定 all/zero と保存値が異なる場合）。
         line_chart.set_period(period)
@@ -1078,15 +1099,20 @@ class DividendWindow(QMainWindow):
             self.income_trend_baseline = key
             self._save_or_notify(lambda: save_settings(income_trend_baseline=key))
 
-    def _on_income_option(self, which: str, key: str) -> None:
-        """配当推移グラフの優待/取崩選択を更新し、系列を再合成して再描画する。"""
-        if which == "benefit":
-            self.income_benefit = key
-            self._save_or_notify(lambda: save_settings(income_benefit=key))
-        else:
-            self.income_withdrawal = key
-            self._save_or_notify(lambda: save_settings(income_withdrawal=key))
-        self._refresh_trend()
+    def _on_income_benefit(self, key: str) -> None:
+        """優待の含む/含まないを更新し、収入グラフ（推移・月別）を描き直す。
+
+        _refresh_trend だけでは月別タブの棒・月平均・注記・内訳が古いままになる
+        （見出しの合計と表の中身が食い違う）ため _refresh_view を通す。ローカル
+        CSV の再集計だけなので体感の遅延は無い。
+        """
+        if key == self.income_benefit:
+            return
+        self.income_benefit = key
+        self._save_or_notify(lambda: save_settings(income_benefit=key))
+        # 内訳テーブルの列構成（優待・合計の表示/非表示）が変わるので幅を取り直す。
+        self._monthly_columns_sized = False
+        self._refresh_view()
 
     def _on_filter_changed(self, text: str) -> None:
         self._price_proxy.set_filter_text(text)
@@ -1254,8 +1280,8 @@ class DividendWindow(QMainWindow):
     def _refresh_trend(self) -> None:
         """推移グラフ 2 種へ最新の履歴を反映する。
 
-        評価額タブ＝評価額・簿価の2系列。配当タブ＝優待/取崩の選択に応じて
-        combine_income で合成した単一系列。
+        評価額タブ＝評価額・簿価の2系列。配当タブ＝ツールバーの「優待」と「収入」
+        に応じて combine_income で合成した単一系列。
         """
         hist_dicts = self._history_as_dicts()
         self._asset_line.set_data(
@@ -1263,21 +1289,45 @@ class DividendWindow(QMainWindow):
             empty_message="評価額の履歴がありません（株価更新か『インポート』で記録されます）",
         )
         with_benefit = self.income_benefit == "with"
-        with_withdrawal = self.income_withdrawal == "with"
+        mode = self.withdrawal_mode
         income_dicts = [
             {"date": rec["date"],
-             "income_value": combine_income(rec, with_benefit, with_withdrawal)}
+             "income_value": combine_income(rec, with_benefit, mode)}
             for rec in hist_dicts
         ]
-        label = self._income_trend_label(with_benefit, with_withdrawal)
+        label = self._income_trend_label(with_benefit, mode)
         self._income_line.set_data(
             income_dicts, [(label, "income_value", INCOME_TREND_COLOR)],
             empty_message="配当の履歴がありません（株価更新か『インポート』で記録されます）",
         )
+        self._income_trend_note.setText(
+            self._withdrawal_coverage_note(hist_dicts, mode)
+        )
 
     @staticmethod
-    def _income_trend_label(with_benefit: bool, with_withdrawal: bool) -> str:
-        base = "取崩収入" if with_withdrawal else "配当"
+    def _withdrawal_coverage_note(hist_dicts: list[dict], mode: str | None) -> str:
+        """選択中の収入モードの列が履歴の途中からしか無いとき、開始日を注記で返す。
+
+        取崩収入の列は後から足したもので、それ以前の日（旧アプリからの取込ぶんを
+        含む）は空。combine_income はそこで None を返して線を分断するため、注記が
+        無いと収入モードを取崩にした瞬間グラフが短くなった理由が画面に残らない。
+        定額と定率は別の列＝別の記録開始日なので、モードごとに見る列を変える。
+        """
+        if mode is None:
+            return ""
+        key = INCOME_BASE_KEYS[mode]
+        first = next(
+            (r["date"] for r in hist_dicts if safe_float(r.get(key)) is not None),
+            None,
+        )
+        if first is None or first == hist_dicts[0]["date"]:
+            return ""  # 全期間ぶんある（または1点も無い＝空メッセージ側の担当）
+        return f"※{WITHDRAWAL_LABELS[mode]}収入は {first} 以降のみ記録"
+
+    @staticmethod
+    def _income_trend_label(with_benefit: bool, mode: str | None) -> str:
+        """凡例の系列名。取崩は定額/定率のどちらを描いているか名前で区別する。"""
+        base = "配当" if mode is None else f"{WITHDRAWAL_LABELS[mode]}収入"
         return f"{base}＋優待" if with_benefit else base
 
     def _history_as_dicts(self) -> list[dict]:
@@ -1293,6 +1343,9 @@ class DividendWindow(QMainWindow):
                     "total_benefit_jpy": rec.total_benefit_jpy,
                     "total_profit_jpy": rec.total_profit_jpy,
                     "total_withdrawal_income_jpy": rec.total_withdrawal_income_jpy,
+                    "total_fixed_withdrawal_income_jpy": (
+                        rec.total_fixed_withdrawal_income_jpy
+                    ),
                 }
             )
         return result
@@ -1302,7 +1355,8 @@ class DividendWindow(QMainWindow):
 
         表示モードに依存させないため、税引前・取崩無し（mode="gross",
         withdrawal_mode=None）
-        で再計算する。取崩収入は常に定率（"rate"）で別途計算し、取崩込み系列の値とする。
+        で再計算する。取崩収入は定額・定率それぞれで別途計算し、収入モードごとの
+        系列の値とする（1 列で兼ねると、定額を選んでいるのに定率の線が出る）。
         評価額・配当・優待が全て None（起動直後で株価未取得）の場合は記録しない。
         """
         _, base = compute_rows(
@@ -1316,10 +1370,15 @@ class DividendWindow(QMainWindow):
             return
         if market is None and dividend is None and benefit is None:
             return
-        # 取崩込み収入（投信を時価×rate に置換）＝常に定率で決定的に記録。
-        _, wd = compute_rows(
+        # 取崩込み収入は表示中のモードに関係なく両方を記録する（あとから収入
+        # モードを切り替えても、その日の値が欠けていて線が切れることが無い）。
+        _, wd_rate = compute_rows(
             self.holdings, self.market_data_map, self.fx_rate,
             "gross", "rate",
+        )
+        _, wd_fixed = compute_rows(
+            self.holdings, self.market_data_map, self.fx_rate,
+            "gross", "fixed",
         )
         record = HistoryRecord(
             record_date=today_jst_str(),
@@ -1328,7 +1387,8 @@ class DividendWindow(QMainWindow):
             total_dividend_jpy=dividend,
             total_benefit_jpy=benefit,
             total_profit_jpy=base.total_profit_jpy,
-            total_withdrawal_income_jpy=wd.total_dividend_jpy,
+            total_withdrawal_income_jpy=wd_rate.total_dividend_jpy,
+            total_fixed_withdrawal_income_jpy=wd_fixed.total_dividend_jpy,
             source="app",
         )
         history = upsert_record(self.history, record)
@@ -1448,7 +1508,12 @@ class DividendWindow(QMainWindow):
         self._notify(f"履歴を取り込みました（新規 {added} 日分 / 計 {len(self.history)} 日分）")
 
     def _refresh_monthly(self, div_label: str, div_empty: str) -> None:
-        """月別タブ（棒グラフ・注記・内訳）を最新の集計で描き直す。"""
+        """月別タブ（棒グラフ・注記・内訳）を最新の集計で描き直す。
+
+        優待「含まない」では配当系列だけを積み、月平均も配当ぶんだけで割る
+        （棒から優待を外して平均線だけ優待込みのままにすると、線が棒の上に浮く）。
+        """
+        with_benefit = self.income_benefit == "with"
         buckets = [
             {
                 "month": b.month,
@@ -1459,8 +1524,11 @@ class DividendWindow(QMainWindow):
         ]
         self._monthly_bar.set_data(
             buckets,
-            MONTHLY_SERIES,
-            average=self._monthly.monthly_average_jpy,
+            MONTHLY_SERIES if with_benefit else MONTHLY_SERIES[:1],
+            average=(
+                self._monthly.monthly_average_jpy if with_benefit
+                else self._monthly.known_dividend_jpy / 12.0
+            ),
             empty_message=div_empty,
         )
         self._monthly_bar.set_selected_month(self.monthly_month)
@@ -1475,18 +1543,24 @@ class DividendWindow(QMainWindow):
         月不明を黙って落とすと Σ(棒グラフ) と KPI「合計」が食い違い、その差が画面の
         どこにも現れない。0 の項目は出さず、必要なときだけ行を足す。
         """
+        with_benefit = self.income_benefit == "with"
+        avg_label = f"{div_label}＋優待" if with_benefit else div_label
         parts = [
             "※支払月は権利落ち月からの推定です（JPY 建ては +3ヶ月 / USD 建ては同月）。"
-            f"月平均は按分できた{div_label}を12で割った額です。"
+            f"月平均は按分できた{avg_label}を12で割った額です。"
         ]
-        unknown = (
-            self._monthly.unknown_dividend_jpy + self._monthly.unknown_benefit_jpy
-        )
+        unknown = self._monthly.unknown_dividend_jpy
+        if with_benefit:
+            unknown += self._monthly.unknown_benefit_jpy
         if unknown > 0:
-            parts.append(
-                f"月不明 ¥{fmt_number(unknown, 0)}"
+            # unknown_symbols は配当・優待どちらかで月不明になった銘柄の合計数
+            # なので、優待を外したときの銘柄数としては過大になる。数えられない
+            # 数を書くより出さない。
+            count = (
                 f"（{len(self._monthly.unknown_symbols)}銘柄・グラフ未計上）"
+                if with_benefit else "（グラフ未計上）"
             )
+            parts.append(f"月不明 ¥{fmt_number(unknown, 0)}{count}")
         if self._monthly.na_symbols:
             parts.append(f"{div_label}が N/A {len(self._monthly.na_symbols)}銘柄")
         if self.withdrawal_mode is not None:
@@ -1502,7 +1576,15 @@ class DividendWindow(QMainWindow):
             (b for b in self._monthly.buckets if b.month == self.monthly_month), None
         )
         items = bucket.items if bucket is not None else []
-        total = bucket.total_jpy if bucket is not None else 0.0
+        with_benefit = self.income_benefit == "with"
+        if bucket is None:
+            total = 0.0
+        else:
+            total = bucket.total_jpy if with_benefit else bucket.dividend_jpy
+        # 優待を含めないときは優待列と合計列を伏せる（合計＝配当の重複表示になり、
+        # 見出しの金額とも食い違うため）。モデルの列構成自体は変えない。
+        self._monthly_view.setColumnHidden(MONTHLY_COL_BENEFIT, not with_benefit)
+        self._monthly_view.setColumnHidden(MONTHLY_COL_TOTAL, not with_benefit)
         label = "配当" if self._monthly_label == "年間配当" else "収入"
         self._monthly_head.setText(
             f"{self.monthly_month}月の{label}内訳: ¥{fmt_number(total, 0)}"

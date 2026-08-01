@@ -22,6 +22,7 @@ from src.dialogs import (  # noqa: E402
     MonthCheckboxGroup,
     NewHoldingDialog,
 )
+from src import gui  # noqa: E402
 from src.gui import build_window  # noqa: E402
 from src.models import Holding, MarketData  # noqa: E402
 
@@ -117,6 +118,11 @@ def _check_toolbar(w) -> None:
     # ドロップダウンが現在のモードを示していること
     assert w._mode_combo.currentData() == w.dividend_mode
     assert w._withdrawal_combo.currentData() == (w.withdrawal_mode or "none")
+    # 優待は推移グラフの操作行ではなくツールバー（税引・収入と同じ行）にある
+    assert w._benefit_combo.currentData() == w.income_benefit
+    assert not hasattr(w, "income_withdrawal"), (
+        "取崩の独立スイッチが復活している（収入モードと二重管理になる）"
+    )
     # ショートカット経由で切り替えてもドロップダウンが追随すること
     before = w.dividend_mode
     w.action_toggle_mode()
@@ -243,25 +249,100 @@ def _check_monthly_tab(w) -> None:
     from src.utils import now_jst
 
     assert w._monthly_bar._selected == now_jst().date().month, "初期選択月が当月でない"
-    assert "月の配当内訳" in w._monthly_head.text(), w._monthly_head.text()
+    # 見出しの語は収入モードで「配当」/「収入」に変わるのでどちらも許す
+    assert "内訳" in w._monthly_head.text(), w._monthly_head.text()
     assert "推定" in w._monthly_note.text(), "推定である旨の注記が無い"
 
     original_month = w.monthly_month
     w._monthly_bar.month_clicked.emit(3)
     assert w.monthly_month == 3, "バークリックで対象月が切り替わらない"
-    assert w._monthly_head.text().startswith("3月の配当内訳"), w._monthly_head.text()
+    assert w._monthly_head.text().startswith("3月の"), w._monthly_head.text()
 
-    # 並び替えは合計列（最終列）を降順/昇順に切り替える
-    original_sort = w.monthly_sort
-    w._on_monthly_sort("asc")
+    # 並び替えの導線はヘッダクリックのみ（専用ドロップダウンは持たない）
+    assert not hasattr(w, "_on_monthly_sort"), "並び替えドロップダウンが復活している"
     header = w._monthly_view.horizontalHeader()
-    assert header.sortIndicatorSection() == 5, header.sortIndicatorSection()
-    assert header.sortIndicatorOrder() == Qt.SortOrder.AscendingOrder
-    w._on_monthly_sort("desc")
+    assert header.isSortIndicatorShown(), "ヘッダに並び替えの矢印が出ない"
+    # 既定は合計列の降順。ただし優待「含まない」では合計列が伏せてあるので配当列。
+    expected_default = (
+        gui.MONTHLY_COL_TOTAL if w.income_benefit == "with"
+        else gui.MONTHLY_COL_DIVIDEND
+    )
+    assert header.sortIndicatorSection() == expected_default, (
+        f"既定の並び替え列が違う: {header.sortIndicatorSection()}"
+    )
     assert header.sortIndicatorOrder() == Qt.SortOrder.DescendingOrder
 
-    w._on_monthly_sort(original_sort)  # 設定（monthly_sort）を元へ戻す
+    # ヘッダで選んだ並びは月を切り替えても保たれること（再描画で既定へ戻さない）
+    w._monthly_view.sortByColumn(gui.MONTHLY_COL_DIVIDEND, Qt.SortOrder.AscendingOrder)
+    w._on_monthly_month(5)
+    assert header.sortIndicatorSection() == gui.MONTHLY_COL_DIVIDEND, (
+        "月を切り替えると並び替えが既定へ戻る"
+    )
+    assert header.sortIndicatorOrder() == Qt.SortOrder.AscendingOrder
+
+    original_benefit = w.income_benefit
     w._on_monthly_month(original_month)
+    _check_monthly_benefit_toggle(w)
+    w._on_income_benefit(original_benefit)  # 設定（income_benefit）を元へ戻す
+
+
+def _check_withdrawal_trend_note(w) -> None:
+    """収入モードごとに専用の履歴列を描き、記録開始日を注記に出すこと。
+
+    定額と定率で列を兼用すると、定額を選んでいるのに定率の線が出る（値も凡例も
+    尤もらしいまま間違う）。取崩の列は後から足したので、それ以前の日は線が引けず、
+    理由が画面に無いと「切り替えたらグラフが消えた」に見える。
+    """
+    original = w.withdrawal_mode
+    hist = w._history_as_dicts()
+
+    w._set_withdrawal_mode(None)
+    assert w._income_trend_note.text() == "", "取崩無しでも取崩の注記が出ている"
+    assert w._income_line._series[0][0].startswith("配当"), w._income_line._series[0][0]
+
+    for mode, expected_label in (("fixed", "定額取崩収入"), ("rate", "定率取崩収入")):
+        w._set_withdrawal_mode(mode)
+        assert w._income_line._series[0][0].startswith(expected_label), (
+            w._income_line._series[0][0]
+        )
+        key = gui.INCOME_BASE_KEYS[mode]
+        covered = [r for r in hist if r.get(key) is not None]
+        if hist and covered and covered[0]["date"] != hist[0]["date"]:
+            assert covered[0]["date"] in w._income_trend_note.text(), (
+                f"{mode} の記録開始日が注記に出ない: {w._income_trend_note.text()!r}"
+            )
+
+    w._set_withdrawal_mode(original)  # 設定（withdrawal_mode）を元へ戻す
+
+
+def _check_monthly_benefit_toggle(w) -> None:
+    """優待スイッチが月別タブの棒・列構成・並び替え列へ反映されること。"""
+    header = w._monthly_view.horizontalHeader()
+
+    w._on_income_benefit("with")
+    assert [s[0] for s in w._monthly_bar._series] == ["配当", "優待"], (
+        "優待『含む』で棒が積み上げにならない"
+    )
+    assert not w._monthly_view.isColumnHidden(gui.MONTHLY_COL_BENEFIT)
+    assert not w._monthly_view.isColumnHidden(gui.MONTHLY_COL_TOTAL)
+    # 合計列で並べた状態から優待を外す＝並び替え基準列が伏せられるケース
+    w._monthly_view.sortByColumn(gui.MONTHLY_COL_TOTAL, Qt.SortOrder.DescendingOrder)
+
+    w._on_income_benefit("without")
+    assert [s[0] for s in w._monthly_bar._series] == ["配当"], (
+        "優待『含まない』でも優待が積まれている"
+    )
+    assert w._monthly_view.isColumnHidden(gui.MONTHLY_COL_BENEFIT), "優待列が伏せられない"
+    assert w._monthly_view.isColumnHidden(gui.MONTHLY_COL_TOTAL), "合計列が伏せられない"
+    assert header.sortIndicatorSection() == gui.MONTHLY_COL_DIVIDEND, (
+        "伏せた合計列で並べ替えており矢印がどこにも出ない"
+    )
+    # 見出しの金額も優待を落とした額（＝画面に残る配当列の合計）になること
+    from src.utils import fmt_number
+
+    bucket = next((b for b in w._monthly.buckets if b.month == w.monthly_month), None)
+    expected = bucket.dividend_jpy if bucket is not None else 0.0
+    assert f"¥{fmt_number(expected, 0)}" in w._monthly_head.text(), w._monthly_head.text()
 
 
 def _check_month_checkboxes() -> None:
@@ -348,6 +429,7 @@ def main() -> None:
     _check_kpi_cards(w)
     _check_inactive_toggle(w)
     _check_monthly_tab(w)
+    _check_withdrawal_trend_note(w)
 
     # 編集ダイアログ: 即時バリデーション（赤枠プロパティ＋集約エラーラベル）
     dlg = EditHoldingDialog(_holding())

@@ -165,6 +165,7 @@ def _history(date: str, **kw) -> HistoryRecord:
         total_benefit_jpy=None,
         total_profit_jpy=None,
         total_withdrawal_income_jpy=None,
+        total_fixed_withdrawal_income_jpy=None,
         source="app",
     )
     base.update(kw)

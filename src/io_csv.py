@@ -210,7 +210,6 @@ _VALID_CHART_TYPES = {"treemap", "pie"}
 _VALID_TREND_PERIODS = {"all", "10y", "5y", "3y", "1y"}
 _VALID_BASELINES = {"zero", "min"}
 _VALID_INCLUDE = {"with", "without"}
-_VALID_MONTHLY_SORTS = {"desc", "asc"}
 
 def _is_int(value: object) -> bool:
     """厳密な int 判定（bool は int のサブクラスなので除外する）。"""
@@ -254,9 +253,9 @@ _SETTINGS_VALIDATORS: dict[str, set | Callable[[object], bool]] = {
     "income_trend_period": _VALID_TREND_PERIODS,
     "asset_trend_baseline": _VALID_BASELINES,
     "income_trend_baseline": _VALID_BASELINES,
-    # 配当推移グラフの系列選択（優待込み/取崩込み）
+    # 収入グラフ（配当推移・月別配当）に優待を含めるか。取崩の有無は
+    # withdrawal_mode が唯一の入口なので専用キーを持たない。
     "income_benefit": _VALID_INCLUDE,
-    "income_withdrawal": _VALID_INCLUDE,
     # ウィンドウ状態の永続化（GUI が closeEvent / タブ切替時に保存する）
     "window_geometry": _is_geometry,
     # タブは [評価額, 配当金, 月別配当, 株価詳細, 配当詳細] の5枚。
@@ -267,8 +266,6 @@ _SETTINGS_VALIDATORS: dict[str, set | Callable[[object], bool]] = {
     "column_widths_income": _is_column_widths,
     # 無効（active=false）銘柄をテーブルに表示するか。既定 False。
     "show_inactive": lambda v: isinstance(v, bool),
-    # 月別配当タブ・内訳リストの並び順
-    "monthly_sort": _VALID_MONTHLY_SORTS,
 }
 
 
