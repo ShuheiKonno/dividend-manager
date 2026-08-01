@@ -33,7 +33,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from .calc import default_tax_rate, resolve_payment_month_ratios
+from .calc import resolve_payment_month_ratios
 from .models import Holding, MarketData
 
 
@@ -146,16 +146,6 @@ def _build_account_combo(current: str | None) -> QComboBox:
         index = combo.count() - 1
     combo.setCurrentIndex(index)
     return combo
-
-
-def tax_rate_placeholder(account: str | None, currency: str) -> str:
-    """源泉税率欄のプレースホルダ（空欄時に効く自動判定値）を組み立てる。
-
-    自動判定は calc.default_tax_rate が唯一の実装なので、ここでは表示だけを担い
-    率をこのモジュールへ書き写さない（NISA/米国 10% の規則が二重定義になるのを
-    避ける）。口座・通貨の選択を変えたら _sync_tax_placeholder で追随させる。
-    """
-    return f"空欄={default_tax_rate(account, currency) * 100:g}%（口座・通貨から自動判定）"
 
 
 def _build_section(title: str, rows: list[tuple[str, QWidget]]) -> QGroupBox:
@@ -272,10 +262,6 @@ class _HoldingDialogBase(QDialog):
     _attach_validator で登録したフィールドは textChanged のたびに検証され、
     エラー時は QSS の QLineEdit[error="true"]（赤枠）とツールチップ、
     フォーム下部の集約エラーラベル（先頭エラーのみ）へ反映される。
-
-    サブクラスは `self._account`（口座コンボ）と `self._tax_rate`（源泉税率欄）を
-    持ち、`_currency_value()` を実装すること（_sync_tax_placeholder がこの3つを
-    前提に源泉税率の自動判定値を表示する）。
     """
 
     def __init__(self, parent=None) -> None:
@@ -300,18 +286,6 @@ class _HoldingDialogBase(QDialog):
         edit.style().unpolish(edit)
         edit.style().polish(edit)
         self._update_error_label()
-
-    def _currency_value(self) -> str:
-        """源泉税率の自動判定に使う通貨。サブクラスが実装する。"""
-        raise NotImplementedError
-
-    def _sync_tax_placeholder(self) -> None:
-        """源泉税率欄のプレースホルダを現在の口座・通貨の自動判定値へ追随させる。"""
-        self._tax_rate.setPlaceholderText(
-            tax_rate_placeholder(
-                str(self._account.currentData() or ""), self._currency_value()
-            )
-        )
 
     def _update_error_label(self) -> None:
         for edit, validate in self._validators.items():
@@ -343,17 +317,14 @@ class EditHoldingDialog(_HoldingDialogBase):
         self._active = QCheckBox("有効")
         self._active.setChecked(holding.active)
 
-        # 配当の上書き
+        # 配当の上書き（税引後は gross × (1 − 税率) で自動計算するため欄を持たない。
+        # 一部だけ非課税の分配金など率で表せない例外は holdings.csv の
+        # annual_div_ps_net_override 列を手編集する運用）。
         self._div_gross = QLineEdit(
             "" if holding.annual_div_ps_gross_override is None
             else str(holding.annual_div_ps_gross_override)
         )
         self._div_gross.setPlaceholderText("空欄=自動取得値を使用")
-        self._div_net = QLineEdit(
-            "" if holding.annual_div_ps_net_override is None
-            else str(holding.annual_div_ps_net_override)
-        )
-        self._div_net.setPlaceholderText("空欄=税引前×(1−税率)で自動計算")
         self._div_date = QLineEdit(holding.div_forecast_as_of_override or "")
         self._div_date.setPlaceholderText("YYYY-MM-DD")
 
@@ -371,7 +342,10 @@ class EditHoldingDialog(_HoldingDialogBase):
         self._months_note.setObjectName("dialogNote")
         self._months_note.setWordWrap(True)
 
-        # 優待・取崩・税率
+        # 優待・取崩
+        # 源泉税率は calc.resolve_tax_rate が口座と通貨から自動判定するため入力欄を
+        # 置かない。銘柄ごとの例外（特定口座の源泉徴収なし等）は holdings.csv の
+        # tax_rate 列を直接編集する運用で、ここで書き換えず既存値を素通しする。
         self._benefit = QLineEdit(str(holding.annual_benefit_jpy))
         self._withdrawal_fixed = QLineEdit(
             "" if holding.withdrawal_fixed_jpy is None
@@ -381,24 +355,15 @@ class EditHoldingDialog(_HoldingDialogBase):
             "" if holding.withdrawal_rate is None
             else str(holding.withdrawal_rate)
         )
-        self._tax_rate = QLineEdit(
-            "" if holding.tax_rate is None
-            else str(holding.tax_rate)
-        )
-        self._sync_tax_placeholder()
-        # 口座を変えると自動判定の率（NISA=0 / NISA×USD=10% / 他=20.315%）が変わる。
-        self._account.currentIndexChanged.connect(self._sync_tax_placeholder)
 
         # 即時バリデーション登録
         self._attach_validator(self._shares, lambda t: validate_required_number(t, "保有株数"))
         self._attach_validator(self._avg_cost, lambda t: validate_required_number(t, "取得単価"))
         self._attach_validator(self._div_gross, lambda t: validate_optional_number(t, "配当(税引前)"))
-        self._attach_validator(self._div_net, lambda t: validate_optional_number(t, "配当(税引後)"))
         self._attach_validator(self._div_date, validate_optional_date)
         self._attach_validator(self._benefit, lambda t: validate_required_number(t, "優待換算額"))
         self._attach_validator(self._withdrawal_fixed, lambda t: validate_optional_number(t, "定額取崩額"))
         self._attach_validator(self._withdrawal_rate, lambda t: validate_optional_rate(t, "定率取崩率"))
-        self._attach_validator(self._tax_rate, lambda t: validate_optional_rate(t, "源泉税率"))
 
         buttons = QDialogButtonBox()
         buttons.addButton("保存", QDialogButtonBox.ButtonRole.AcceptRole)
@@ -416,7 +381,6 @@ class EditHoldingDialog(_HoldingDialogBase):
         ]))
         layout.addWidget(_build_section("配当の上書き", [
             ("配当(税引前) 上書き", self._div_gross),
-            ("配当(税引後) 上書き", self._div_net),
             ("配当予想更新日", self._div_date),
         ]))
         months_section = _build_section("支払月・受取月", [
@@ -425,11 +389,10 @@ class EditHoldingDialog(_HoldingDialogBase):
         ])
         months_section.layout().addRow(self._months_note)
         layout.addWidget(months_section)
-        layout.addWidget(_build_section("優待・取崩・税率", [
+        layout.addWidget(_build_section("優待・取崩", [
             ("優待換算額(円/年)", self._benefit),
             ("定額取崩額(円/年)", self._withdrawal_fixed),
             ("定率取崩率(例: 0.04)", self._withdrawal_rate),
-            ("源泉税率(空欄=自動判定)", self._tax_rate),
         ]))
         layout.addWidget(self._error_label)
         layout.addWidget(buttons)
@@ -440,7 +403,6 @@ class EditHoldingDialog(_HoldingDialogBase):
             shares = _non_negative(_parse_num(self._shares.text()), "保有株数")
             avg_cost = _non_negative(_parse_num(self._avg_cost.text()), "取得単価")
             div_gross_text = self._div_gross.text().strip()
-            div_net_text = self._div_net.text().strip()
             div_date = _optional_iso_date(self._div_date.text().strip() or None)
             benefit = _non_negative(_parse_num(self._benefit.text()), "優待換算額")
             withdrawal_fixed_text = self._withdrawal_fixed.text().strip()
@@ -449,10 +411,6 @@ class EditHoldingDialog(_HoldingDialogBase):
                 _non_negative(_parse_num(div_gross_text), "配当(税引前)")
                 if div_gross_text else None
             )
-            div_net = (
-                _non_negative(_parse_num(div_net_text), "配当(税引後)")
-                if div_net_text else None
-            )
             withdrawal_fixed = (
                 _non_negative(_parse_num(withdrawal_fixed_text), "定額取崩額")
                 if withdrawal_fixed_text else None
@@ -460,10 +418,6 @@ class EditHoldingDialog(_HoldingDialogBase):
             withdrawal_rate = _optional_rate(
                 _parse_num(withdrawal_rate_text) if withdrawal_rate_text else None,
                 "定率取崩率",
-            )
-            tax_rate_text = self._tax_rate.text().strip()
-            tax_rate = _optional_rate(
-                _parse_num(tax_rate_text) if tax_rate_text else None, "源泉税率"
             )
             active = self._active.isChecked()
         except ValueError as exc:
@@ -474,12 +428,13 @@ class EditHoldingDialog(_HoldingDialogBase):
         self.holding.shares = shares
         self.holding.avg_cost = avg_cost
         self.holding.annual_div_ps_gross_override = div_gross
-        self.holding.annual_div_ps_net_override = div_net
         self.holding.div_forecast_as_of_override = div_date
         self.holding.annual_benefit_jpy = benefit
         self.holding.withdrawal_fixed_jpy = withdrawal_fixed
         self.holding.withdrawal_rate = withdrawal_rate
-        self.holding.tax_rate = tax_rate
+        # annual_div_ps_net_override / tax_rate は入力欄が無いので触らない。代入すると
+        # CSV を手編集した銘柄が「開いて保存しただけ」で自動計算へ戻ってしまう
+        # （エラーも出ないまま税引後の額だけが変わる）。
         self.holding.active = bool(active)
         # months() は毎回新しいリストを返す。replace() の浅いコピーで元インスタンスと
         # 共有されたリストを in-place で書き換えないこと。
@@ -487,10 +442,6 @@ class EditHoldingDialog(_HoldingDialogBase):
         self.holding.benefit_months = self._benefit_months.months()
         self.result_holding = self.holding
         self.accept()
-
-    def _currency_value(self) -> str:
-        # 編集ダイアログは通貨を変更できない（登録時に確定）。
-        return self.holding.currency
 
 
 class NewHoldingDialog(_HoldingDialogBase):
@@ -531,16 +482,11 @@ class NewHoldingDialog(_HoldingDialogBase):
         self._active = QCheckBox("有効")
         self._active.setChecked(holding.active)
 
-        # 優待・取崩・税率
+        # 優待・取崩（源泉税率は口座と通貨から自動判定するため入力欄を持たない）
         self._benefit = QLineEdit("")
         self._benefit.setPlaceholderText("0")
         self._withdrawal_fixed = QLineEdit("")
         self._withdrawal_rate = QLineEdit("")
-        self._tax_rate = QLineEdit("")
-        self._sync_tax_placeholder()
-        # 口座・通貨のどちらを変えても自動判定の率が変わる（NISA×USD だけ 10%）。
-        self._account.currentIndexChanged.connect(self._sync_tax_placeholder)
-        self._currency.currentIndexChanged.connect(self._sync_tax_placeholder)
 
         # 即時バリデーション登録
         self._attach_validator(self._shares, lambda t: validate_required_number(t, "保有株数"))
@@ -548,7 +494,6 @@ class NewHoldingDialog(_HoldingDialogBase):
         self._attach_validator(self._benefit, lambda t: validate_required_number(t, "優待換算額"))
         self._attach_validator(self._withdrawal_fixed, lambda t: validate_optional_number(t, "定額取崩額"))
         self._attach_validator(self._withdrawal_rate, lambda t: validate_optional_rate(t, "定率取崩率"))
-        self._attach_validator(self._tax_rate, lambda t: validate_optional_rate(t, "源泉税率"))
 
         buttons = QDialogButtonBox()
         buttons.addButton("追加", QDialogButtonBox.ButtonRole.AcceptRole)
@@ -568,11 +513,10 @@ class NewHoldingDialog(_HoldingDialogBase):
             ("取得単価", self._avg_cost),
             ("", self._active),
         ]))
-        layout.addWidget(_build_section("優待・取崩・税率", [
+        layout.addWidget(_build_section("優待・取崩", [
             ("優待換算額(円/年)", self._benefit),
             ("定額取崩額(円/年)", self._withdrawal_fixed),
             ("定率取崩率(例: 0.04)", self._withdrawal_rate),
-            ("源泉税率(空欄=自動判定)", self._tax_rate),
         ]))
         layout.addWidget(self._error_label)
         layout.addWidget(buttons)
@@ -607,10 +551,6 @@ class NewHoldingDialog(_HoldingDialogBase):
                 _parse_num(withdrawal_rate_text) if withdrawal_rate_text else None,
                 "定率取崩率",
             )
-            tax_rate_text = self._tax_rate.text().strip()
-            tax_rate = _optional_rate(
-                _parse_num(tax_rate_text) if tax_rate_text else None, "源泉税率"
-            )
             active = self._active.isChecked()
         except ValueError as exc:
             QMessageBox.warning(self, "入力エラー", str(exc))
@@ -625,10 +565,7 @@ class NewHoldingDialog(_HoldingDialogBase):
         self.holding.annual_benefit_jpy = benefit
         self.holding.withdrawal_fixed_jpy = withdrawal_fixed
         self.holding.withdrawal_rate = withdrawal_rate
-        self.holding.tax_rate = tax_rate
+        # tax_rate は編集ダイアログと同じく触らない（新規は None のまま＝自動判定）。
         self.holding.active = bool(active)
         self.result_holding = self.holding
         self.accept()
-
-    def _currency_value(self) -> str:
-        return str(self._currency.currentData())

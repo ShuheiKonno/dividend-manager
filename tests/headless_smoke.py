@@ -52,7 +52,7 @@ def _check_actions(w) -> None:
             assert len(text) > 1, f"{key} に一文字キーが残っている: {text!r}"
     assert actions["update_market"].shortcut().toString() == "F5"
     assert actions["edit"].shortcut().toString() == "Ctrl+E"
-    assert actions["tab4"].shortcut().toString() == "Ctrl+5", "月別配当タブのキーが無い"
+    assert actions["tab4"].shortcut().toString() == "Ctrl+5", "配当詳細タブのキーが無い"
 
     original_tab = w._tabs.currentIndex()
 
@@ -62,16 +62,16 @@ def _check_actions(w) -> None:
     assert not actions["delete"].isEnabled(), "グラフタブで削除が有効のまま"
     assert not w._filter.isEnabled(), "グラフタブで絞り込みが有効のまま"
 
-    # 表タブ: 行を選ぶと編集・削除が有効になる
-    w._tabs.setCurrentIndex(2)
+    # 表タブ（株価詳細=3）: 行を選ぶと編集・削除が有効になる
+    w._tabs.setCurrentIndex(3)
     assert w._filter.isEnabled(), "表タブで絞り込みが無効のまま"
     if w._price_proxy.rowCount() > 0:
         w._price_view.selectRow(0)
         assert actions["edit"].isEnabled(), "行を選んでも編集が有効にならない"
         assert actions["delete"].isEnabled(), "行を選んでも削除が有効にならない"
 
-    # 月別配当タブ: 内訳は読み取り専用なのでグラフタブと同じ扱い
-    w._tabs.setCurrentIndex(4)
+    # 月別配当タブ（=2）: 内訳は読み取り専用なのでグラフタブと同じ扱い
+    w._tabs.setCurrentIndex(2)
     assert not actions["edit"].isEnabled(), "月別配当タブで編集が有効のまま"
     assert not actions["delete"].isEnabled(), "月別配当タブで削除が有効のまま"
     assert not w._filter.isEnabled(), "月別配当タブで絞り込みが有効のまま"
@@ -200,29 +200,32 @@ def _check_account_combo() -> None:
     assert save_dlg.result_holding.account == "NISA（成長）"
 
 
-def _check_tax_rate_placeholder() -> None:
-    """源泉税率欄のプレースホルダが口座・通貨の自動判定値へ追随すること。"""
-    dlg = EditHoldingDialog(_holding(account="特定", currency="JPY"))
-    assert "20.315%" in dlg._tax_rate.placeholderText(), dlg._tax_rate.placeholderText()
-    dlg._account.setCurrentIndex(dlg._account.findData("NISA（成長）"))
-    assert "0%" in dlg._tax_rate.placeholderText(), "NISA へ切替えても率が更新されない"
+def _check_auto_fields_are_untouched() -> None:
+    """自動計算に任せた項目はダイアログに欄が無く、保存で既存値を消さないこと。
 
-    # 米国株（USD）の NISA は米国源泉 10% が残る
-    usd = EditHoldingDialog(_holding(account="旧NISA", currency="USD"))
-    assert "10%" in usd._tax_rate.placeholderText(), usd._tax_rate.placeholderText()
-
-    # 課税口座の米国株は 米国10%＋国内20.315% の二段課税（単純加算の30.315%ではない）
-    taxable_usd = EditHoldingDialog(_holding(account="特定", currency="USD"))
-    assert "28.2835%" in taxable_usd._tax_rate.placeholderText(), (
-        taxable_usd._tax_rate.placeholderText()
+    税引後配当は gross × (1 − 税率)、税率は calc.resolve_tax_rate が口座・通貨から
+    自動判定する。CSV を手編集して例外値を入れた銘柄が「開いて保存しただけ」で
+    自動値へ戻ると、エラーも出ないまま税引後の額だけが変わるため代入しない。
+    """
+    dlg = EditHoldingDialog(
+        _holding(tax_rate=0.15, annual_div_ps_net_override=42.0)
+    )
+    assert not hasattr(dlg, "_tax_rate"), "源泉税率の入力欄が残っている"
+    assert not hasattr(dlg, "_div_net"), "配当(税引後)上書きの入力欄が残っている"
+    dlg._on_save()
+    assert dlg.result_holding is not None
+    assert dlg.result_holding.tax_rate == 0.15, "保存で手編集の源泉税率が消えた"
+    assert dlg.result_holding.annual_div_ps_net_override == 42.0, (
+        "保存で手編集の税引後上書きが消えた"
     )
 
-    # 新規ダイアログは通貨コンボの変更でも追随する
-    nd = NewHoldingDialog(_holding(symbol="", name="", account="", currency="JPY"))
-    nd._account.setCurrentIndex(nd._account.findData("旧NISA"))
-    assert "0%" in nd._tax_rate.placeholderText()
-    nd._currency.setCurrentIndex(nd._currency.findData("USD"))
-    assert "10%" in nd._tax_rate.placeholderText(), "通貨切替で率が更新されない"
+    # 新規登録は両方 None のまま（＝自動計算に任せる）で追加される
+    nd = NewHoldingDialog(_holding(symbol="8306", name="三菱UFJ"))
+    assert not hasattr(nd, "_tax_rate"), "新規ダイアログに源泉税率の欄が残っている"
+    nd._on_save()
+    assert nd.result_holding is not None
+    assert nd.result_holding.tax_rate is None
+    assert nd.result_holding.annual_div_ps_net_override is None
 
 
 def _market(**overrides) -> MarketData:
@@ -319,7 +322,11 @@ def main() -> None:
 
     # タブ・メニュー構成
     assert w._tabs.count() == 5, "タブが5つ生成されていない"
-    assert w._tabs.tabText(4) == "月別配当", w._tabs.tabText(4)
+    # 並びはグラフ系3枚（評価額 / 配当金 / 月別配当）→ 明細2枚（株価詳細 / 配当詳細）。
+    # _active_tab_key が index 3/4 だけを表タブとして拾うので順序ごと固定する。
+    assert [w._tabs.tabText(i) for i in range(5)] == [
+        "評価額", "配当金", "月別配当", "株価詳細", "配当詳細"
+    ], [w._tabs.tabText(i) for i in range(5)]
     menus = [a for a in w.menuBar().actions() if a.menu() is not None]
     assert len(menus) == 4, f"メニューが4つでない: {len(menus)}"
     file_actions = [a.text() for a in menus[0].menu().actions() if a.text()]
@@ -359,7 +366,7 @@ def main() -> None:
     assert {nd._currency.itemData(i) for i in range(nd._currency.count())} == {"JPY", "USD"}
 
     _check_account_combo()
-    _check_tax_rate_placeholder()
+    _check_auto_fields_are_untouched()
     _check_month_checkboxes()
 
     print("headless smoke: OK")

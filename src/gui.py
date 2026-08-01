@@ -474,10 +474,13 @@ class DividendWindow(QMainWindow):
         # 株価 / 配当テーブルタブ
         self._price_view, self._price_model, self._price_proxy = self._make_table(PRICE_COLUMNS)
         self._income_view, self._income_model, self._income_proxy = self._make_table(INCOME_COLUMNS)
-        self._tabs.addTab(self._price_view, "株価関連")
-        self._tabs.addTab(self._income_view, "配当関連")
-        # 月別配当タブ（上=支払月ごとの積み上げ棒 / 下=選択月の銘柄別内訳）
-        self._tabs.addTab(self._make_monthly_tab(), "月別配当")
+        # 月別配当タブ（上=支払月ごとの積み上げ棒 / 下=選択月の銘柄別内訳）。
+        # 生成はテーブル生成の後（内訳ビルダが表と同じ書式ヘルパーを使う）だが、
+        # 並びはグラフ系3枚 → 明細2枚になるよう表より手前へ挿す。
+        monthly_tab = self._make_monthly_tab()
+        self._tabs.addTab(monthly_tab, "月別配当")
+        self._tabs.addTab(self._price_view, "株価詳細")
+        self._tabs.addTab(self._income_view, "配当詳細")
         # 前回終了時のタブを復元してからシグナル接続する（起動時の無駄な保存を避ける）。
         if 0 <= self._initial_tab < self._tabs.count():
             self._tabs.setCurrentIndex(self._initial_tab)
@@ -519,7 +522,7 @@ class DividendWindow(QMainWindow):
         ("quit", "終了", "Ctrl+Q", "close"),
     ]
     # タブ切替（Ctrl+1〜5）。ラベルは QTabWidget のタブ名と揃える。
-    _TAB_ACTION_LABELS = ["評価額", "配当金", "株価関連", "配当関連", "月別配当"]
+    _TAB_ACTION_LABELS = ["評価額", "配当金", "月別配当", "株価詳細", "配当詳細"]
 
     def _build_actions(self) -> None:
         """メニュー・ツールバー・ショートカットが共有する QAction を生成する。
@@ -618,7 +621,7 @@ class DividendWindow(QMainWindow):
             "Ctrl+I: 収入モードの切替（配当 → 定額取崩 → 定率取崩）\n"
             "Ctrl+Shift+I: 無効銘柄の表示切替\n"
             "\n"
-            "Ctrl+1〜5: タブ切替（評価額 / 配当金 / 株価関連 / 配当関連 / 月別配当）\n"
+            "Ctrl+1〜5: タブ切替（評価額 / 配当金 / 月別配当 / 株価詳細 / 配当詳細）\n"
             "Ctrl+F: 絞り込みボックスへ移動\n"
             "Esc: 絞り込みのクリア\n"
             "F1: このヘルプ\n"
@@ -1136,11 +1139,11 @@ class DividendWindow(QMainWindow):
     def _focus_filter(self) -> None:
         """絞り込みボックスへフォーカスを移す（Ctrl+F）。
 
-        絞り込みは表にしか効かないため、グラフタブなら株価関連タブへ切り替えて
+        絞り込みは表にしか効かないため、グラフタブなら株価詳細タブへ切り替えて
         からフォーカスする（押しても何も起きない状態を作らない）。
         """
         if self._active_tab_key() == "dashboard":
-            self._tabs.setCurrentIndex(2)
+            self._tabs.setCurrentIndex(3)
         self._filter.setFocus()
         self._filter.selectAll()
 
@@ -1670,14 +1673,14 @@ class DividendWindow(QMainWindow):
         )
 
     def _active_tab_key(self) -> str:
-        # タブ構成: [評価額(0), 配当金(1), 株価関連(2), 配当関連(3), 月別配当(4)]。
-        # 0/1/4 はグラフタブで編集・削除・ソート対象外（dashboard 扱い）。
+        # タブ構成: [評価額(0), 配当金(1), 月別配当(2), 株価詳細(3), 配当詳細(4)]。
+        # 0/1/2 はグラフタブで編集・削除・ソート対象外（dashboard 扱い）。
         # 月別配当の内訳テーブルは読み取り専用なので、ここで拾わないのが正しい
         # （拾うと _view_for_tab が株価テーブルを返し、別タブの行を編集してしまう）。
         idx = self._tabs.currentIndex()
-        if idx == 2:
-            return "price"
         if idx == 3:
+            return "price"
+        if idx == 4:
             return "income"
         return "dashboard"
 
