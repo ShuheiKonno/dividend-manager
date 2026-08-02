@@ -43,7 +43,8 @@ def _check_actions(w) -> None:
     """QAction 一元化・Ctrl ショートカット・有効/無効の同期を検証する。"""
     actions = w._actions
     for key in ("update_market", "update_fx", "reload", "new", "edit", "delete",
-                "toggle_mode", "toggle_withdrawal", "toggle_inactive", "quit"):
+                "toggle_mode", "toggle_withdrawal", "toggle_inactive",
+                "create_shortcut", "quit"):
         assert key in actions, f"アクション {key} が無い: {sorted(actions)}"
 
     # 一文字ショートカットが残っていないこと（表で銘柄コードを打つと誤爆する）
@@ -430,6 +431,13 @@ def main() -> None:
     # ファイルメニューはエクスポート/インポートの対称サブメニューを持つ。
     assert any("エクスポート" in t for t in file_actions), f"エクスポートが無い: {file_actions}"
     assert any("インポート" in t for t in file_actions), f"インポートが無い: {file_actions}"
+    # ショートカット作成（タスクバーのアイコンを出す唯一の手段）はファイルメニューに置く
+    assert any("ショートカット" in t for t in file_actions), (
+        f"ショートカット作成が無い: {file_actions}"
+    )
+    assert w._actions["create_shortcut"].isEnabled() is (sys.platform == "win32"), (
+        "ショートカット作成の可否がプラットフォームと合っていない"
+    )
     help_actions = [a.text() for a in menus[3].menu().actions() if a.text()]
     assert any("ショートカット" in t for t in help_actions), help_actions
 
