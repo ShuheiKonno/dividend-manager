@@ -345,6 +345,22 @@ def _check_monthly_benefit_toggle(w) -> None:
     assert f"¥{fmt_number(expected, 0)}" in w._monthly_head.text(), w._monthly_head.text()
 
 
+def _check_app_icon(w) -> None:
+    """アプリアイコンが読み込まれ、タスクバー相当の小サイズまで揃っていること。
+
+    生成は tools/make_app_icon.py（実行時には描かない）。assets/app.ico を消すと
+    「タイトルバーだけ既定の Qt アイコンに戻る」という形で静かに退行する。
+    """
+    assert gui.APP_ICON_PATH.exists(), f"アイコンが無い: {gui.APP_ICON_PATH}"
+    icon = QApplication.instance().windowIcon()
+    assert not icon.isNull(), "QApplication にウィンドウアイコンが設定されていない"
+    available = {s.width() for s in icon.availableSizes()}
+    for size in (16, 32, 256):
+        assert size in available, f"{size}px のアイコンが .ico に無い: {sorted(available)}"
+    # ウィンドウ側は個別指定せずアプリ既定を継承する（設定箇所を1つに保つ）
+    assert not w.windowIcon().isNull(), "ウィンドウがアプリのアイコンを継承していない"
+
+
 def _check_month_checkboxes() -> None:
     """支払月チェックボックス群の自動判定トグルと保存値を検証する。"""
     group = MonthCheckboxGroup([3, 9])
@@ -423,6 +439,8 @@ def main() -> None:
 
     # treemap ホバー状態の初期値
     assert w._treemap._hover_tile is None
+
+    _check_app_icon(w)
 
     _check_actions(w)
     _check_toolbar(w)
