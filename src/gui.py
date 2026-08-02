@@ -58,6 +58,7 @@ from .dialogs import (  # noqa: F401 — 再エクスポート
     _optional_rate,
     _parse_num,
 )
+from . import shortcut
 from .io_csv import (
     init_empty_files,
     load_holdings,
@@ -533,6 +534,8 @@ class DividendWindow(QMainWindow):
         ("export_history", "推移履歴...", None, "action_export_history"),
         ("import_holdings", "保有銘柄...", None, "action_import_holdings"),
         ("import_history", "推移履歴...", None, "action_import_history"),
+        ("create_shortcut", "デスクトップにショートカットを作成...", None,
+         "action_create_shortcut"),
         ("focus_filter", "絞り込みへ移動", "Ctrl+F", "_focus_filter"),
         ("help_shortcuts", "キーボードショートカット一覧...", "F1", "_show_shortcut_help"),
         ("quit", "終了", "Ctrl+Q", "close"),
@@ -560,6 +563,10 @@ class DividendWindow(QMainWindow):
             )
             self.addAction(action)  # ウィンドウ配下でショートカットを有効化
             self._actions[key] = action
+
+        # ショートカット作成は Windows 専用。可否がプラットフォームだけで決まり
+        # 実行中に変わらないので、_sync_action_states ではなくここで一度伏せる。
+        self._actions["create_shortcut"].setEnabled(shortcut.is_supported())
 
         # 無効銘柄トグルはチェック状態を持たせ、現在値をメニュー上で示す。
         inactive = QAction("無効銘柄も表示", self)
@@ -595,6 +602,8 @@ class DividendWindow(QMainWindow):
         import_menu = file_menu.addMenu("インポート (CSV)")
         import_menu.addAction(act["import_holdings"])
         import_menu.addAction(act["import_history"])
+        file_menu.addSeparator()
+        file_menu.addAction(act["create_shortcut"])
         file_menu.addSeparator()
         file_menu.addAction(act["quit"])
 
@@ -1459,6 +1468,48 @@ class DividendWindow(QMainWindow):
         path = self._with_csv_suffix(path)
         if self._save_or_notify(lambda: export_history_csv(path, self.history)):
             self._notify(f"履歴を書き出しました（{len(self.history)} 日分）")
+
+    def action_create_shortcut(self) -> None:
+        """デスクトップへ起動用ショートカットを作成する（タスクバーのアイコン対策）。
+
+        Windows のタスクバーはウィンドウのアイコンではなく起動元のショートカットから
+        アイコンを引くため、消してしまうと Python のアイコンに戻る。ここから作り直せる。
+        PowerShell の起動を待つ1秒弱だけ UI が止まるので砂時計カーソルにする
+        （市場データ取得と違い一瞬で終わる同期処理なので QThread には載せない）。
+        """
+        path = shortcut.shortcut_path()
+        if path.exists():
+            reply = QMessageBox.question(
+                self,
+                "ショートカットの作成",
+                f"既にあります:\n{path}\n\n作り直しますか？"
+                "（Python の場所が変わったときは作り直しが必要です）",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                QMessageBox.StandardButton.No,
+            )
+            if reply != QMessageBox.StandardButton.Yes:
+                return
+
+        QGuiApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
+        try:
+            created = shortcut.create_desktop_shortcut()
+        except Exception as exc:  # noqa: BLE001 — UI に通知して継続
+            QMessageBox.warning(
+                self, "ショートカットの作成", f"作成に失敗しました:\n{exc}"
+            )
+            self._notify("ショートカットの作成に失敗しました", error=True)
+            return
+        finally:
+            QGuiApplication.restoreOverrideCursor()
+
+        QMessageBox.information(
+            self,
+            "ショートカットの作成",
+            f"デスクトップに作成しました:\n{created}\n\n"
+            "タスクバーへアプリのアイコンを出すには、このショートカットから"
+            "起動してください。",
+        )
+        self._notify("デスクトップにショートカットを作成しました")
 
     def action_import_holdings(self) -> None:
         """エクスポートした保有銘柄 CSV を選択して取り込む（全置換）。
