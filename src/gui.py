@@ -1228,16 +1228,31 @@ class DividendWindow(QMainWindow):
         chart_rows = [r for r in rows if r.get("active") is not False]
         self._treemap.set_data(chart_rows)
         self._piechart.set_data(chart_rows)
-        # 配当額ベース: 面積 = 年間配当（取崩モード時は「年間収入」に上書きされた額）
+        # 配当額ベース: 面積 = 年間配当（取崩モード時は「年間収入」に上書きされた額）。
+        # ツールバーの「優待」が「含む」なら配当＋優待の合算列へ切り替える
+        # （推移・月別と同じ数え方に揃える）。div_label / div_empty は月別タブが
+        # 「＋優待」を自前で足すので、ここでは素のままにして構成グラフ用の
+        # ラベルだけ別に作る（両方に足すと「＋優待＋優待」になる）。
         div_label = "年間収入" if self.withdrawal_mode is not None else "年間配当"
         div_empty = f"{div_label}データがありません（F5 で取得 / 配当のある銘柄が必要です）"
+        with_benefit = self.income_benefit == "with"
+        comp_key = (
+            "annual_dividend_with_benefit_jpy" if with_benefit
+            else "annual_dividend_jpy"
+        )
+        comp_label = f"{div_label}＋優待" if with_benefit else div_label
+        # 優待込みでは優待だけの銘柄でも描けるので、空メッセージの条件も変える。
+        comp_need = "配当か優待のある銘柄" if with_benefit else "配当のある銘柄"
+        comp_empty = (
+            f"{comp_label}データがありません（F5 で取得 / {comp_need}が必要です）"
+        )
         self._treemap_div.set_data(
-            chart_rows, value_key="annual_dividend_jpy", value_label=div_label,
-            empty_message=div_empty,
+            chart_rows, value_key=comp_key, value_label=comp_label,
+            empty_message=comp_empty,
         )
         self._piechart_div.set_data(
-            chart_rows, value_key="annual_dividend_jpy", value_label=div_label,
-            empty_message=div_empty,
+            chart_rows, value_key=comp_key, value_label=comp_label,
+            empty_message=comp_empty,
         )
         # 月別配当（構成グラフと同じく有効銘柄のみ）
         self._monthly = monthly_breakdown(chart_rows)

@@ -24,7 +24,14 @@ from PySide6.QtWidgets import (
     QToolTip,
 )
 
-from .theme import CHART_BG, PROFIT_DOWN, PROFIT_UP
+from .theme import (
+    CHART_BG,
+    PROFIT_DOWN,
+    PROFIT_UP,
+    TEXT_BRIGHT,
+    TEXT_PRIMARY,
+    TEXT_SECONDARY,
+)
 from .utils import (
     fmt_number,
     fmt_percent,
@@ -45,6 +52,17 @@ def _fmt_compact(v: float) -> str:
     if v >= 1e4:
         return f"{v / 1e4:.0f}万円"
     return f"{v:.0f}円"
+
+
+def _label_text(tile: dict) -> str:
+    """円グラフの引き出し線ラベル1行分（「銘柄名(コード)」／集約行は「その他(N銘柄)」）。"""
+    symbol = str(tile.get("symbol", ""))
+    name = str(tile.get("name") or "")
+    if tile.get("is_other"):
+        return f"{symbol}{name}"
+    if not name:
+        return symbol
+    return f"{name}({symbol})"
 
 
 def _categorical_colors(tiles: list[dict]) -> list[QColor]:
@@ -127,6 +145,16 @@ _WEAK_BG = QColor("#262626")         # grey15 相当
 _RED_TEXT = QColor(PROFIT_UP)
 _BLUE_TEXT = QColor(PROFIT_DOWN)
 _WHITE = QColor("#f5f5f5")
+
+
+def _readable_text_color(bg: QColor) -> QColor:
+    """扇の上に文字を重ねるとき、背景色の明るさで白/黒を切り替えて返す。
+
+    カテゴリカル配色は色相を一周するため、白固定にすると黄〜シアンのスライスで
+    構成比の数字が読めなくなる（実測: 黄 0.80 / シアン 0.71 / 赤 0.52）。
+    """
+    luminance = 0.299 * bg.redF() + 0.587 * bg.greenF() + 0.114 * bg.blueF()
+    return QColor(CHART_BG) if luminance > 0.62 else _WHITE
 
 
 def profit_tile_colors(profit_rate: float | None) -> tuple[QColor, QColor]:
@@ -329,11 +357,16 @@ class TreemapWidget(QWidget):
 
 
 class PieChartWidget(QWidget):
-    """構成比の円グラフ。面積 ∝ value_key（既定=market_value_jpy）、色 = 銘柄ごと固有色（時計回り）。"""
+    """構成比のドーナツグラフ。面積 ∝ value_key（既定=market_value_jpy）、色 = 銘柄ごと固有色（時計回り）。
 
-    _LABEL_BAND = 175.0
+    中央の穴には合計（評価額ベースなら損益も）を出す。構成比(%)はスライス内、
+    銘柄名は引き出し線で円外に置く。
+    """
+
+    _LABEL_BAND = 190.0
     _MIN_RADIUS = 30.0
-    _RADIUS_SCALE = 0.82
+    _RADIUS_SCALE = 0.92
+    _HOLE_RATIO = 0.60  # 中央に合計を置くための内径比（外半径に対する割合）
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -398,8 +431,20 @@ class PieChartWidget(QWidget):
                 "name": f"({len(others)}銘柄)",
                 self._value_key: other_mv,
                 "profit_rate": other_pr,
+                # 集約行はラベル表記が「銘柄名(コード)」ではなく「その他(N銘柄)」。
+                # profit_jpy / book_value_jpy は持たないため、中央の損益は
+                # この表示用リストではなく生の self._tiles から集計すること。
+                "is_other": True,
             })
         return main
+
+    def _geometry(self) -> tuple[float, float, float, float]:
+        """(cx, cy, 外半径, 内半径) を返す。描画とヒットテストで同じ式を共有する。"""
+        w = float(self.rect().width())
+        h = float(self.rect().height())
+        base_r = min(w / 2.0 - self._LABEL_BAND, h / 2.0 - 16.0)
+        r = max(self._MIN_RADIUS, base_r * self._RADIUS_SCALE)
+        return w / 2.0, h / 2.0, r, r * self._HOLE_RATIO
 
     def paintEvent(self, event) -> None:  # noqa: N802
         painter = QPainter(self)
@@ -420,12 +465,9 @@ class PieChartWidget(QWidget):
         display_tiles = self._build_display_tiles()
         w = float(rect.width())
         h = float(rect.height())
-        # ラベルを扇外に引き出すため左右に帯を確保しつつ、円は大きめ（約0.82倍）に
-        # 描く。帯は銘柄名を表示できるよう広めに取る。
-        base_r = min(w / 2.0 - self._LABEL_BAND, h / 2.0 - 16.0)
-        r = max(self._MIN_RADIUS, base_r * self._RADIUS_SCALE)
-        cx = w / 2.0
-        cy = h / 2.0
+        # ラベルを扇外に引き出すため左右に帯を確保しつつ、円は大きめに描く
+        # （_RADIUS_SCALE）。帯は銘柄名を表示できるよう広めに取る。
+        cx, cy, r, r_in = self._geometry()
         pie_rect = QRectF(cx - r, cy - r, r * 2, r * 2)
 
         # 扇形描画: 90°（12時）から時計回り、銘柄ごとカテゴリカル配色
@@ -440,19 +482,28 @@ class PieChartWidget(QWidget):
             self._segments.append((current, span, tile))
             current -= span  # 時計回り = 角度を減算
 
+        # ドーナツの穴: 扇を描いた上から背景色で抜く（中央に合計を置くため）。
+        # 扇の区切り線は中心へ向かうので、この円で一緒に隠れる。
+        painter.setPen(Qt.PenStyle.NoPen)
+        painter.setBrush(QColor(CHART_BG))
+        painter.drawEllipse(QRectF(cx - r_in, cy - r_in, r_in * 2, r_in * 2))
+
+        self._draw_slice_percents(painter, cx, cy, r, r_in, colors)
+        self._draw_center(painter, cx, cy, r_in)
+
         # ラベル描画: 扇の中点から引き出し線を伸ばし、円外（左右）にテキストを置く。
         # 縦の重なりは spread_labels で回避する（同サイド内は引き出し線が交差しない）。
-        # 多数のラベルが縦に並ぶため本文より小さいフォント＋詰めた行ピッチで高さを抑える。
+        # 銘柄名(コード)の1行だけにして行ピッチを詰め、多数のスライスでも
+        # spread_labels の均等配置（＝重なり許容）へ落ちにくくする。
         lbl_font = QFont(self.font())
-        lbl_font.setPointSize(max(7, self.font().pointSize() - 2))
-        lbl_bold = QFont(lbl_font)
-        lbl_bold.setBold(True)
+        lbl_font.setPointSize(max(7, self.font().pointSize() - 1))
         painter.setFont(lbl_font)
-        line_h = float(painter.fontMetrics().height())
-        row_h = max(9.0, line_h - 2.0)   # 行ピッチ（やや詰める）
-        block_h = row_h * 3.0            # コード / 銘柄名 / 金額(％) の3行
-        min_gap = block_h + 2.0
-        label_w = 150.0
+        row_h = float(painter.fontMetrics().height())
+        min_gap = row_h + 2.0
+        # 円の外側に実際に空いている幅（肘＋余白を除く）。_LABEL_BAND を直に使うと
+        # 高さ律速で円が小さいときに余白を捨てることになる。上限は付ける
+        # （横長・低背のペインでは r が縮んで幅が余り、ラベルが端まで伸びる）。
+        label_w = min(260.0, max(60.0, w / 2.0 - (r + 46.0)))
 
         # 各扇の中点から円周上の起点と左右サイドを求める
         entries = []  # (i, tile, x_in, y_in, side)
@@ -470,13 +521,13 @@ class PieChartWidget(QWidget):
         for side in ("left", "right"):
             grp = [e for e in entries if e[4] == side]
             grp.sort(key=lambda e: e[3])  # 円周上の y 昇順（交差防止）
-            # y_lbl はブロック中心。3行ブロックが上下にはみ出さないよう、
-            # 配置範囲は中心が取り得る上下端（= ブロック半分＋余白）に絞る。
+            # y_lbl は行の中心。上下にはみ出さないよう、配置範囲は中心が
+            # 取り得る上下端（= 行の半分＋余白）に絞る。
             placed = spread_labels(
                 [e[3] for e in grp],
                 min_gap,
-                top=block_h / 2.0 + 2.0,
-                bottom=h - block_h / 2.0 - 2.0,
+                top=row_h / 2.0 + 2.0,
+                bottom=h - row_h / 2.0 - 2.0,
             )
             sign = 1.0 if side == "right" else -1.0
             elbow_x = cx + sign * (r + 34.0)
@@ -488,41 +539,182 @@ class PieChartWidget(QWidget):
                 painter.drawLine(int(x_in), int(y_in), int(elbow_x), int(y_lbl))
                 painter.drawLine(int(elbow_x), int(y_lbl), int(text_x), int(y_lbl))
 
-                symbol = str(tile.get("symbol", ""))
-                name = str(tile.get("name") or "")
-                pct = float(tile[self._value_key]) / self._total * 100.0
-                mv_str = f"{_fmt_compact(float(tile[self._value_key]))} ({pct:.0f}%)"
                 if side == "right":
                     box_x = text_x + 2.0
                     align = Qt.AlignmentFlag.AlignLeft
                 else:
                     box_x = text_x - 2.0 - label_w
                     align = Qt.AlignmentFlag.AlignRight
-                top = y_lbl - block_h / 2.0
-                code_rect = QRectF(box_x, top, label_w, row_h)
-                name_rect = QRectF(box_x, top + row_h, label_w, row_h)
-                amount_rect = QRectF(box_x, top + row_h * 2.0, label_w, row_h)
-                # 1行目: コード（扇色・太字）
-                painter.setFont(lbl_bold)
-                painter.setPen(QPen(color))
-                painter.drawText(
-                    code_rect, align | Qt.AlignmentFlag.AlignVCenter, symbol
-                )
-                # 2行目: 銘柄名（幅に収まらなければ末尾省略）
+                # 「銘柄名(コード)」の1行。幅に収まらなければ末尾省略（金額と
+                # 構成比はスライス内の % とツールチップで読める）。
                 painter.setFont(lbl_font)
-                painter.setPen(QPen(QColor("#cfcfcf")))
-                elided_name = painter.fontMetrics().elidedText(
-                    name, Qt.TextElideMode.ElideRight, int(label_w)
+                painter.setPen(QPen(QColor(TEXT_PRIMARY)))
+                text = painter.fontMetrics().elidedText(
+                    _label_text(tile), Qt.TextElideMode.ElideRight, int(label_w)
                 )
                 painter.drawText(
-                    name_rect, align | Qt.AlignmentFlag.AlignVCenter, elided_name
-                )
-                # 3行目: 金額(％)
-                painter.drawText(
-                    amount_rect, align | Qt.AlignmentFlag.AlignVCenter, mv_str
+                    QRectF(box_x, y_lbl - row_h / 2.0, label_w, row_h),
+                    align | Qt.AlignmentFlag.AlignVCenter,
+                    text,
                 )
 
         painter.end()
+
+    def _draw_slice_percents(
+        self,
+        painter: QPainter,
+        cx: float,
+        cy: float,
+        r: float,
+        r_in: float,
+        colors: list[QColor],
+    ) -> None:
+        """構成比(%)をスライスの帯の中に描く。
+
+        帯の厚みか弦の長さに収まらないスライスは飛ばす（細いスライスに書くと
+        隣のスライスへはみ出して、どの銘柄の数字か読めなくなる）。省いた分は
+        ツールチップで読める。
+        """
+        font = QFont(self.font())
+        font.setPointSize(max(7, self.font().pointSize() - 1))
+        font.setBold(True)
+        painter.setFont(font)
+        fm = painter.fontMetrics()
+        text_h = float(fm.height())
+        band = r - r_in
+        r_mid = (r + r_in) / 2.0
+        if band < text_h + 2.0:
+            return
+        for i, (start, span, tile) in enumerate(self._segments):
+            text = f"{float(tile[self._value_key]) / self._total * 100.0:.1f}"
+            text_w = float(fm.horizontalAdvance(text))
+            chord = 2.0 * r_mid * math.sin(math.radians(span) / 2.0)
+            if chord < text_w + 2.0:
+                continue
+            mid_rad = math.radians(start - span / 2.0)
+            px = cx + r_mid * math.cos(mid_rad)
+            py = cy - r_mid * math.sin(mid_rad)
+            painter.setPen(QPen(_readable_text_color(colors[i])))
+            painter.drawText(
+                QRectF(px - text_w / 2.0 - 4.0, py - text_h / 2.0, text_w + 8.0, text_h),
+                Qt.AlignmentFlag.AlignCenter,
+                text,
+            )
+
+    def _center_profit_text(self) -> tuple[str, QColor] | None:
+        """中央に添える損益の (文字列, 色) を返す。出せないときは None。
+
+        集計は集約前の self._tiles から行う。_build_display_tiles が作る「その他」
+        には profit_jpy が無く、表示用リストから合計すると黙って過少表示になる。
+        1件でも欠けたら出さない（calc.Summary の total_profit と同じ all-or-nothing）。
+        """
+        if self._value_key != "market_value_jpy":
+            return None  # 配当ベースの構成比に損益を出しても意味が対応しない
+        profit = 0.0
+        book = 0.0
+        for tile in self._tiles:
+            p = safe_float(tile.get("profit_jpy"))
+            b = safe_float(tile.get("book_value_jpy"))
+            if p is None or b is None:
+                return None
+            profit += p
+            book += b
+        if not book:
+            return None
+        sign = "+" if profit > 0 else ""
+        text = f"{sign}{fmt_number(profit, 0)}円 ({sign}{fmt_percent(profit / book, 1)})"
+        return text, profit_text_qcolor(profit) or QColor(TEXT_SECONDARY)
+
+    def _draw_center(
+        self, painter: QPainter, cx: float, cy: float, r_in: float
+    ) -> None:
+        """ドーナツ中央に合計（評価額ベースなら損益も）を描く。
+
+        穴に収まらないまま描くとスライスへ重なって読めなくなるため、フォントを
+        段階的に縮め → 簡略表記（億/万）へ落とし → それでも入らなければ何も
+        描かない。最小サイズのウィジェットでは中央表示が消える。
+        """
+        # 円の内側で横一列に使える幅（内接する矩形の目安）。
+        avail_w = r_in * 1.55
+        # 「年間配当＋優待合計」は 年間配当＋(優待合計) と読めるため、複合ラベルの
+        # ときだけ「の」を挟む（単独なら「評価額合計」のまま）。
+        title = (
+            f"{self._value_label}の合計" if "＋" in self._value_label
+            else f"{self._value_label}合計"
+        )
+        # 金額は必ず正確な値を出す。_fmt_compact（1.4億円）へ落とすと画面で
+        # 最も目立つ数字が黙って1%以上ずれるため、中央では使わない。
+        value_text = f"¥{fmt_number(self._total, 0)}"
+        profit = self._center_profit_text()
+        base = max(7, self.font().pointSize())
+
+        # 1周目は見出し・損益まで全部入る組み合わせを探し、見つからなければ
+        # 2周目で入る行だけを描く。1周で済ませると「大きい字で合計だけ」が
+        # 先に成立して損益が黙って消える。
+        for require_all in (True, False):
+            if self._fit_center(
+                painter, cx, cy, r_in, avail_w, title, value_text,
+                profit, base, require_all,
+            ):
+                return
+
+    def _fit_center(
+        self,
+        painter: QPainter,
+        cx: float,
+        cy: float,
+        r_in: float,
+        avail_w: float,
+        title: str,
+        value_text: str,
+        profit: tuple[str, QColor] | None,
+        base: int,
+        require_all: bool,
+    ) -> bool:
+        """中央ブロックを描けたら True。require_all=True なら全行入るときのみ描く。"""
+        for shrink in range(0, 4):
+            value_font = QFont(self.font())
+            value_font.setPointSize(max(8, base + 3 - shrink * 2))
+            value_font.setBold(True)
+            small_font = QFont(self.font())
+            small_font.setPointSize(max(7, base - 1 - shrink))
+            painter.setFont(value_font)
+            fm_value = painter.fontMetrics()
+            value_w = float(fm_value.horizontalAdvance(value_text))
+            value_h = float(fm_value.height())
+            painter.setFont(small_font)
+            fm_small = painter.fontMetrics()
+            small_h = float(fm_small.height())
+            has_title = fm_small.horizontalAdvance(title) <= avail_w
+            has_profit = (
+                profit is not None
+                and fm_small.horizontalAdvance(profit[0]) <= avail_w
+            )
+            if require_all and (
+                not has_title or (profit is not None and not has_profit)
+            ):
+                continue
+            rows: list[tuple[str, QFont, QColor, float]] = []
+            if has_title:
+                rows.append((title, small_font, QColor(TEXT_SECONDARY), small_h))
+            rows.append((value_text, value_font, QColor(TEXT_BRIGHT), value_h))
+            if profit is not None and has_profit:
+                rows.append((profit[0], small_font, profit[1], small_h))
+            block_h = sum(h for _, _, _, h in rows)
+            if value_w > avail_w or block_h > r_in * 1.5:
+                continue
+            y = cy - block_h / 2.0
+            for text, font, color, height in rows:
+                painter.setFont(font)
+                painter.setPen(QPen(color))
+                painter.drawText(
+                    QRectF(cx - avail_w / 2.0, y, avail_w, height),
+                    Qt.AlignmentFlag.AlignCenter,
+                    text,
+                )
+                y += height
+            return True
+        return False
 
     def mouseMoveEvent(self, event) -> None:  # noqa: N802
         pos = event.position().toPoint() if hasattr(event, "position") else event.pos()
@@ -543,16 +735,14 @@ class PieChartWidget(QWidget):
     def _tile_at(self, pos: QPoint) -> dict | None:
         if not self._segments:
             return None
-        w = float(self.rect().width())
-        h = float(self.rect().height())
-        base_r = min(w / 2.0 - self._LABEL_BAND, h / 2.0 - 16.0)
-        r = max(self._MIN_RADIUS, base_r * self._RADIUS_SCALE)
-        cx = w / 2.0
-        cy = h / 2.0
+        cx, cy, r, r_in = self._geometry()
 
         dx = pos.x() - cx
         dy = -(pos.y() - cy)  # Qt y軸反転
-        if math.sqrt(dx * dx + dy * dy) > r:
+        dist = math.sqrt(dx * dx + dy * dy)
+        # 中央の穴は合計表示なのでスライス扱いしない（穴の上でツールチップが
+        # 出ると、背後のスライスの値だと誤読される）。
+        if dist > r or dist < r_in:
             return None
 
         angle = math.degrees(math.atan2(dy, dx))
