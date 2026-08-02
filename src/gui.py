@@ -2030,8 +2030,10 @@ class DividendWindow(QMainWindow):
         return True
 
 
-# アプリアイコン（タイトルバー・タスクバー）。生成は tools/make_app_icon.py で
-# 行い、ここでは読み込むだけにする（起動パスへ描画処理を載せない）。
+# アプリアイコン。生成は tools/make_app_icon.py で行い、ここでは読み込むだけにする
+# （起動パスへ描画処理を載せない）。これで効くのは**タイトルバー**まで。
+# Windows のタスクバーはウィンドウのアイコンではなく起動元のショートカットから
+# アイコンを引くため、そちらは tools/make_shortcut.ps1 が担当する（実測は CLAUDE.md）。
 APP_ICON_PATH = Path(__file__).resolve().parents[1] / "assets" / "app.ico"
 
 
@@ -2048,27 +2050,6 @@ def _apply_app_icon(app: QApplication) -> None:
         app.setWindowIcon(icon)
 
 
-def _set_windows_app_id() -> None:
-    """Windows のタスクバーへ自前のアイコンを出すための AppUserModelID を設定する。
-
-    これが無いとホストの python.exe / pythonw.exe のアイコンでグループ化され、
-    タイトルバーだけ自前のアイコン・タスクバーは Python のアイコン、という
-    ちぐはぐな見え方になる。**QApplication を作る前**に呼ぶこと（ウィンドウ生成後に
-    設定してもシェル側は既存の ID を握ったままで、成功を返すのに何も変わらない）。
-    Windows 以外・呼び出し失敗時は黙って諦める（見た目の調整であり起動は妨げない）。
-    """
-    if sys.platform != "win32":
-        return
-    try:
-        import ctypes
-
-        ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID(
-            "ShuheiKonno.DividendManager"
-        )
-    except Exception:  # noqa: BLE001 — 環境差で落ちても起動は続ける
-        pass
-
-
 def build_window() -> DividendWindow:
     """ウィンドウを生成して返す（ヘッドレス検証用ファクトリ）。"""
     _ensure_app()
@@ -2078,7 +2059,6 @@ def build_window() -> DividendWindow:
 def _ensure_app() -> QApplication:
     app = QApplication.instance()
     if app is None:
-        _set_windows_app_id()  # QApplication 生成前でないとタスクバーに効かない
         app = QApplication(sys.argv)
     # Fusion は QSS と相性が良く、矢印等の複合サブコントロールが崩れない
     # （Windows 既定スタイルは部分的な QSS 適用で描画が乱れることがある）。
