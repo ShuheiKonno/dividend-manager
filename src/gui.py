@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import sys
 from dataclasses import replace
+from pathlib import Path
 from typing import Optional
 
 from PySide6.QtCore import Qt, QObject, QThread, Signal, QSortFilterProxyModel, QRect
@@ -20,6 +21,7 @@ from PySide6.QtGui import (
     QColor,
     QFont,
     QGuiApplication,
+    QIcon,
 )
 from PySide6.QtWidgets import (
     QApplication,
@@ -2028,6 +2030,45 @@ class DividendWindow(QMainWindow):
         return True
 
 
+# アプリアイコン（タイトルバー・タスクバー）。生成は tools/make_app_icon.py で
+# 行い、ここでは読み込むだけにする（起動パスへ描画処理を載せない）。
+APP_ICON_PATH = Path(__file__).resolve().parents[1] / "assets" / "app.ico"
+
+
+def _apply_app_icon(app: QApplication) -> None:
+    """アプリ既定のウィンドウアイコンを設定する（無ければ何もしない）。
+
+    ファイルが欠けても例外にしない。build_window() はヘッドレス検証の入口でもあり、
+    見た目だけの資産で検証が落ちるのは割に合わない。
+    """
+    if not APP_ICON_PATH.exists():
+        return
+    icon = QIcon(str(APP_ICON_PATH))
+    if not icon.isNull():
+        app.setWindowIcon(icon)
+
+
+def _set_windows_app_id() -> None:
+    """Windows のタスクバーへ自前のアイコンを出すための AppUserModelID を設定する。
+
+    これが無いとホストの python.exe / pythonw.exe のアイコンでグループ化され、
+    タイトルバーだけ自前のアイコン・タスクバーは Python のアイコン、という
+    ちぐはぐな見え方になる。**QApplication を作る前**に呼ぶこと（ウィンドウ生成後に
+    設定してもシェル側は既存の ID を握ったままで、成功を返すのに何も変わらない）。
+    Windows 以外・呼び出し失敗時は黙って諦める（見た目の調整であり起動は妨げない）。
+    """
+    if sys.platform != "win32":
+        return
+    try:
+        import ctypes
+
+        ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID(
+            "ShuheiKonno.DividendManager"
+        )
+    except Exception:  # noqa: BLE001 — 環境差で落ちても起動は続ける
+        pass
+
+
 def build_window() -> DividendWindow:
     """ウィンドウを生成して返す（ヘッドレス検証用ファクトリ）。"""
     _ensure_app()
@@ -2037,10 +2078,12 @@ def build_window() -> DividendWindow:
 def _ensure_app() -> QApplication:
     app = QApplication.instance()
     if app is None:
+        _set_windows_app_id()  # QApplication 生成前でないとタスクバーに効かない
         app = QApplication(sys.argv)
     # Fusion は QSS と相性が良く、矢印等の複合サブコントロールが崩れない
     # （Windows 既定スタイルは部分的な QSS 適用で描画が乱れることがある）。
     app.setStyle("Fusion")
+    _apply_app_icon(app)
     # QSS の font-family は QPainter 直描画（チャート類の self.font()）へ
     # 反映されないため、アプリ既定フォントも同じ族で揃える。
     app.setFont(QFont(FONT_FAMILY_PRIMARY, FONT_SIZE_PT))
