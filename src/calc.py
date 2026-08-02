@@ -263,6 +263,11 @@ def compute_rows(
                 "annual_div_ps": div_ps,
                 "annual_dividend_jpy": annual_dividend_jpy,
                 "annual_benefit_jpy": benefit_jpy,
+                # 配当（取崩モードでは取崩収入）＋優待。Summary.total_numerator_jpy の
+                # 行版なので、片方の数え方を変えたらもう片方も必ず合わせること
+                # （配当タブの構成グラフはこの列を使い、中央/合計が KPI カードと
+                # 一致することを前提にしている）。
+                "annual_dividend_with_benefit_jpy": numerator_jpy,
                 "book_value_jpy": book_value_jpy,
                 "market_value_jpy": market_value_jpy,
                 "yield_on_cost": yield_on_cost,
