@@ -347,6 +347,10 @@ class EditHoldingDialog(_HoldingDialogBase):
         # 置かない。銘柄ごとの例外（特定口座の源泉徴収なし等）は holdings.csv の
         # tax_rate 列を直接編集する運用で、ここで書き換えず既存値を素通しする。
         self._benefit = QLineEdit(str(holding.annual_benefit_jpy))
+        # 優待内容は自由記述のメモなので検証を付けない（_attach_validator も
+        # _parse_num も通さない）。1行入力にして CSV へ改行が入る余地を作らない。
+        self._benefit_detail = QLineEdit(holding.benefit_detail)
+        self._benefit_detail.setPlaceholderText("例: クオカード1,000円分")
         self._withdrawal_fixed = QLineEdit(
             "" if holding.withdrawal_fixed_jpy is None
             else str(holding.withdrawal_fixed_jpy)
@@ -391,6 +395,7 @@ class EditHoldingDialog(_HoldingDialogBase):
         layout.addWidget(months_section)
         layout.addWidget(_build_section("優待・取崩", [
             ("優待換算額(円/年)", self._benefit),
+            ("優待内容", self._benefit_detail),
             ("定額取崩額(円/年)", self._withdrawal_fixed),
             ("定率取崩率(例: 0.04)", self._withdrawal_rate),
         ]))
@@ -430,6 +435,7 @@ class EditHoldingDialog(_HoldingDialogBase):
         self.holding.annual_div_ps_gross_override = div_gross
         self.holding.div_forecast_as_of_override = div_date
         self.holding.annual_benefit_jpy = benefit
+        self.holding.benefit_detail = self._benefit_detail.text().strip()
         self.holding.withdrawal_fixed_jpy = withdrawal_fixed
         self.holding.withdrawal_rate = withdrawal_rate
         # annual_div_ps_net_override / tax_rate は入力欄が無いので触らない。代入すると
@@ -485,6 +491,10 @@ class NewHoldingDialog(_HoldingDialogBase):
         # 優待・取崩（源泉税率は口座と通貨から自動判定するため入力欄を持たない）
         self._benefit = QLineEdit("")
         self._benefit.setPlaceholderText("0")
+        # 編集ダイアログと同じく自由記述（検証なし）。新規側にも置かないと、
+        # 登録直後の銘柄は開き直すまで優待内容を書けない。
+        self._benefit_detail = QLineEdit(holding.benefit_detail)
+        self._benefit_detail.setPlaceholderText("例: クオカード1,000円分")
         self._withdrawal_fixed = QLineEdit("")
         self._withdrawal_rate = QLineEdit("")
 
@@ -515,6 +525,7 @@ class NewHoldingDialog(_HoldingDialogBase):
         ]))
         layout.addWidget(_build_section("優待・取崩", [
             ("優待換算額(円/年)", self._benefit),
+            ("優待内容", self._benefit_detail),
             ("定額取崩額(円/年)", self._withdrawal_fixed),
             ("定率取崩率(例: 0.04)", self._withdrawal_rate),
         ]))
@@ -563,6 +574,7 @@ class NewHoldingDialog(_HoldingDialogBase):
         self.holding.shares = shares
         self.holding.avg_cost = avg_cost
         self.holding.annual_benefit_jpy = benefit
+        self.holding.benefit_detail = self._benefit_detail.text().strip()
         self.holding.withdrawal_fixed_jpy = withdrawal_fixed
         self.holding.withdrawal_rate = withdrawal_rate
         # tax_rate は編集ダイアログと同じく触らない（新規は None のまま＝自動判定）。

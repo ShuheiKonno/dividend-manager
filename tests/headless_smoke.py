@@ -55,7 +55,7 @@ def _check_actions(w) -> None:
             assert len(text) > 1, f"{key} に一文字キーが残っている: {text!r}"
     assert actions["update_market"].shortcut().toString() == "F5"
     assert actions["edit"].shortcut().toString() == "Ctrl+E"
-    assert actions["tab4"].shortcut().toString() == "Ctrl+5", "配当詳細タブのキーが無い"
+    assert actions["tab4"].shortcut().toString() == "Ctrl+5", "配当優待詳細タブのキーが無い"
 
     original_tab = w._tabs.currentIndex()
 
@@ -358,6 +358,7 @@ def _check_monthly_benefit_toggle(w) -> None:
         "優待『含む』で棒が積み上げにならない"
     )
     assert not w._monthly_view.isColumnHidden(gui.MONTHLY_COL_BENEFIT)
+    assert not w._monthly_view.isColumnHidden(gui.MONTHLY_COL_BENEFIT_DETAIL)
     assert not w._monthly_view.isColumnHidden(gui.MONTHLY_COL_TOTAL)
     # 合計列で並べた状態から優待を外す＝並び替え基準列が伏せられるケース
     w._monthly_view.sortByColumn(gui.MONTHLY_COL_TOTAL, Qt.SortOrder.DescendingOrder)
@@ -367,6 +368,10 @@ def _check_monthly_benefit_toggle(w) -> None:
         "優待『含まない』でも優待が積まれている"
     )
     assert w._monthly_view.isColumnHidden(gui.MONTHLY_COL_BENEFIT), "優待列が伏せられない"
+    # 金額を伏せて説明だけ残すと、見出しの合計（配当のみ）と表の見た目が食い違う。
+    assert w._monthly_view.isColumnHidden(gui.MONTHLY_COL_BENEFIT_DETAIL), (
+        "優待内容列が優待(円) と一緒に伏せられない"
+    )
     assert w._monthly_view.isColumnHidden(gui.MONTHLY_COL_TOTAL), "合計列が伏せられない"
     assert header.sortIndicatorSection() == gui.MONTHLY_COL_DIVIDEND, (
         "伏せた合計列で並べ替えており矢印がどこにも出ない"
@@ -448,15 +453,43 @@ def _check_month_checkboxes() -> None:
     assert dlg2.result_holding.benefit_months == [3]
 
 
+def _check_benefit_detail() -> None:
+    """優待内容の入力欄が両ダイアログにあり、そのまま保存されること。
+
+    自由記述のメモなので検証は付けない（_parse_num を通すと "1,000円分" のような
+    入力が数値として壊れる）。カンマは csv 側が引用符で守るため CSV も壊れない。
+    """
+    dlg = EditHoldingDialog(_holding(benefit_detail="クオカード1,000円分"))
+    assert dlg._benefit_detail.text() == "クオカード1,000円分"
+    dlg._benefit_detail.setText("  ジェフグルメカード3,000円分  ")
+    dlg._on_save()
+    assert dlg.result_holding is not None
+    assert dlg.result_holding.benefit_detail == "ジェフグルメカード3,000円分", (
+        dlg.result_holding.benefit_detail
+    )
+
+    nd = NewHoldingDialog(_holding(symbol="9433", name="KDDI"))
+    nd._benefit_detail.setText("カタログギフト5,000円分")
+    nd._on_save()
+    assert nd.result_holding is not None
+    assert nd.result_holding.benefit_detail == "カタログギフト5,000円分"
+
+    # 配当優待詳細タブと月別内訳の両方に列がある（列キーは calc の row と揃える）
+    assert ("優待内容", "benefit_detail") in gui.INCOME_COLUMNS, gui.INCOME_COLUMNS
+    assert ("優待内容", "benefit_detail") in gui.MONTHLY_COLUMNS, gui.MONTHLY_COLUMNS
+    # 自由記述なので数値ソート対象にしない（UserRole に生値を入れない列）
+    assert "benefit_detail" not in gui.NUMERIC_SORT_COLUMNS
+
+
 def main() -> None:
     w = build_window()
 
     # タブ・メニュー構成
     assert w._tabs.count() == 5, "タブが5つ生成されていない"
-    # 並びはグラフ系3枚（評価額 / 配当金 / 月別配当）→ 明細2枚（株価詳細 / 配当詳細）。
+    # 並びはグラフ系3枚（評価額 / 配当金 / 月別配当）→ 明細2枚（株価詳細 / 配当優待詳細）。
     # _active_tab_key が index 3/4 だけを表タブとして拾うので順序ごと固定する。
     assert [w._tabs.tabText(i) for i in range(5)] == [
-        "評価額", "配当金", "月別配当", "株価詳細", "配当詳細"
+        "評価額", "配当金", "月別配当", "株価詳細", "配当優待詳細"
     ], [w._tabs.tabText(i) for i in range(5)]
     menus = [a for a in w.menuBar().actions() if a.menu() is not None]
     assert len(menus) == 4, f"メニューが4つでない: {len(menus)}"
@@ -519,6 +552,7 @@ def main() -> None:
     _check_account_combo()
     _check_auto_fields_are_untouched()
     _check_month_checkboxes()
+    _check_benefit_detail()
 
     print("headless smoke: OK")
 

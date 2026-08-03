@@ -15,7 +15,7 @@ import subprocess
 import sys
 from pathlib import Path
 
-SHORTCUT_NAME = "配当管理.lnk"
+SHORTCUT_NAME = "配当優待管理.lnk"
 SCRIPT_PATH = Path(__file__).resolve().parents[1] / "tools" / "make_shortcut.ps1"
 
 _CSIDL_DESKTOPDIRECTORY = 0x0010

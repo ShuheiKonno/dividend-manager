@@ -1,6 +1,6 @@
 ﻿<#
 .SYNOPSIS
-  デスクトップへ「配当管理」のショートカットを作る（タスクバーのアイコン対策）。
+  デスクトップへ「配当優待管理」のショートカットを作る（タスクバーのアイコン対策）。
 
 .DESCRIPTION
   Windows のタスクバーはウィンドウのアイコン（QApplication.setWindowIcon）ではなく
@@ -61,14 +61,14 @@ if (-not $target) {
     throw "pythonw.exe が見つからない。README.md の手順で .venv を作るか Python を入れること。"
 }
 
-$path = Join-Path $Destination "配当管理.lnk"
+$path = Join-Path $Destination "配当優待管理.lnk"
 $shell = New-Object -ComObject WScript.Shell
 $lnk = $shell.CreateShortcut($path)
 $lnk.TargetPath = $target
 $lnk.Arguments = "`"$entry`""
 $lnk.WorkingDirectory = $repo
 $lnk.IconLocation = "$icon,0"   # ここがタスクバーのアイコンの出どころ
-$lnk.Description = "配当管理"
+$lnk.Description = "配当優待管理"
 $lnk.Save()
 
 Write-Host "作成: $path"

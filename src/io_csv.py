@@ -316,7 +316,7 @@ _SETTINGS_VALIDATORS: dict[str, set | Callable[[object], bool]] = {
     "income_benefit": _VALID_INCLUDE,
     # ウィンドウ状態の永続化（GUI が closeEvent / タブ切替時に保存する）
     "window_geometry": _is_geometry,
-    # タブは [評価額, 配当金, 月別配当, 株価詳細, 配当詳細] の5枚。
+    # タブは [評価額, 配当金, 月別配当, 株価詳細, 配当優待詳細] の5枚。
     "last_tab": lambda v: _is_int(v) and 0 <= v <= 4,
     "pie_threshold_asset": lambda v: _is_number(v) and 0 <= v <= 20,
     "pie_threshold_income": lambda v: _is_number(v) and 0 <= v <= 20,

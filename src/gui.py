@@ -1,4 +1,4 @@
-"""PySide6 ネイティブGUI（配当管理アプリのエントリ）。
+"""PySide6 ネイティブGUI（配当優待管理アプリのエントリ）。
 
 ロジック層（io_csv / models / calc / market_data / utils）は無改変で再利用し、
 表示層のみを Qt6 で再構築する。レガシー TUI は src/legacy_tui.py に温存。
@@ -134,6 +134,9 @@ INCOME_COLUMNS = [
     ("配当/株", "annual_div_ps"),
     ("年間配当(円)", "annual_dividend_jpy"),
     ("優待(円)", "annual_benefit_jpy"),
+    # 優待内容は金額の直後（説明と額を離すと同じ行でも対応が読み取りにくい）。
+    # 列 0/1/2 は NumericSortProxy の絞り込みが前提にしているので手前へ入れない。
+    ("優待内容", "benefit_detail"),
     ("簿価利回り", "yield_on_cost"),
     ("時価利回り", "yield_on_value"),
     ("配当更新日", "div_forecast_as_of"),
@@ -179,6 +182,7 @@ MONTHLY_COLUMNS = [
     ("口座", "account"),
     ("配当(円)", "dividend_jpy"),
     ("優待(円)", "benefit_jpy"),
+    ("優待内容", "benefit_detail"),
     ("合計(円)", "total_jpy"),
 ]
 # 優待「含まない」で伏せる列と、そのときの並び替え基準列。列構成そのものを
@@ -187,6 +191,9 @@ MONTHLY_COLUMNS = [
 _MONTHLY_COL = {key: i for i, (_, key) in enumerate(MONTHLY_COLUMNS)}
 MONTHLY_COL_DIVIDEND = _MONTHLY_COL["dividend_jpy"]
 MONTHLY_COL_BENEFIT = _MONTHLY_COL["benefit_jpy"]
+# 優待内容は優待(円) と一緒に伏せる。金額を隠したまま説明だけ残すと、
+# 見出しの合計（配当のみ）と表に見えているものが食い違う。
+MONTHLY_COL_BENEFIT_DETAIL = _MONTHLY_COL["benefit_detail"]
 MONTHLY_COL_TOTAL = _MONTHLY_COL["total_jpy"]
 NUMERIC_SORT_COLUMNS = {
     "shares",
@@ -236,7 +243,9 @@ def _cell_text_and_color(row: dict, key: str) -> tuple[str, Optional[QColor]]:
     if key == "asset_type":
         text = str(val or "")
         return ASSET_TYPE_LABELS.get(text, text), None
-    if key in ("symbol", "name", "account", "currency", "div_forecast_as_of"):
+    if key in (
+        "symbol", "name", "account", "currency", "div_forecast_as_of", "benefit_detail",
+    ):
         return str(val or ""), None
     if key in ("shares", "avg_cost", "last_price", "annual_div_ps"):
         return fmt_number(val, 2), None
@@ -338,7 +347,7 @@ class FxWorker(QObject):
 class DividendWindow(QMainWindow):
     def __init__(self) -> None:
         super().__init__()
-        self.setWindowTitle("配当管理")
+        self.setWindowTitle("配当優待管理")
 
         _saved = load_settings()
         # テーマは QSS・チャート配色の前提なので、ウィジェットを1つも作る前に
@@ -538,7 +547,7 @@ class DividendWindow(QMainWindow):
         monthly_tab = self._make_monthly_tab()
         self._tabs.addTab(monthly_tab, "月別配当")
         self._tabs.addTab(self._price_view, "株価詳細")
-        self._tabs.addTab(self._income_view, "配当詳細")
+        self._tabs.addTab(self._income_view, "配当優待詳細")
         # 前回終了時のタブを復元してからシグナル接続する（起動時の無駄な保存を避ける）。
         if 0 <= self._initial_tab < self._tabs.count():
             self._tabs.setCurrentIndex(self._initial_tab)
@@ -584,7 +593,7 @@ class DividendWindow(QMainWindow):
         ("quit", "終了", "Ctrl+Q", "close"),
     ]
     # タブ切替（Ctrl+1〜5）。ラベルは QTabWidget のタブ名と揃える。
-    _TAB_ACTION_LABELS = ["評価額", "配当金", "月別配当", "株価詳細", "配当詳細"]
+    _TAB_ACTION_LABELS = ["評価額", "配当金", "月別配当", "株価詳細", "配当優待詳細"]
 
     def _build_actions(self) -> None:
         """メニュー・ツールバー・ショートカットが共有する QAction を生成する。
@@ -712,7 +721,7 @@ class DividendWindow(QMainWindow):
             "Ctrl+I: 収入モードの切替（配当 → 定額取崩 → 定率取崩）\n"
             "Ctrl+Shift+I: 無効銘柄の表示切替\n"
             "\n"
-            "Ctrl+1〜5: タブ切替（評価額 / 配当金 / 月別配当 / 株価詳細 / 配当詳細）\n"
+            "Ctrl+1〜5: タブ切替（評価額 / 配当金 / 月別配当 / 株価詳細 / 配当優待詳細）\n"
             "Ctrl+F: 絞り込みボックスへ移動\n"
             "Esc: 絞り込みのクリア\n"
             "F1: このヘルプ\n"
@@ -1801,6 +1810,7 @@ class DividendWindow(QMainWindow):
         # 優待を含めないときは優待列と合計列を伏せる（合計＝配当の重複表示になり、
         # 見出しの金額とも食い違うため）。モデルの列構成自体は変えない。
         self._monthly_view.setColumnHidden(MONTHLY_COL_BENEFIT, not with_benefit)
+        self._monthly_view.setColumnHidden(MONTHLY_COL_BENEFIT_DETAIL, not with_benefit)
         self._monthly_view.setColumnHidden(MONTHLY_COL_TOTAL, not with_benefit)
         label = "配当" if self._monthly_label == "年間配当" else "収入"
         self._monthly_head.setText(
@@ -1817,6 +1827,8 @@ class DividendWindow(QMainWindow):
                 "account": item.account,
                 "dividend_jpy": item.dividend_jpy,
                 "benefit_jpy": item.benefit_jpy,
+                # 優待が入らない月は calc 側で "" になっている（金額と説明を揃える）。
+                "benefit_detail": item.benefit_detail,
                 "total_jpy": item.total_jpy,
             }
             for _label, key in MONTHLY_COLUMNS:
@@ -1999,7 +2011,7 @@ class DividendWindow(QMainWindow):
                 action.setChecked(name == self.theme_name)
 
     def _active_tab_key(self) -> str:
-        # タブ構成: [評価額(0), 配当金(1), 月別配当(2), 株価詳細(3), 配当詳細(4)]。
+        # タブ構成: [評価額(0), 配当金(1), 月別配当(2), 株価詳細(3), 配当優待詳細(4)]。
         # 0/1/2 はグラフタブで編集・削除・ソート対象外（dashboard 扱い）。
         # 月別配当の内訳テーブルは読み取り専用なので、ここで拾わないのが正しい
         # （拾うと _view_for_tab が株価テーブルを返し、別タブの行を編集してしまう）。
