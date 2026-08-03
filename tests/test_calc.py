@@ -238,6 +238,41 @@ def test_withdrawal_does_not_affect_stock():
     assert rows[0]["annual_dividend_jpy"] == pytest.approx(6_000)  # 株式は不変
 
 
+# ---- compute_rows: 配当＋優待の合算列（配当タブ構成グラフ用） ----
+
+def test_dividend_with_benefit_sums_both():
+    h = _holding(annual_div_ps_gross_override=60.0, annual_benefit_jpy=3_000.0)
+    rows, summary = compute_rows([h], {"7203": _market()}, 150.0, "gross")
+    r = rows[0]
+    assert r["annual_dividend_jpy"] == pytest.approx(6_000)
+    assert r["annual_dividend_with_benefit_jpy"] == pytest.approx(9_000)
+    # Summary.total_numerator_jpy の行版（KPI「合計」と構成グラフを一致させる前提）
+    assert summary.total_numerator_jpy == pytest.approx(9_000)
+
+
+def test_dividend_with_benefit_benefit_only_holding():
+    """配当が N/A でも優待があれば合算列には額が入る（優待込みでは行が現れる）。"""
+    h = _holding(symbol="4755", name="楽天G", annual_benefit_jpy=5_000.0)
+    rows, _ = compute_rows([h], {}, 150.0, "gross")
+    r = rows[0]
+    assert r["annual_dividend_jpy"] is None
+    assert r["annual_dividend_with_benefit_jpy"] == pytest.approx(5_000)
+
+
+def test_dividend_with_benefit_none_when_both_missing():
+    h = _holding()
+    rows, _ = compute_rows([h], {}, 150.0, "gross")
+    assert rows[0]["annual_dividend_with_benefit_jpy"] is None
+
+
+def test_dividend_with_benefit_follows_withdrawal_mode():
+    """取崩モードでは合算列も取崩収入＋優待になる（配当額のままにしない）。"""
+    h = _holding(symbol="JP0000", asset_type="fund", shares=10.0, avg_cost=10_000.0,
+                 withdrawal_fixed_jpy=40_000.0, annual_benefit_jpy=1_000.0)
+    rows, _ = compute_rows([h], {}, 150.0, "gross", withdrawal_mode="fixed")
+    assert rows[0]["annual_dividend_with_benefit_jpy"] == pytest.approx(41_000)
+
+
 # ---- _pick_div_ps: 優先順位と 0 override ----
 
 def test_pick_div_ps_override_wins_over_market():

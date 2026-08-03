@@ -44,7 +44,7 @@ def _check_actions(w) -> None:
     actions = w._actions
     for key in ("update_market", "update_fx", "reload", "new", "edit", "delete",
                 "toggle_mode", "toggle_withdrawal", "toggle_inactive",
-                "change_data_dir", "open_data_dir", "quit"):
+                "change_data_dir", "open_data_dir", "create_shortcut", "quit"):
         assert key in actions, f"アクション {key} が無い: {sorted(actions)}"
 
     # 一文字ショートカットが残っていないこと（表で銘柄コードを打つと誤爆する）
@@ -350,6 +350,22 @@ def _check_monthly_benefit_toggle(w) -> None:
     assert f"¥{fmt_number(expected, 0)}" in w._monthly_head.text(), w._monthly_head.text()
 
 
+def _check_app_icon(w) -> None:
+    """アプリアイコンが読み込まれ、タスクバー相当の小サイズまで揃っていること。
+
+    生成は tools/make_app_icon.py（実行時には描かない）。assets/app.ico を消すと
+    「タイトルバーだけ既定の Qt アイコンに戻る」という形で静かに退行する。
+    """
+    assert gui.APP_ICON_PATH.exists(), f"アイコンが無い: {gui.APP_ICON_PATH}"
+    icon = QApplication.instance().windowIcon()
+    assert not icon.isNull(), "QApplication にウィンドウアイコンが設定されていない"
+    available = {s.width() for s in icon.availableSizes()}
+    for size in (16, 32, 256):
+        assert size in available, f"{size}px のアイコンが .ico に無い: {sorted(available)}"
+    # ウィンドウ側は個別指定せずアプリ既定を継承する（設定箇所を1つに保つ）
+    assert not w.windowIcon().isNull(), "ウィンドウがアプリのアイコンを継承していない"
+
+
 def _check_month_checkboxes() -> None:
     """支払月チェックボックス群の自動判定トグルと保存値を検証する。"""
     group = MonthCheckboxGroup([3, 9])
@@ -425,6 +441,13 @@ def main() -> None:
     assert any("データフォルダを開く" in t for t in file_actions), file_actions
     # 現在のデータフォルダは io_csv 経由で参照する（値を import して固定しない）。
     assert gui.io_csv.DATA_DIR.exists(), f"データフォルダが無い: {gui.io_csv.DATA_DIR}"
+    # ショートカット作成（タスクバーのアイコンを出す唯一の手段）はファイルメニューに置く
+    assert any("ショートカット" in t for t in file_actions), (
+        f"ショートカット作成が無い: {file_actions}"
+    )
+    assert w._actions["create_shortcut"].isEnabled() is (sys.platform == "win32"), (
+        "ショートカット作成の可否がプラットフォームと合っていない"
+    )
     help_actions = [a.text() for a in menus[3].menu().actions() if a.text()]
     assert any("ショートカット" in t for t in help_actions), help_actions
 
@@ -434,6 +457,8 @@ def main() -> None:
 
     # treemap ホバー状態の初期値
     assert w._treemap._hover_tile is None
+
+    _check_app_icon(w)
 
     _check_actions(w)
     _check_toolbar(w)

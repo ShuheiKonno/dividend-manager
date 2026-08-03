@@ -22,6 +22,7 @@ from PySide6.QtGui import (
     QColor,
     QFont,
     QGuiApplication,
+    QIcon,
 )
 from PySide6.QtWidgets import (
     QApplication,
@@ -60,7 +61,7 @@ from .dialogs import (  # noqa: F401 — 再エクスポート
 )
 # DATA_DIR は実行中に変わる（データフォルダの変更）ため、値を import して
 # 固定せずモジュール経由で参照する。
-from . import app_config, io_csv
+from . import app_config, io_csv, shortcut
 from .io_csv import (
     init_empty_files,
     set_data_dir,
@@ -556,6 +557,8 @@ class DividendWindow(QMainWindow):
         ("import_history", "推移履歴...", None, "action_import_history"),
         ("change_data_dir", "データフォルダの変更...", None, "action_change_data_dir"),
         ("open_data_dir", "データフォルダを開く", None, "action_open_data_dir"),
+        ("create_shortcut", "デスクトップにショートカットを作成...", None,
+         "action_create_shortcut"),
         ("focus_filter", "絞り込みへ移動", "Ctrl+F", "_focus_filter"),
         ("help_shortcuts", "キーボードショートカット一覧...", "F1", "_show_shortcut_help"),
         ("quit", "終了", "Ctrl+Q", "close"),
@@ -583,6 +586,10 @@ class DividendWindow(QMainWindow):
             )
             self.addAction(action)  # ウィンドウ配下でショートカットを有効化
             self._actions[key] = action
+
+        # ショートカット作成は Windows 専用。可否がプラットフォームだけで決まり
+        # 実行中に変わらないので、_sync_action_states ではなくここで一度伏せる。
+        self._actions["create_shortcut"].setEnabled(shortcut.is_supported())
 
         # 無効銘柄トグルはチェック状態を持たせ、現在値をメニュー上で示す。
         inactive = QAction("無効銘柄も表示", self)
@@ -621,6 +628,8 @@ class DividendWindow(QMainWindow):
         file_menu.addSeparator()
         file_menu.addAction(act["change_data_dir"])
         file_menu.addAction(act["open_data_dir"])
+        file_menu.addSeparator()
+        file_menu.addAction(act["create_shortcut"])
         file_menu.addSeparator()
         file_menu.addAction(act["quit"])
 
@@ -1257,16 +1266,31 @@ class DividendWindow(QMainWindow):
         chart_rows = [r for r in rows if r.get("active") is not False]
         self._treemap.set_data(chart_rows)
         self._piechart.set_data(chart_rows)
-        # 配当額ベース: 面積 = 年間配当（取崩モード時は「年間収入」に上書きされた額）
+        # 配当額ベース: 面積 = 年間配当（取崩モード時は「年間収入」に上書きされた額）。
+        # ツールバーの「優待」が「含む」なら配当＋優待の合算列へ切り替える
+        # （推移・月別と同じ数え方に揃える）。div_label / div_empty は月別タブが
+        # 「＋優待」を自前で足すので、ここでは素のままにして構成グラフ用の
+        # ラベルだけ別に作る（両方に足すと「＋優待＋優待」になる）。
         div_label = "年間収入" if self.withdrawal_mode is not None else "年間配当"
         div_empty = f"{div_label}データがありません（F5 で取得 / 配当のある銘柄が必要です）"
+        with_benefit = self.income_benefit == "with"
+        comp_key = (
+            "annual_dividend_with_benefit_jpy" if with_benefit
+            else "annual_dividend_jpy"
+        )
+        comp_label = f"{div_label}＋優待" if with_benefit else div_label
+        # 優待込みでは優待だけの銘柄でも描けるので、空メッセージの条件も変える。
+        comp_need = "配当か優待のある銘柄" if with_benefit else "配当のある銘柄"
+        comp_empty = (
+            f"{comp_label}データがありません（F5 で取得 / {comp_need}が必要です）"
+        )
         self._treemap_div.set_data(
-            chart_rows, value_key="annual_dividend_jpy", value_label=div_label,
-            empty_message=div_empty,
+            chart_rows, value_key=comp_key, value_label=comp_label,
+            empty_message=comp_empty,
         )
         self._piechart_div.set_data(
-            chart_rows, value_key="annual_dividend_jpy", value_label=div_label,
-            empty_message=div_empty,
+            chart_rows, value_key=comp_key, value_label=comp_label,
+            empty_message=comp_empty,
         )
         # 月別配当（構成グラフと同じく有効銘柄のみ）
         self._monthly = monthly_breakdown(chart_rows)
@@ -1471,6 +1495,48 @@ class DividendWindow(QMainWindow):
         path = self._with_csv_suffix(path)
         if self._save_or_notify(lambda: export_history_csv(path, self.history)):
             self._notify(f"履歴を書き出しました（{len(self.history)} 日分）")
+
+    def action_create_shortcut(self) -> None:
+        """デスクトップへ起動用ショートカットを作成する（タスクバーのアイコン対策）。
+
+        Windows のタスクバーはウィンドウのアイコンではなく起動元のショートカットから
+        アイコンを引くため、消してしまうと Python のアイコンに戻る。ここから作り直せる。
+        PowerShell の起動を待つ1秒弱だけ UI が止まるので砂時計カーソルにする
+        （市場データ取得と違い一瞬で終わる同期処理なので QThread には載せない）。
+        """
+        path = shortcut.shortcut_path()
+        if path.exists():
+            reply = QMessageBox.question(
+                self,
+                "ショートカットの作成",
+                f"既にあります:\n{path}\n\n作り直しますか？"
+                "（Python の場所が変わったときは作り直しが必要です）",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                QMessageBox.StandardButton.No,
+            )
+            if reply != QMessageBox.StandardButton.Yes:
+                return
+
+        QGuiApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
+        try:
+            created = shortcut.create_desktop_shortcut()
+        except Exception as exc:  # noqa: BLE001 — UI に通知して継続
+            QMessageBox.warning(
+                self, "ショートカットの作成", f"作成に失敗しました:\n{exc}"
+            )
+            self._notify("ショートカットの作成に失敗しました", error=True)
+            return
+        finally:
+            QGuiApplication.restoreOverrideCursor()
+
+        QMessageBox.information(
+            self,
+            "ショートカットの作成",
+            f"デスクトップに作成しました:\n{created}\n\n"
+            "タスクバーへアプリのアイコンを出すには、このショートカットから"
+            "起動してください。",
+        )
+        self._notify("デスクトップにショートカットを作成しました")
 
     def action_import_holdings(self) -> None:
         """エクスポートした保有銘柄 CSV を選択して取り込む（全置換）。
@@ -2124,6 +2190,26 @@ class DividendWindow(QMainWindow):
         return True
 
 
+# アプリアイコン。生成は tools/make_app_icon.py で行い、ここでは読み込むだけにする
+# （起動パスへ描画処理を載せない）。これで効くのは**タイトルバー**まで。
+# Windows のタスクバーはウィンドウのアイコンではなく起動元のショートカットから
+# アイコンを引くため、そちらは tools/make_shortcut.ps1 が担当する（実測は CLAUDE.md）。
+APP_ICON_PATH = Path(__file__).resolve().parents[1] / "assets" / "app.ico"
+
+
+def _apply_app_icon(app: QApplication) -> None:
+    """アプリ既定のウィンドウアイコンを設定する（無ければ何もしない）。
+
+    ファイルが欠けても例外にしない。build_window() はヘッドレス検証の入口でもあり、
+    見た目だけの資産で検証が落ちるのは割に合わない。
+    """
+    if not APP_ICON_PATH.exists():
+        return
+    icon = QIcon(str(APP_ICON_PATH))
+    if not icon.isNull():
+        app.setWindowIcon(icon)
+
+
 def build_window() -> DividendWindow:
     """ウィンドウを生成して返す（ヘッドレス検証用ファクトリ）。"""
     _ensure_app()
@@ -2137,6 +2223,7 @@ def _ensure_app() -> QApplication:
     # Fusion は QSS と相性が良く、矢印等の複合サブコントロールが崩れない
     # （Windows 既定スタイルは部分的な QSS 適用で描画が乱れることがある）。
     app.setStyle("Fusion")
+    _apply_app_icon(app)
     # QSS の font-family は QPainter 直描画（チャート類の self.font()）へ
     # 反映されないため、アプリ既定フォントも同じ族で揃える。
     app.setFont(QFont(FONT_FAMILY_PRIMARY, FONT_SIZE_PT))
