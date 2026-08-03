@@ -328,3 +328,91 @@ def test_settings_unknown_key_not_saved(monkeypatch, tmp_path):
     raw = json.loads((tmp_path / "settings.json").read_text(encoding="utf-8"))
     assert "unknown_key" not in raw
     assert raw["dividend_mode"] == "gross"
+
+
+# ---- データフォルダの切替 ----
+
+
+@pytest.fixture
+def restore_data_dir():
+    """set_data_dir がモジュールグローバルを書き換えるため、テスト後に戻す。"""
+    original = io_csv.DATA_DIR
+    yield
+    io_csv.set_data_dir(original, persist=False)
+
+
+def _path_globals() -> dict[str, Path]:
+    """io_csv が持つデータフォルダ配下のパス（*_DIR / *_PATH）を集める。"""
+    return {
+        name: value
+        for name, value in vars(io_csv).items()
+        if isinstance(value, Path) and (name.endswith("_DIR") or name.endswith("_PATH"))
+    }
+
+
+def test_set_data_dir_moves_every_path(restore_data_dir, tmp_path):
+    """データフォルダを切り替えたら全てのパスが新フォルダ配下へ移ること。
+
+    新しいファイルを足して _DERIVED_PATHS への追加を忘れると、そのファイルだけ
+    旧フォルダを読み書きし続ける（エラーは出ない）。ここで丸ごと固定する。
+    """
+    target = tmp_path / "new data"
+    returned = io_csv.set_data_dir(target, persist=False)
+    assert returned == target
+    assert target.is_dir(), "フォルダが作られていない"
+    assert io_csv.DATA_DIR == target
+    for name, value in _path_globals().items():
+        assert value == target or value.parent == target, f"{name} が旧フォルダのまま: {value}"
+
+
+def test_set_data_dir_persists_via_app_config(monkeypatch, restore_data_dir, tmp_path):
+    """persist=True は app_config へ保存し、persist=False は保存しないこと。"""
+    saved: list[str] = []
+    monkeypatch.setattr(io_csv.app_config, "save_data_dir", lambda p: saved.append(str(p)))
+    io_csv.set_data_dir(tmp_path / "kept", persist=True)
+    assert saved == [str(tmp_path / "kept")]
+    io_csv.set_data_dir(tmp_path / "quiet", persist=False)
+    assert len(saved) == 1, "persist=False で保存されている"
+
+
+def test_set_data_dir_does_not_switch_when_persist_fails(monkeypatch, restore_data_dir, tmp_path):
+    """設定の保存に失敗したらパスを張り替えない（次回起動で戻る半端な状態を作らない）。"""
+    before = io_csv.DATA_DIR
+
+    def boom(_path):
+        raise OSError("設定を保存できません")
+
+    monkeypatch.setattr(io_csv.app_config, "save_data_dir", boom)
+    with pytest.raises(OSError):
+        io_csv.set_data_dir(tmp_path / "unsaved", persist=True)
+    assert io_csv.DATA_DIR == before
+    assert io_csv.HOLDINGS_PATH.parent == before
+
+
+def test_copy_data_files_never_overwrites(tmp_path):
+    """データ CSV をコピーするが、行き先に同名があれば触らないこと。"""
+    src = tmp_path / "src"
+    src.mkdir()
+    for name in ("holdings.csv", "market_data.csv", "history.csv"):
+        (src / name).write_text(f"from-src:{name}", encoding="utf-8")
+    dst = tmp_path / "dst"
+    dst.mkdir()
+    (dst / "history.csv").write_text("keep-me", encoding="utf-8")
+
+    copied = io_csv.copy_data_files(src, dst)
+    assert sorted(copied) == ["holdings.csv", "market_data.csv"]
+    assert (dst / "holdings.csv").read_text(encoding="utf-8") == "from-src:holdings.csv"
+    assert (dst / "history.csv").read_text(encoding="utf-8") == "keep-me"
+    assert not (dst / "fx.csv").exists(), "元に無いファイルを作っている"
+
+
+def test_copy_data_files_skips_settings(tmp_path):
+    """settings.json（ウィンドウ状態）はデータではないのでコピー対象外。"""
+    src = tmp_path / "src"
+    src.mkdir()
+    (src / "holdings.csv").write_text("x", encoding="utf-8")
+    (src / "settings.json").write_text("{}", encoding="utf-8")
+    dst = tmp_path / "dst"
+    copied = io_csv.copy_data_files(src, dst)
+    assert copied == ["holdings.csv"]
+    assert not (dst / "settings.json").exists()
