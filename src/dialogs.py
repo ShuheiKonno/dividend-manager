@@ -328,7 +328,8 @@ class EditHoldingDialog(_HoldingDialogBase):
         self._div_date = QLineEdit(holding.div_forecast_as_of_override or "")
         self._div_date.setPlaceholderText("YYYY-MM-DD")
 
-        # 支払月・受取月（月別配当タブの按分に使う）
+        # 支払月・受取月（月別配当タブの按分に使う）。金額と同じセクションへ置く
+        # ため、ウィジェットの生成順とレイアウトの並びは一致しない。
         auto_months = auto_dividend_months(holding, market)
         self._div_months = MonthCheckboxGroup(holding.dividend_months, auto_months)
         # 優待には自動判定の材料が無いため常に手動（auto_months を渡さない）。
@@ -342,7 +343,7 @@ class EditHoldingDialog(_HoldingDialogBase):
         self._months_note.setObjectName("dialogNote")
         self._months_note.setWordWrap(True)
 
-        # 優待・取崩
+        # 優待・取崩（レイアウトでは別セクションに分ける）
         # 源泉税率は calc.resolve_tax_rate が口座と通貨から自動判定するため入力欄を
         # 置かない。銘柄ごとの例外（特定口座の源泉徴収なし等）は holdings.csv の
         # tax_rate 列を直接編集する運用で、ここで書き換えず既存値を素通しする。
@@ -383,19 +384,22 @@ class EditHoldingDialog(_HoldingDialogBase):
             ("取得単価", self._avg_cost),
             ("", self._active),
         ]))
-        layout.addWidget(_build_section("配当の上書き", [
+        # セクションは収入の種類ごとに切る（配当 / 優待 / 取崩）。月だけを別枠へ
+        # 集めると、性質の違う配当と優待が同じ枠に並び、金額はさらに別の枠に載る
+        # ——1銘柄の優待を設定するのに3枠を行き来することになる。
+        dividend_section = _build_section("配当", [
             ("配当(税引前) 上書き", self._div_gross),
             ("配当予想更新日", self._div_date),
-        ]))
-        months_section = _build_section("支払月・受取月", [
-            ("配当の支払月", self._div_months),
-            ("優待の受取月", self._benefit_months),
+            ("支払月", self._div_months),
         ])
-        months_section.layout().addRow(self._months_note)
-        layout.addWidget(months_section)
-        layout.addWidget(_build_section("優待・取崩", [
+        dividend_section.layout().addRow(self._months_note)
+        layout.addWidget(dividend_section)
+        layout.addWidget(_build_section("優待", [
             ("優待換算額(円/年)", self._benefit),
             ("優待内容", self._benefit_detail),
+            ("受取月", self._benefit_months),
+        ]))
+        layout.addWidget(_build_section("取崩（投資信託のみ）", [
             ("定額取崩額(円/年)", self._withdrawal_fixed),
             ("定率取崩率(例: 0.04)", self._withdrawal_rate),
         ]))
@@ -488,7 +492,8 @@ class NewHoldingDialog(_HoldingDialogBase):
         self._active = QCheckBox("有効")
         self._active.setChecked(holding.active)
 
-        # 優待・取崩（源泉税率は口座と通貨から自動判定するため入力欄を持たない）
+        # 優待・取崩（レイアウトでは別セクション。源泉税率は口座と通貨から
+        # 自動判定するため入力欄を持たない）
         self._benefit = QLineEdit("")
         self._benefit.setPlaceholderText("0")
         # 編集ダイアログと同じく自由記述（検証なし）。新規側にも置かないと、
@@ -523,9 +528,13 @@ class NewHoldingDialog(_HoldingDialogBase):
             ("取得単価", self._avg_cost),
             ("", self._active),
         ]))
-        layout.addWidget(_build_section("優待・取崩", [
+        # セクションの切り方は編集ダイアログと揃える（優待と取崩は別枠）。
+        # 支払月・受取月は新規では扱わない（登録後に編集ダイアログで指定する）。
+        layout.addWidget(_build_section("優待", [
             ("優待換算額(円/年)", self._benefit),
             ("優待内容", self._benefit_detail),
+        ]))
+        layout.addWidget(_build_section("取崩（投資信託のみ）", [
             ("定額取崩額(円/年)", self._withdrawal_fixed),
             ("定率取崩率(例: 0.04)", self._withdrawal_rate),
         ]))
