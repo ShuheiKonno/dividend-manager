@@ -24,14 +24,9 @@ from PySide6.QtWidgets import (
     QToolTip,
 )
 
-from .theme import (
-    CHART_BG,
-    PROFIT_DOWN,
-    PROFIT_UP,
-    TEXT_BRIGHT,
-    TEXT_PRIMARY,
-    TEXT_SECONDARY,
-)
+# 配色はテーマ切替で張り替わる「現在値」なので、値で import せず描画時に
+# theme.X で読む（値 import すると切替後も旧テーマの色を描き続ける）。
+from . import theme
 from .utils import (
     fmt_number,
     fmt_percent,
@@ -73,7 +68,7 @@ def _categorical_colors(tiles: list[dict]) -> list[QColor]:
     reg_idx = 0
     for tile in tiles:
         if tile.get("symbol") == "その他":
-            colors.append(QColor("#757575"))
+            colors.append(QColor(theme.CATEGORICAL_OTHER))
         else:
             hue = (reg_idx * 360 / max(regular_count, 1)) % 360
             colors.append(QColor.fromHsvF(hue / 360.0, 0.55, 0.85))
@@ -138,42 +133,48 @@ def _squarify(sizes: list[float], x: float, y: float, dx: float, dy: float):
 
 
 # ---- 配色ヘルパー（既存 DividendApp._heatmap_style / profit_style を移植） ----
-
-_BORDER = QColor("#7f7f7f")          # grey50 相当（タイル枠線）
-_NEUTRAL_BG = QColor("#3a3a3a")      # grey23 相当
-_WEAK_BG = QColor("#262626")         # grey15 相当
-_RED_TEXT = QColor(PROFIT_UP)
-_BLUE_TEXT = QColor(PROFIT_DOWN)
-_WHITE = QColor("#f5f5f5")
+# QColor はテーマ切替のたびに作り直す必要があるため、モジュール定数として
+# 持たず必ず関数の中で theme から作る。
 
 
 def _readable_text_color(bg: QColor) -> QColor:
-    """扇の上に文字を重ねるとき、背景色の明るさで白/黒を切り替えて返す。
+    """塗りの上に文字を重ねるとき、背景色の明るさで明/暗を切り替えて返す。
 
     カテゴリカル配色は色相を一周するため、白固定にすると黄〜シアンのスライスで
     構成比の数字が読めなくなる（実測: 黄 0.80 / シアン 0.71 / 赤 0.52）。
+    ライトテーマの淡いタイル（TILE_*_MID / TILE_NEUTRAL_BG）もこの判定で
+    暗い文字へ切り替わる。
     """
     luminance = 0.299 * bg.redF() + 0.587 * bg.greenF() + 0.114 * bg.blueF()
-    return QColor(CHART_BG) if luminance > 0.62 else _WHITE
+    return QColor(theme.ON_FILL_DARK if luminance > 0.62 else theme.ON_FILL_LIGHT)
 
 
 def profit_tile_colors(profit_rate: float | None) -> tuple[QColor, QColor]:
-    """損益率に応じたタイルの (背景色, 文字色) を3段階で返す（日本式: +赤 / -青）。"""
+    """損益率に応じたタイルの (背景色, 文字色) を3段階で返す（日本式: +赤 / -青）。
+
+    文字色は背景の明るさから決める（_readable_text_color）。塗りの濃さが
+    テーマで反転するため、白固定にするとライトで読めなくなる。
+    """
     rate = safe_float(profit_rate)
     if rate is None or rate == 0:
-        return _NEUTRAL_BG, _WHITE
+        return _with_readable_text(theme.TILE_NEUTRAL_BG)
     magnitude = abs(rate)
     if rate > 0:
         if magnitude >= 0.05:
-            return QColor("#c62828"), _WHITE
+            return _with_readable_text(theme.TILE_UP_STRONG)
         if magnitude >= 0.02:
-            return QColor("#8e2424"), _WHITE
-        return _WEAK_BG, _RED_TEXT
+            return _with_readable_text(theme.TILE_UP_MID)
+        return QColor(theme.TILE_WEAK_BG), QColor(theme.PROFIT_UP)
     if magnitude >= 0.05:
-        return QColor("#1565c0"), _WHITE
+        return _with_readable_text(theme.TILE_DOWN_STRONG)
     if magnitude >= 0.02:
-        return QColor("#1a3a6b"), _WHITE
-    return _WEAK_BG, _BLUE_TEXT
+        return _with_readable_text(theme.TILE_DOWN_MID)
+    return QColor(theme.TILE_WEAK_BG), QColor(theme.PROFIT_DOWN)
+
+
+def _with_readable_text(bg_token: str) -> tuple[QColor, QColor]:
+    bg = QColor(bg_token)
+    return bg, _readable_text_color(bg)
 
 
 def profit_text_qcolor(value: float | None) -> Optional[QColor]:
@@ -185,7 +186,7 @@ def profit_text_qcolor(value: float | None) -> Optional[QColor]:
     num = safe_float(value)
     if num is None or num == 0:
         return None
-    return QColor(PROFIT_UP) if num > 0 else QColor(PROFIT_DOWN)
+    return QColor(theme.PROFIT_UP if num > 0 else theme.PROFIT_DOWN)
 
 
 class TreemapWidget(QWidget):
@@ -235,10 +236,10 @@ class TreemapWidget(QWidget):
         painter = QPainter(self)
         painter.setRenderHint(QPainter.RenderHint.Antialiasing, False)
         rect = self.rect()
-        painter.fillRect(rect, QColor(CHART_BG))
+        painter.fillRect(rect, QColor(theme.CHART_BG))
 
         if not self._tiles or self._total <= 0:
-            painter.setPen(QPen(QColor("#9e9e9e")))
+            painter.setPen(QPen(QColor(theme.CHART_AXIS_TEXT)))
             painter.drawText(
                 rect,
                 Qt.AlignmentFlag.AlignCenter,
@@ -268,7 +269,7 @@ class TreemapWidget(QWidget):
                 bg = bg.lighter(115)
                 hover_rect = qrect
             painter.fillRect(qrect, bg)
-            painter.setPen(QPen(_BORDER, 1))
+            painter.setPen(QPen(QColor(theme.TILE_BORDER), 1))
             painter.drawRect(qrect.adjusted(0.5, 0.5, -0.5, -0.5))
 
             if rw >= 56 and rh >= 34:  # ラベルが収まる程度の矩形だけ描画
@@ -317,7 +318,7 @@ class TreemapWidget(QWidget):
                     )
         # ホバー枠は隣接タイルの枠線に潰されないよう、全タイル描画後に上描きする。
         if hover_rect is not None:
-            painter.setPen(QPen(_WHITE, 2))
+            painter.setPen(QPen(QColor(theme.TILE_HOVER_OUTLINE), 2))
             painter.drawRect(hover_rect.adjusted(1, 1, -1, -1))
         painter.end()
 
@@ -450,10 +451,10 @@ class PieChartWidget(QWidget):
         painter = QPainter(self)
         painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
         rect = self.rect()
-        painter.fillRect(rect, QColor(CHART_BG))
+        painter.fillRect(rect, QColor(theme.CHART_BG))
 
         if not self._tiles or self._total <= 0:
-            painter.setPen(QPen(QColor("#9e9e9e")))
+            painter.setPen(QPen(QColor(theme.CHART_AXIS_TEXT)))
             painter.drawText(
                 rect,
                 Qt.AlignmentFlag.AlignCenter,
@@ -477,7 +478,7 @@ class PieChartWidget(QWidget):
         for i, tile in enumerate(display_tiles):
             span = float(tile[self._value_key]) / self._total * 360.0
             painter.setBrush(colors[i])
-            painter.setPen(QPen(QColor(CHART_BG), 1.5))
+            painter.setPen(QPen(QColor(theme.CHART_BG), 1.5))
             painter.drawPie(pie_rect, int(current * 16), -int(span * 16))  # 負値 = 時計回り
             self._segments.append((current, span, tile))
             current -= span  # 時計回り = 角度を減算
@@ -485,7 +486,7 @@ class PieChartWidget(QWidget):
         # ドーナツの穴: 扇を描いた上から背景色で抜く（中央に合計を置くため）。
         # 扇の区切り線は中心へ向かうので、この円で一緒に隠れる。
         painter.setPen(Qt.PenStyle.NoPen)
-        painter.setBrush(QColor(CHART_BG))
+        painter.setBrush(QColor(theme.CHART_BG))
         painter.drawEllipse(QRectF(cx - r_in, cy - r_in, r_in * 2, r_in * 2))
 
         self._draw_slice_percents(painter, cx, cy, r, r_in, colors)
@@ -548,7 +549,7 @@ class PieChartWidget(QWidget):
                 # 「銘柄名(コード)」の1行。幅に収まらなければ末尾省略（金額と
                 # 構成比はスライス内の % とツールチップで読める）。
                 painter.setFont(lbl_font)
-                painter.setPen(QPen(QColor(TEXT_PRIMARY)))
+                painter.setPen(QPen(QColor(theme.TEXT_PRIMARY)))
                 text = painter.fontMetrics().elidedText(
                     _label_text(tile), Qt.TextElideMode.ElideRight, int(label_w)
                 )
@@ -623,7 +624,7 @@ class PieChartWidget(QWidget):
             return None
         sign = "+" if profit > 0 else ""
         text = f"{sign}{fmt_number(profit, 0)}円 ({sign}{fmt_percent(profit / book, 1)})"
-        return text, profit_text_qcolor(profit) or QColor(TEXT_SECONDARY)
+        return text, profit_text_qcolor(profit) or QColor(theme.TEXT_SECONDARY)
 
     def _draw_center(
         self, painter: QPainter, cx: float, cy: float, r_in: float
@@ -696,8 +697,8 @@ class PieChartWidget(QWidget):
                 continue
             rows: list[tuple[str, QFont, QColor, float]] = []
             if has_title:
-                rows.append((title, small_font, QColor(TEXT_SECONDARY), small_h))
-            rows.append((value_text, value_font, QColor(TEXT_BRIGHT), value_h))
+                rows.append((title, small_font, QColor(theme.TEXT_SECONDARY), small_h))
+            rows.append((value_text, value_font, QColor(theme.TEXT_BRIGHT), value_h))
             if profit is not None and has_profit:
                 rows.append((profit[0], small_font, profit[1], small_h))
             block_h = sum(h for _, _, _, h in rows)
@@ -859,10 +860,10 @@ class LineChartWidget(QWidget):
         painter = QPainter(self)
         painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
         rect = self.rect()
-        painter.fillRect(rect, QColor(CHART_BG))
+        painter.fillRect(rect, QColor(theme.CHART_BG))
 
         if not self._visible or not self._series or self._top <= self._floor:
-            painter.setPen(QPen(QColor("#9e9e9e")))
+            painter.setPen(QPen(QColor(theme.CHART_AXIS_TEXT)))
             painter.drawText(rect, Qt.AlignmentFlag.AlignCenter, self._empty_message)
             painter.end()
             return
@@ -876,9 +877,9 @@ class LineChartWidget(QWidget):
         for i in range(5):
             frac = i / 4.0
             y = plot.bottom() - plot.height() * frac
-            painter.setPen(QPen(QColor("#2f2f2f"), 1))
+            painter.setPen(QPen(QColor(theme.CHART_GRID), 1))
             painter.drawLine(int(plot.left()), int(y), int(plot.right()), int(y))
-            painter.setPen(QPen(QColor("#9e9e9e")))
+            painter.setPen(QPen(QColor(theme.CHART_AXIS_TEXT)))
             painter.drawText(
                 QRectF(0, y - 8, self._MARGIN_LEFT - 6, 16),
                 Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter,
@@ -887,7 +888,7 @@ class LineChartWidget(QWidget):
 
         # X 軸ラベル（最大 5 点の日付を等間隔に）
         n = len(self._visible)
-        painter.setPen(QPen(QColor("#9e9e9e")))
+        painter.setPen(QPen(QColor(theme.CHART_AXIS_TEXT)))
         label_count = min(5, n)
         for j in range(label_count):
             idx = 0 if label_count == 1 else round(j * (n - 1) / (label_count - 1))
@@ -923,7 +924,7 @@ class LineChartWidget(QWidget):
         # ホバー: 縦カーソル線 + 該当点マーカー
         if self._hover_idx is not None and 0 <= self._hover_idx < n:
             hx = self._x_for(self._hover_idx, plot)
-            painter.setPen(QPen(QColor("#6f6f6f"), 1, Qt.PenStyle.DashLine))
+            painter.setPen(QPen(QColor(theme.CHART_CURSOR), 1, Qt.PenStyle.DashLine))
             painter.drawLine(int(hx), int(plot.top()), int(hx), int(plot.bottom()))
             rec = self._visible[self._hover_idx]
             for _label, key, color in self._series:
@@ -932,7 +933,7 @@ class LineChartWidget(QWidget):
                     continue
                 hy = self._y_for(v, plot)
                 painter.setBrush(color)
-                painter.setPen(QPen(QColor(CHART_BG), 1))
+                painter.setPen(QPen(QColor(theme.CHART_BG), 1))
                 painter.drawEllipse(QRectF(hx - 3.5, hy - 3.5, 7, 7))
 
         # 凡例（右上）
@@ -946,7 +947,7 @@ class LineChartWidget(QWidget):
             lx = legend_x - row_w
             painter.setPen(QPen(color, 2))
             painter.drawLine(int(lx), int(legend_y + 7), int(lx + sw), int(legend_y + 7))
-            painter.setPen(QPen(QColor("#d0d0d0")))
+            painter.setPen(QPen(QColor(theme.CHART_LABEL_TEXT)))
             painter.drawText(
                 QRectF(lx + sw + 4, legend_y, text_w + 4, 14),
                 Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter,
@@ -1085,11 +1086,11 @@ class BarChartWidget(QWidget):
         painter = QPainter(self)
         painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
         rect = self.rect()
-        painter.fillRect(rect, QColor(CHART_BG))
+        painter.fillRect(rect, QColor(theme.CHART_BG))
 
         totals = [self._total_of(b) for b in self._buckets]
         if not self._buckets or not self._series or sum(totals) <= 0:
-            painter.setPen(QPen(QColor("#9e9e9e")))
+            painter.setPen(QPen(QColor(theme.CHART_AXIS_TEXT)))
             painter.drawText(rect, Qt.AlignmentFlag.AlignCenter, self._empty_message)
             painter.end()
             return
@@ -1107,7 +1108,7 @@ class BarChartWidget(QWidget):
                     continue
                 painter.fillRect(
                     QRectF(self._band_left(idx, plot), plot.top(), band, plot.height()),
-                    QColor(255, 255, 255, 16),
+                    QColor(theme.CHART_SELECTION_BG),
                 )
 
         # 横グリッド線 + Y 軸ラベル（0 〜 上限を 4 分割）
@@ -1115,9 +1116,9 @@ class BarChartWidget(QWidget):
         for i in range(5):
             frac = i / 4.0
             y = plot.bottom() - plot.height() * frac
-            painter.setPen(QPen(QColor("#2f2f2f"), 1))
+            painter.setPen(QPen(QColor(theme.CHART_GRID), 1))
             painter.drawLine(int(plot.left()), int(y), int(plot.right()), int(y))
-            painter.setPen(QPen(QColor("#9e9e9e")))
+            painter.setPen(QPen(QColor(theme.CHART_AXIS_TEXT)))
             painter.drawText(
                 QRectF(0, y - 8, self._MARGIN_LEFT - 6, 16),
                 Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter,
@@ -1143,7 +1144,7 @@ class BarChartWidget(QWidget):
                 baseline += value
 
         # 各棒の上に金額（万/億丸めだと月額の差が潰れるので実数のまま）
-        painter.setPen(QPen(QColor("#d0d0d0")))
+        painter.setPen(QPen(QColor(theme.CHART_LABEL_TEXT)))
         for idx, (bucket, total) in enumerate(zip(self._buckets, totals)):
             if total <= 0:
                 continue
@@ -1155,7 +1156,7 @@ class BarChartWidget(QWidget):
             )
 
         # X 軸ラベル（1月〜12月）
-        painter.setPen(QPen(QColor("#9e9e9e")))
+        painter.setPen(QPen(QColor(theme.CHART_AXIS_TEXT)))
         for idx, bucket in enumerate(self._buckets):
             painter.drawText(
                 QRectF(self._band_left(idx, plot), plot.bottom() + 4, band, 16),
@@ -1166,9 +1167,9 @@ class BarChartWidget(QWidget):
         # 月平均の水平線（按分できた年額 ÷ 12）
         if self._average and self._average > 0:
             ay = self._y_for(self._average, plot)
-            painter.setPen(QPen(QColor("#6f6f6f"), 1, Qt.PenStyle.DashLine))
+            painter.setPen(QPen(QColor(theme.CHART_CURSOR), 1, Qt.PenStyle.DashLine))
             painter.drawLine(int(plot.left()), int(ay), int(plot.right()), int(ay))
-            painter.setPen(QPen(QColor("#9e9e9e")))
+            painter.setPen(QPen(QColor(theme.CHART_AXIS_TEXT)))
             painter.drawText(
                 QRectF(plot.left(), 6, plot.width() / 2.0, 16),
                 Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter,
@@ -1186,7 +1187,7 @@ class BarChartWidget(QWidget):
         legend_y = 6
         for (label, _key, color), row_w in zip(self._series, widths):
             painter.fillRect(QRectF(legend_x, legend_y + 3, sw, 10), color)
-            painter.setPen(QPen(QColor("#d0d0d0")))
+            painter.setPen(QPen(QColor(theme.CHART_LABEL_TEXT)))
             painter.drawText(
                 QRectF(legend_x + sw + 4, legend_y, row_w - sw, 16),
                 Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter,

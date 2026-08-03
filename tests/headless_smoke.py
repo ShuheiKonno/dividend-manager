@@ -44,6 +44,7 @@ def _check_actions(w) -> None:
     actions = w._actions
     for key in ("update_market", "update_fx", "reload", "new", "edit", "delete",
                 "toggle_mode", "toggle_withdrawal", "toggle_inactive",
+                "theme_dark", "theme_light",
                 "change_data_dir", "open_data_dir", "create_shortcut", "quit"):
         assert key in actions, f"アクション {key} が無い: {sorted(actions)}"
 
@@ -182,6 +183,34 @@ def _check_inactive_toggle(w) -> None:
         assert after_rows <= before_rows, "非表示にしたのに行が増えた"
     w.action_toggle_inactive()  # 元へ戻す（設定を汚さない）
     assert w.show_inactive is before_state
+
+
+def _check_theme_toggle(w) -> None:
+    """テーマ切替が QSS・チャート配色・チェック状態へ届くこと。
+
+    色トークンを値で import している箇所があると、QSS だけ切り替わってチャートや
+    表の文字色が旧テーマのまま取り残される（エラーは出ない）。切替後に描画側の
+    ヘルパーが返す色まで突き合わせて、その退行を捕まえる。
+    """
+    from src import theme, widgets
+
+    original = w.theme_name
+    other = next(t for t in theme.THEMES if t != original)
+
+    w.action_set_theme(other)
+    assert w.theme_name == other and theme.CURRENT_THEME == other
+    assert w._actions[f"theme_{other}"].isChecked(), "切替後のテーマにチェックが付かない"
+    assert not w._actions[f"theme_{original}"].isChecked(), "旧テーマのチェックが残っている"
+    assert theme.PALETTES[other]["BG_WINDOW"] in w.styleSheet(), "QSS が切り替わっていない"
+    # 描画時に theme を読んでいるか（値 import していないか）の突合
+    assert widgets.profit_text_qcolor(1.0).name() == theme.PALETTES[other]["PROFIT_UP"]
+    assert gui.asset_trend_series()[0][2].name() == theme.PALETTES[other]["SERIES_VALUE"]
+    assert gui.monthly_series()[0][2].name() == theme.PALETTES[other]["SERIES_DIVIDEND"]
+
+    w.action_set_theme(original)  # 設定（theme）を元へ戻す
+    assert w.theme_name == original
+    assert theme.PALETTES[original]["BG_WINDOW"] in w.styleSheet()
+    assert widgets.profit_text_qcolor(-1.0).name() == theme.PALETTES[original]["PROFIT_DOWN"]
 
 
 def _check_account_combo() -> None:
@@ -448,6 +477,9 @@ def main() -> None:
     assert w._actions["create_shortcut"].isEnabled() is (sys.platform == "win32"), (
         "ショートカット作成の可否がプラットフォームと合っていない"
     )
+    # 表示メニュー: テーマ（ダーク / ライト）はここが唯一の切替導線
+    view_actions = [a.text() for a in menus[2].menu().actions() if a.text()]
+    assert any("テーマ" in t for t in view_actions), f"表示にテーマが無い: {view_actions}"
     help_actions = [a.text() for a in menus[3].menu().actions() if a.text()]
     assert any("ショートカット" in t for t in help_actions), help_actions
 
@@ -466,6 +498,7 @@ def main() -> None:
     _check_inactive_toggle(w)
     _check_monthly_tab(w)
     _check_withdrawal_trend_note(w)
+    _check_theme_toggle(w)
 
     # 編集ダイアログ: 即時バリデーション（赤枠プロパティ＋集約エラーラベル）
     dlg = EditHoldingDialog(_holding())

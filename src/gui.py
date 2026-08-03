@@ -14,6 +14,7 @@ from typing import Optional
 from PySide6.QtCore import Qt, QObject, QThread, Signal, QSortFilterProxyModel, QRect, QUrl
 from PySide6.QtGui import (
     QAction,
+    QActionGroup,
     QDesktopServices,
     QStandardItemModel,
     QStandardItem,
@@ -91,13 +92,9 @@ from .history import (
 )
 # market_data は yfinance / ToushinReader / pandas を芋づる式に読み込み起動を数秒遅らせる。
 # 取得は p / u キーのワーカースレッドでしか走らないため、import を run() 内へ遅延させる。
-from .theme import (
-    ACCENT,
-    build_app_qss,
-    FONT_FAMILY_PRIMARY,
-    FONT_SIZE_PT,
-    TEXT_DISABLED,
-)
+# 配色はテーマ切替で張り替わる「現在値」なので、値で import せず theme.X で
+# 参照する（値 import すると切替後も旧テーマの色を使い続ける）。
+from . import theme
 from .utils import fmt_number, fmt_percent, now_jst, safe_float, today_jst_str
 from .widgets import (
     BarChartWidget,
@@ -147,19 +144,34 @@ ASSET_TYPE_LABELS = {"stock": "株式", "fund": "投信"}
 WITHDRAWAL_CHOICES = [("none", "配当"), ("fixed", "定額取崩"), ("rate", "定率取崩")]
 # 収入モード → 表示ラベル（情報バー・KPI タイトル用）
 WITHDRAWAL_LABELS = {None: "配当", "fixed": "定額取崩", "rate": "定率取崩"}
-# 評価額タブの推移系列 (ラベル, history キー, 線色)。評価額＋簿価の2本固定。
-ASSET_TREND_SERIES = [
-    ("評価額", "total_market_value_jpy", QColor("#42a5f5")),
-    ("簿価", "total_book_value_jpy", QColor("#9e9e9e")),
-]
-# 配当タブの推移は優待/取崩の選択で合成した単一系列（_refresh_trend で構築）。
-INCOME_TREND_COLOR = QColor("#66bb6a")
-# 月別配当タブの積み上げ系列 (ラベル, バケットのキー, 塗り色)。下から順に積む。
-# 緑は配当推移の線が使っているため、優待は橙にして系列の取り違えを避ける。
-MONTHLY_SERIES = [
-    ("配当", "dividend_jpy", QColor(ACCENT)),
-    ("優待", "benefit_jpy", QColor("#ffa726")),
-]
+# チャートの系列色はテーマで変わるため、モジュール定数に QColor を焼き込まず
+# 描画のたびに theme から作る（定数にすると切替後も旧テーマの色で描かれる）。
+
+
+def asset_trend_series() -> list[tuple[str, str, QColor]]:
+    """評価額タブの推移系列 (ラベル, history キー, 線色)。評価額＋簿価の2本固定。"""
+    return [
+        ("評価額", "total_market_value_jpy", QColor(theme.SERIES_VALUE)),
+        ("簿価", "total_book_value_jpy", QColor(theme.SERIES_BOOK)),
+    ]
+
+
+def income_trend_color() -> QColor:
+    """配当タブの推移は優待/取崩の選択で合成した単一系列（_refresh_trend で構築）。"""
+    return QColor(theme.SERIES_INCOME)
+
+
+def monthly_series() -> list[tuple[str, str, QColor]]:
+    """月別配当タブの積み上げ系列 (ラベル, バケットのキー, 塗り色)。下から順に積む。
+
+    緑は配当推移の線が使っているため、優待は橙にして系列の取り違えを避ける。
+    """
+    return [
+        ("配当", "dividend_jpy", QColor(theme.SERIES_DIVIDEND)),
+        ("優待", "benefit_jpy", QColor(theme.SERIES_BENEFIT)),
+    ]
+
+
 # 月別内訳リストの列。編集導線を持たない読み取り専用テーブル。
 MONTHLY_COLUMNS = [
     ("コード", "symbol"),
@@ -214,7 +226,7 @@ def _format_cell(row: dict, key: str) -> tuple[str, Optional[QColor]]:
     """
     text, color = _cell_text_and_color(row, key)
     if row.get("active") is False:
-        return text, QColor(TEXT_DISABLED)
+        return text, QColor(theme.TEXT_DISABLED)
     return text, color
 
 
@@ -329,6 +341,9 @@ class DividendWindow(QMainWindow):
         self.setWindowTitle("配当管理")
 
         _saved = load_settings()
+        # テーマは QSS・チャート配色の前提なので、ウィジェットを1つも作る前に
+        # 適用する（_build_ui / KpiCard より後だと初回描画だけ旧配色になる）。
+        self.theme_name: str = theme.set_theme(_saved.get("theme", theme.DEFAULT_THEME))
         self._restore_window_geometry(_saved.get("window_geometry"))
         self.dividend_mode: str = _saved.get("dividend_mode", "gross")
         self.withdrawal_mode: str | None = _saved.get("withdrawal_mode", None)
@@ -378,7 +393,7 @@ class DividendWindow(QMainWindow):
 
         self._build_ui()
         self._register_shortcuts()
-        self._apply_dark_title_bar()
+        self._apply_title_bar_theme()
 
         # 設定されたデータフォルダが書けない（外付けドライブを外した・権限が無い）
         # 場合は既定フォルダへ落として必ずウィンドウを出す。ここで例外のまま落ちると
@@ -436,13 +451,18 @@ class DividendWindow(QMainWindow):
             for col in range(header.count())
         ]
 
-    def _apply_dark_title_bar(self) -> None:
-        """Windows のタイトルバーをダーク化する（DWM API、失敗しても無害）。"""
+    def _apply_title_bar_theme(self) -> None:
+        """Windows のタイトルバーを現在のテーマに合わせる（DWM API、失敗しても無害）。
+
+        QSS はクライアント領域までしか効かないため、タイトルバーだけ別 API で
+        切り替える。テーマ変更のたびに呼び直すこと（呼ばないと本体がライトでも
+        タイトルバーだけ黒いままになる）。
+        """
         try:
             import ctypes
 
             hwnd = int(self.winId())
-            value = ctypes.c_int(1)
+            value = ctypes.c_int(1 if theme.is_dark() else 0)
             # 20 = DWMWA_USE_IMMERSIVE_DARK_MODE（Win10 20H1 以降 / Win11）
             ctypes.windll.dwmapi.DwmSetWindowAttribute(
                 ctypes.c_void_p(hwnd), 20, ctypes.byref(value), ctypes.sizeof(value)
@@ -452,10 +472,10 @@ class DividendWindow(QMainWindow):
 
     # ---- UI 構築 ----
     def _build_ui(self) -> None:
-        # アプリ全体をダークに統一（TreemapWidget の濃色背景と整合させ、
-        # Win11 既定ライトテーマとの混在を避ける。テーマ切替は対象外＝固定）。
         # 配色・フォント等のトークンと QSS 生成は src/theme.py に集約。
-        self.setStyleSheet(build_app_qss())
+        # ダーク / ライトは「表示」→「テーマ」で切り替える（action_set_theme が
+        # ここと同じ build_app_qss() を再適用する）。
+        self.setStyleSheet(theme.build_app_qss())
         # QAction はメニュー・ツールバー・ショートカットの共有元なので最初に作る。
         self._build_actions()
         self._build_menubar()
@@ -600,6 +620,22 @@ class DividendWindow(QMainWindow):
         self.addAction(inactive)
         self._actions["toggle_inactive"] = inactive
 
+        # テーマ（ダーク / ライト）は排他選択。QActionGroup に入れて現在の
+        # テーマだけにチェックが付くようにする（トグル1個だと「今どちらか」が
+        # メニューを開いても読み取れない）。
+        self._theme_group = QActionGroup(self)
+        self._theme_group.setExclusive(True)
+        for name in theme.THEMES:
+            action = QAction(theme.theme_label(name), self)
+            action.setCheckable(True)
+            action.setChecked(name == self.theme_name)
+            action.setActionGroup(self._theme_group)
+            action.triggered.connect(
+                lambda _checked=False, n=name: self.action_set_theme(n)
+            )
+            self.addAction(action)
+            self._actions[f"theme_{name}"] = action
+
         for index, label in enumerate(self._TAB_ACTION_LABELS):
             action = QAction(label, self)
             action.setShortcut(QKeySequence(f"Ctrl+{index + 1}"))
@@ -646,6 +682,10 @@ class DividendWindow(QMainWindow):
         view_menu.addAction(act["toggle_mode"])
         view_menu.addAction(act["toggle_withdrawal"])
         view_menu.addAction(act["toggle_inactive"])
+        view_menu.addSeparator()
+        theme_menu = view_menu.addMenu("テーマ")
+        for name in theme.THEMES:
+            theme_menu.addAction(act[f"theme_{name}"])
         view_menu.addSeparator()
         view_menu.addAction(act["focus_filter"])
         view_menu.addSeparator()
@@ -1338,7 +1378,7 @@ class DividendWindow(QMainWindow):
         """
         hist_dicts = self._history_as_dicts()
         self._asset_line.set_data(
-            hist_dicts, ASSET_TREND_SERIES,
+            hist_dicts, asset_trend_series(),
             empty_message="評価額の履歴がありません（株価更新か『インポート』で記録されます）",
         )
         with_benefit = self.income_benefit == "with"
@@ -1350,7 +1390,7 @@ class DividendWindow(QMainWindow):
         ]
         label = self._income_trend_label(with_benefit, mode)
         self._income_line.set_data(
-            income_dicts, [(label, "income_value", INCOME_TREND_COLOR)],
+            income_dicts, [(label, "income_value", income_trend_color())],
             empty_message="配当の履歴がありません（株価更新か『インポート』で記録されます）",
         )
         self._income_trend_note.setText(
@@ -1701,7 +1741,7 @@ class DividendWindow(QMainWindow):
         ]
         self._monthly_bar.set_data(
             buckets,
-            MONTHLY_SERIES if with_benefit else MONTHLY_SERIES[:1],
+            monthly_series() if with_benefit else monthly_series()[:1],
             average=(
                 self._monthly.monthly_average_jpy if with_benefit
                 else self._monthly.known_dividend_jpy / 12.0
@@ -1930,6 +1970,33 @@ class DividendWindow(QMainWindow):
             if self.show_inactive
             else "無効銘柄を非表示にしました"
         )
+
+    def action_set_theme(self, name: str) -> None:
+        """表示テーマ（ダーク / ライト）を切り替えて設定へ保存する。
+
+        QSS を作り直して貼り直すだけではチャートは変わらない（描画時に theme を
+        読むため）ので、_refresh_view() で全ウィジェットを描き直す。タイトルバーは
+        QSS の外なので DWM 側も切り替える。
+        """
+        applied = theme.set_theme(name)
+        if applied == self.theme_name:
+            self._sync_theme_actions()
+            return
+        self.theme_name = applied
+        self.setStyleSheet(theme.build_app_qss())
+        self._apply_title_bar_theme()
+        self._sync_theme_actions()
+        self._save_or_notify(lambda: save_settings(theme=applied))
+        self._refresh_view()
+        self._notify(f"テーマを「{theme.theme_label(applied)}」に切り替えました")
+
+    def _sync_theme_actions(self) -> None:
+        """テーマのチェック状態を現在値へ揃える（未知の設定値で開いた場合の保険）。"""
+        for name in theme.THEMES:
+            action = self._actions.get(f"theme_{name}")
+            if action is not None:
+                # setChecked は triggered を発火しないので再入しない。
+                action.setChecked(name == self.theme_name)
 
     def _active_tab_key(self) -> str:
         # タブ構成: [評価額(0), 配当金(1), 月別配当(2), 株価詳細(3), 配当詳細(4)]。
@@ -2226,7 +2293,7 @@ def _ensure_app() -> QApplication:
     _apply_app_icon(app)
     # QSS の font-family は QPainter 直描画（チャート類の self.font()）へ
     # 反映されないため、アプリ既定フォントも同じ族で揃える。
-    app.setFont(QFont(FONT_FAMILY_PRIMARY, FONT_SIZE_PT))
+    app.setFont(QFont(theme.FONT_FAMILY_PRIMARY, theme.FONT_SIZE_PT))
     return app
 
 
