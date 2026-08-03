@@ -480,6 +480,20 @@ def _check_benefit_detail() -> None:
     # 自由記述なので数値ソート対象にしない（UserRole に生値を入れない列）
     assert "benefit_detail" not in gui.NUMERIC_SORT_COLUMNS
 
+    # 初期幅に上限を当てる。青天井だと長い優待内容1件で右側の数値列が画面外へ出る
+    # （この表は setStretchLastSection(False) で内容幅のまま並べるため余白が無い）。
+    from PySide6.QtGui import QStandardItemModel
+    from PySide6.QtWidgets import QTableView
+
+    view = QTableView()
+    view.setModel(QStandardItemModel(1, len(gui.MONTHLY_COLUMNS)))
+    detail_col = [k for _, k in gui.MONTHLY_COLUMNS].index("benefit_detail")
+    view.setColumnWidth(detail_col, 900)
+    view.setColumnWidth(0, 900)  # 自由記述でない列は対象外
+    gui.clamp_free_text_columns(view, gui.MONTHLY_COLUMNS)
+    assert view.columnWidth(detail_col) == gui.FREE_TEXT_COLUMN_MAX_WIDTH
+    assert view.columnWidth(0) == 900, "自由記述でない列まで縮めている"
+
 
 def main() -> None:
     w = build_window()

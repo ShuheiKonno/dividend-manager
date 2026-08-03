@@ -195,6 +195,13 @@ MONTHLY_COL_BENEFIT = _MONTHLY_COL["benefit_jpy"]
 # 見出しの合計（配当のみ）と表に見えているものが食い違う。
 MONTHLY_COL_BENEFIT_DETAIL = _MONTHLY_COL["benefit_detail"]
 MONTHLY_COL_TOTAL = _MONTHLY_COL["total_jpy"]
+# 自由記述の列（長さが青天井になり得る）。表は setStretchLastSection(False) で
+# 内容幅のまま並べる方針なので、resizeColumnsToContents に任せると長い優待内容が
+# 1件あるだけで右側の数値列が画面外へ押し出される（実測: 35文字で 426px）。
+# 初期幅だけ上限を当て、手動で広げる余地とツールチップでの全文表示を残す。
+FREE_TEXT_COLUMNS = {"benefit_detail"}
+FREE_TEXT_COLUMN_MAX_WIDTH = 280
+
 NUMERIC_SORT_COLUMNS = {
     "shares",
     "avg_cost",
@@ -212,6 +219,17 @@ NUMERIC_SORT_COLUMNS = {
     "benefit_jpy",
     "total_jpy",
 }
+
+
+def clamp_free_text_columns(view: QTableView, columns: list[tuple[str, str]]) -> None:
+    """自由記述列の幅を上限で頭打ちにする（自動調整の直後にだけ呼ぶ）。
+
+    保存済みの列幅を復元した場合は呼ばない——ユーザーが広げた幅を起動のたびに
+    縮めることになる。
+    """
+    for index, (_label, key) in enumerate(columns):
+        if key in FREE_TEXT_COLUMNS and view.columnWidth(index) > FREE_TEXT_COLUMN_MAX_WIDTH:
+            view.setColumnWidth(index, FREE_TEXT_COLUMN_MAX_WIDTH)
 
 
 def row_for_holding_index(stored_indices: list[int], holding_idx: int) -> int | None:
@@ -1841,6 +1859,8 @@ class DividendWindow(QMainWindow):
                     )
                 else:
                     cell = QStandardItem(str(value))
+                    if key in FREE_TEXT_COLUMNS and value:
+                        cell.setToolTip(str(value))
                 cells.append(cell)
             self._monthly_model.appendRow(cells)
         self._apply_monthly_sort()
@@ -1850,6 +1870,7 @@ class DividendWindow(QMainWindow):
         if items and not self._monthly_columns_sized:
             self._monthly_columns_sized = True
             self._monthly_view.resizeColumnsToContents()
+            clamp_free_text_columns(self._monthly_view, MONTHLY_COLUMNS)
 
     def _render_table(self, tab_key, columns, model, view, rows, holding_indices: list[int] | None = None) -> None:
         state = self._capture_table_state(tab_key)
@@ -1869,6 +1890,9 @@ class DividendWindow(QMainWindow):
                     item.setTextAlignment(
                         Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter
                     )
+                if key in FREE_TEXT_COLUMNS and text:
+                    # 列幅の上限で切れた分をツールチップで読めるようにする。
+                    item.setToolTip(text)
                 if color is not None:
                     item.setForeground(color)
                 items.append(item)
@@ -1876,10 +1900,12 @@ class DividendWindow(QMainWindow):
             stored_indices.append(holding_indices[i] if holding_indices is not None else i)
         self.row_holding_indices[tab_key] = stored_indices
         view.sortByColumn(sort_col, sort_order)
-        self._size_columns_once(tab_key, view)
+        self._size_columns_once(tab_key, view, columns)
         self._restore_table_state(tab_key, state)
 
-    def _size_columns_once(self, tab_key: str, view: QTableView) -> None:
+    def _size_columns_once(
+        self, tab_key: str, view: QTableView, columns: list[tuple[str, str]]
+    ) -> None:
         """列幅を初回描画時のみ調整する（以降はユーザーの手動調整幅を維持）。
 
         保存済みの列幅（前回終了時）があればそれを適用し、無ければ内容に合わせる。
@@ -1896,6 +1922,8 @@ class DividendWindow(QMainWindow):
                 header.resizeSection(col, width)
         else:
             view.resizeColumnsToContents()
+            # 保存値を使ったときは当てない（ユーザーが広げた幅を縮めてしまう）。
+            clamp_free_text_columns(view, columns)
 
     def _capture_table_state(self, tab_key: str) -> dict:
         """再描画前の選択行（holdings インデックス）とスクロール位置を取得する。"""
