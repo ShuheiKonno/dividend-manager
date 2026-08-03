@@ -285,6 +285,18 @@ def test_settings_show_inactive_roundtrip(monkeypatch, tmp_path):
     assert io_csv.load_settings()["show_inactive"] is False
 
 
+def test_settings_theme_roundtrip(monkeypatch, tmp_path):
+    """表示テーマが往復し、未知の値は拒否されること（許容値は theme.THEMES）。"""
+    from src import theme
+
+    _configure_tmp_dirs(monkeypatch, tmp_path)
+    for name in theme.THEMES:
+        io_csv.save_settings(theme=name)
+        assert io_csv.load_settings()["theme"] == name
+    io_csv.save_settings(theme="solarized")  # 未知のテーマは拒否
+    assert io_csv.load_settings()["theme"] == theme.THEMES[-1]
+
+
 def test_settings_pie_threshold_and_column_widths(monkeypatch, tmp_path):
     _configure_tmp_dirs(monkeypatch, tmp_path)
     io_csv.save_settings(

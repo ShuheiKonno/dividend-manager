@@ -81,7 +81,7 @@ def test_format_cell_dims_inactive_rows_over_profit_color():
     _, active_color = gui._format_cell(active, "profit_jpy")
     text, inactive_color = gui._format_cell(inactive, "profit_jpy")
     assert active_color is not None and active_color.name() != inactive_color.name()
-    assert inactive_color.name() == gui.TEXT_DISABLED
+    assert inactive_color.name() == gui.theme.TEXT_DISABLED
     assert text == "1,000"  # 表示文字列は淡色化で変わらない
     # active キーが無い行（無効銘柄を含めない既定パス）は従来どおり損益色
     assert gui._format_cell({"profit_jpy": 1000.0}, "profit_jpy")[1] is not None

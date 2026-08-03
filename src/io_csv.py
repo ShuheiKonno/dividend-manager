@@ -18,6 +18,7 @@ from .models import (
     FXRate,
     HistoryRecord,
 )
+from .theme import THEMES as _THEMES  # 設定 "theme" の許容値（Qt 非依存）
 from .utils import now_jst, normalize_iso_date
 
 # データフォルダはユーザーが変更できる（set_data_dir）。以下は定数ではなく
@@ -323,6 +324,8 @@ _SETTINGS_VALIDATORS: dict[str, set | Callable[[object], bool]] = {
     "column_widths_income": _is_column_widths,
     # 無効（active=false）銘柄をテーブルに表示するか。既定 False。
     "show_inactive": lambda v: isinstance(v, bool),
+    # 表示テーマ（ダーク / ライト）。許容値は theme.THEMES が唯一の定義元。
+    "theme": set(_THEMES),
 }
 
 
