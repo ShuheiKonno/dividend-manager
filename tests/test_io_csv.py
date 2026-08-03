@@ -142,11 +142,19 @@ def test_export_holdings_csv_roundtrips(monkeypatch, tmp_path):
     target = tmp_path / "holdings.csv"
     holdings = [
         # 月リストはカンマを含むため、csv のクォート往復もここで確認する。
-        _holding("7203", dividend_months=[6, 12], benefit_months=[3]),
+        # 優待内容もカンマを含み得る自由記述（クォート往復の対象）。
+        _holding(
+            "7203",
+            dividend_months=[6, 12],
+            benefit_months=[3],
+            benefit_detail="クオカード1,000円分",
+        ),
         _holding("AAPL", currency="USD", account="NISA"),
     ]
     io_csv.export_holdings_csv(target, holdings)
-    assert '"6,12"' in target.read_text(encoding="utf-8-sig")
+    text = target.read_text(encoding="utf-8-sig")
+    assert '"6,12"' in text
+    assert '"クオカード1,000円分"' in text
     rows = io_csv._read_csv(target)
     restored = [Holding.from_dict(r) for r in rows]
     assert restored == holdings

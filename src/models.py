@@ -36,6 +36,7 @@ HOLDINGS_FIELDS = [
     "active",
     "dividend_months",
     "benefit_months",
+    "benefit_detail",
 ]
 
 MARKET_DATA_FIELDS = [
@@ -102,6 +103,10 @@ class Holding:
     dividend_months: list[int] = field(default_factory=list)
     # 優待の受取月（1〜12）。優待には自動判定の材料が無いため常に手動。
     benefit_months: list[int] = field(default_factory=list)
+    # 優待内容の自由記述（例「クオカード1,000円分」）。金額（annual_benefit_jpy）を
+    # 見ただけでは何の優待か分からないため、表示専用のメモとして持つ。
+    # 未設定は None ではなく "" で表す（表示層で毎回 None を潰さずに済む）。
+    benefit_detail: str = ""
 
     @classmethod
     def from_dict(cls, row: dict[str, Any]) -> "Holding":
@@ -129,6 +134,9 @@ class Holding:
             active=str(row.get("active", "true")).strip().lower() != "false",
             dividend_months=parse_months(row.get("dividend_months")),
             benefit_months=parse_months(row.get("benefit_months")),
+            # safe_str は未設定を None にするが、この項目は "" を空とする
+            # （表示層・CSV の双方で None 判定を増やさないため）。
+            benefit_detail=str(row.get("benefit_detail") or "").strip(),
         )
 
     def to_dict(self) -> dict[str, Any]:
@@ -151,6 +159,7 @@ class Holding:
             "active": "true" if self.active else "false",
             "dividend_months": format_months(self.dividend_months),
             "benefit_months": format_months(self.benefit_months),
+            "benefit_detail": self.benefit_detail,
         }
 
 

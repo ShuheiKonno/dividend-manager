@@ -65,6 +65,7 @@ def _row(**overrides) -> dict:
         dividend_month_ratios={6: 0.5, 12: 0.5},
         dividend_months_manual=False,
         benefit_months=[],
+        benefit_detail="",
     )
     base.update(overrides)
     return base
@@ -176,6 +177,28 @@ def test_dividend_and_benefit_in_same_month_share_one_item():
     assert june.items[0].benefit_jpy == 500.0
     assert june.items[0].total_jpy == 1500.0
     assert june.total_jpy == 1500.0
+
+
+def test_benefit_detail_only_on_months_that_receive_the_benefit():
+    """優待内容は優待が入る月の行にだけ載る。
+
+    配当だけの月にも書くと「優待 ¥0」の隣に商品券の説明が並び、その月に受け取れる
+    ように読める（金額と説明が食い違う）。
+    """
+    result = monthly_breakdown([
+        _row(
+            annual_dividend_jpy=1200.0,
+            dividend_month_ratios={6: 0.5, 12: 0.5},
+            annual_benefit_jpy=3000.0,
+            benefit_months=[3],
+            benefit_detail="クオカード3,000円分",
+        )
+    ])
+    march = result.buckets[2]
+    june = result.buckets[5]
+    assert march.items[0].benefit_detail == "クオカード3,000円分"
+    assert june.items[0].benefit_jpy == 0.0
+    assert june.items[0].benefit_detail == "", june.items[0].benefit_detail
 
 
 def test_na_dividend_is_not_counted_as_zero():

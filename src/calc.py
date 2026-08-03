@@ -282,6 +282,9 @@ def compute_rows(
                 "dividend_month_ratios": resolve_payment_month_ratios(holding, market),
                 "dividend_months_manual": bool(holding.dividend_months),
                 "benefit_months": resolve_benefit_months(holding),
+                # 優待内容（自由記述）。金額だけでは何の優待か分からないので
+                # 表示側が金額の隣に出せるよう row へ載せる。
+                "benefit_detail": holding.benefit_detail,
             }
         )
 
@@ -358,6 +361,9 @@ class MonthlyItem:
     # 配当側のみを指す。権利落ち月からの推定なら True、銘柄で支払月を明示して
     # いれば False。優待は常に手動なので判定に含めない。
     estimated: bool
+    # 優待内容（自由記述）。**その月に優待が入る行だけ**に載せる。配当だけの月へ
+    # 書くと「優待 ¥0」の隣に商品券の説明が並び、その月に受け取れるように読める。
+    benefit_detail: str = ""
 
 
 @dataclass
@@ -430,6 +436,7 @@ def monthly_breakdown(rows: Iterable[dict]) -> MonthlyBreakdown:
         name = str(row.get("name") or "")
         account = str(row.get("account") or "")
         estimated = not row.get("dividend_months_manual")
+        benefit_detail = str(row.get("benefit_detail") or "")
 
         # 月ごとの取り分をここでまとめてから items へ落とす（同じ銘柄が配当と優待で
         # 同じ月に来たとき、行を2つに割らず1行にする）。
@@ -475,6 +482,8 @@ def monthly_breakdown(rows: Iterable[dict]) -> MonthlyBreakdown:
                     benefit_jpy=ben_part,
                     total_jpy=div_part + ben_part,
                     estimated=estimated,
+                    # 優待が無い月は空にする（説明と金額を必ず一致させる）。
+                    benefit_detail=benefit_detail if ben_part else "",
                 )
             )
 

@@ -399,6 +399,16 @@ def test_rows_prefer_manual_months_over_market():
     assert rows[0]["benefit_months"] == [12]
 
 
+def test_rows_expose_benefit_detail():
+    """優待内容（自由記述）が加工されず row へ載ること。"""
+    h = _holding(annual_benefit_jpy=3_000.0, benefit_detail="クオカード3,000円分")
+    rows, _ = compute_rows([h], {}, 150.0, "gross")
+    assert rows[0]["benefit_detail"] == "クオカード3,000円分"
+    # 未設定は None ではなく空文字（表示層で毎回 None を潰さずに済む）
+    rows2, _ = compute_rows([_holding()], {}, 150.0, "gross")
+    assert rows2[0]["benefit_detail"] == ""
+
+
 def test_rows_month_ratios_none_when_unknown():
     h = _holding(annual_div_ps_gross_override=60.0)
     rows, _ = compute_rows([h], {"7203": _market()}, 150.0, "gross")

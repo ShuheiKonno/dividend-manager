@@ -113,6 +113,13 @@ def test_month_fields_roundtrip():
     assert restored == h
 
 
+def test_benefit_detail_roundtrips_and_strips():
+    """優待内容が往復し、前後の空白だけ落ちること（中身は加工しない）。"""
+    h = _full_holding(benefit_detail="  クオカード1,000円分  ")
+    restored = Holding.from_dict(h.to_dict())
+    assert restored.benefit_detail == "クオカード1,000円分"
+
+
 def test_month_fields_are_normalized_on_write():
     """順不同・重複・範囲外を含む入力が昇順の正規形へ寄ること。"""
     h = _full_holding(dividend_months=[12, 6, 6, 0, 13])
@@ -124,9 +131,11 @@ def test_legacy_rows_without_month_columns():
     row = _full_holding().to_dict()
     del row["dividend_months"]
     del row["benefit_months"]
+    del row["benefit_detail"]
     restored = Holding.from_dict(row)
     assert restored.dividend_months == []
     assert restored.benefit_months == []
+    assert restored.benefit_detail == ""  # None ではなく空文字（表示層の None 判定を増やさない）
 
     market_row = MarketData(
         symbol="7203",
