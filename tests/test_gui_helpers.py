@@ -250,3 +250,128 @@ def test_import_holdings_declined_keeps_current(monkeypatch, tmp_path):
     gui.DividendWindow.action_import_holdings(stub)
     assert saved["called"] is False
     assert stub.reloaded is False
+
+
+# ---- データフォルダの変更（QFileDialog / QMessageBox をスタブ化して本体を実行） ----
+
+
+def _data_dir_stub(monkeypatch, tmp_path, holdings=(), history=()):
+    """action_change_data_dir を unbound 呼び出しするための土台を用意する。
+
+    現在のデータフォルダ・set_data_dir・copy_data_files・init_empty_files を
+    すべて差し替え、実ユーザーの %APPDATA% と data/ を触らせない。
+    """
+    current = tmp_path / "current"
+    current.mkdir()
+    monkeypatch.setattr(io_csv, "DATA_DIR", current)
+    calls: dict = {"set": [], "copied": [], "init": 0}
+    monkeypatch.setattr(gui, "set_data_dir", lambda p: calls["set"].append(p))
+    monkeypatch.setattr(gui, "copy_data_files", lambda s, d: calls["copied"].append((s, d)))
+    monkeypatch.setattr(gui, "init_empty_files", lambda: calls.update(init=calls["init"] + 1))
+    stub = _io_stub(list(holdings), list(history))
+    stub._busy = False
+    return stub, current, calls
+
+
+def _answer(monkeypatch, button):
+    monkeypatch.setattr(gui.QMessageBox, "question", lambda *a, **k: button)
+
+
+def test_change_data_dir_copies_into_empty_folder(monkeypatch, tmp_path):
+    """空フォルダを選び「はい」なら、現在のデータをコピーしてから切り替えること。"""
+    stub, current, calls = _data_dir_stub(monkeypatch, tmp_path, [_holding()])
+    target = tmp_path / "empty"
+    target.mkdir()
+    monkeypatch.setattr(gui.QFileDialog, "getExistingDirectory", lambda *a, **k: str(target))
+    _answer(monkeypatch, gui.QMessageBox.StandardButton.Yes)
+
+    gui.DividendWindow.action_change_data_dir(stub)
+    assert calls["copied"] == [(current, target)]
+    assert calls["set"] == [target]
+    assert calls["init"] == 1
+    assert stub.reloaded is True
+
+
+def test_change_data_dir_without_copy_starts_empty(monkeypatch, tmp_path):
+    """空フォルダで「いいえ」なら、コピーせず切り替えること（空で開始）。"""
+    stub, _current, calls = _data_dir_stub(monkeypatch, tmp_path, [_holding()])
+    target = tmp_path / "empty"
+    target.mkdir()
+    monkeypatch.setattr(gui.QFileDialog, "getExistingDirectory", lambda *a, **k: str(target))
+    _answer(monkeypatch, gui.QMessageBox.StandardButton.No)
+
+    gui.DividendWindow.action_change_data_dir(stub)
+    assert calls["copied"] == []
+    assert calls["set"] == [target]
+    assert stub.reloaded is True
+
+
+def test_change_data_dir_cancel_keeps_current(monkeypatch, tmp_path):
+    """確認をキャンセルしたら、コピーも切替も再読込もしないこと。"""
+    stub, _current, calls = _data_dir_stub(monkeypatch, tmp_path, [_holding()])
+    target = tmp_path / "empty"
+    target.mkdir()
+    monkeypatch.setattr(gui.QFileDialog, "getExistingDirectory", lambda *a, **k: str(target))
+    _answer(monkeypatch, gui.QMessageBox.StandardButton.Cancel)
+
+    gui.DividendWindow.action_change_data_dir(stub)
+    assert calls == {"set": [], "copied": [], "init": 0}
+    assert stub.reloaded is False
+
+
+def test_change_data_dir_existing_data_is_not_overwritten(monkeypatch, tmp_path):
+    """データがあるフォルダを選んだ場合はコピーせず、そのデータを読み込むこと。"""
+    stub, _current, calls = _data_dir_stub(monkeypatch, tmp_path, [_holding()])
+    target = tmp_path / "existing"
+    target.mkdir()
+    (target / "holdings.csv").write_text("symbol\n7203\n", encoding="utf-8")
+    monkeypatch.setattr(gui.QFileDialog, "getExistingDirectory", lambda *a, **k: str(target))
+    _answer(monkeypatch, gui.QMessageBox.StandardButton.Yes)
+
+    gui.DividendWindow.action_change_data_dir(stub)
+    assert calls["copied"] == [], "既存データのあるフォルダへコピーしている"
+    assert calls["set"] == [target]
+
+
+def test_change_data_dir_same_folder_is_noop(monkeypatch, tmp_path):
+    """現在と同じフォルダを選んだら切り替えず、通知だけして戻ること。"""
+    stub, current, calls = _data_dir_stub(monkeypatch, tmp_path)
+    monkeypatch.setattr(gui.QFileDialog, "getExistingDirectory", lambda *a, **k: str(current))
+    gui.DividendWindow.action_change_data_dir(stub)
+    assert calls["set"] == []
+    assert stub.reloaded is False
+    assert stub.notes and "同じフォルダ" in stub.notes[-1][0]
+
+
+def test_change_data_dir_blocked_while_busy(monkeypatch, tmp_path):
+    """取得中はフォルダ選択ダイアログすら開かないこと（旧フォルダへ書き戻す）。"""
+    stub, _current, calls = _data_dir_stub(monkeypatch, tmp_path)
+    stub._busy = True
+    opened = {"dialog": False}
+
+    def fake_dialog(*_a, **_k):
+        opened["dialog"] = True
+        return ""
+
+    monkeypatch.setattr(gui.QFileDialog, "getExistingDirectory", fake_dialog)
+    gui.DividendWindow.action_change_data_dir(stub)
+    assert opened["dialog"] is False
+    assert calls["set"] == []
+    assert stub.notes and stub.notes[-1][1] is True
+
+
+def test_change_data_dir_reports_failure(monkeypatch, tmp_path):
+    """切替に失敗（保存不可等）したらエラー通知し、再読込しないこと。"""
+    stub, _current, calls = _data_dir_stub(monkeypatch, tmp_path)
+    target = tmp_path / "empty"
+    target.mkdir()
+    monkeypatch.setattr(gui.QFileDialog, "getExistingDirectory", lambda *a, **k: str(target))
+    _answer(monkeypatch, gui.QMessageBox.StandardButton.No)
+    monkeypatch.setattr(
+        gui, "set_data_dir",
+        lambda _p: (_ for _ in ()).throw(OSError("書き込めません")),
+    )
+    gui.DividendWindow.action_change_data_dir(stub)
+    assert calls["init"] == 0
+    assert stub.reloaded is False
+    assert stub.notes and stub.notes[-1][1] is True

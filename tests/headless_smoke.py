@@ -43,7 +43,8 @@ def _check_actions(w) -> None:
     """QAction 一元化・Ctrl ショートカット・有効/無効の同期を検証する。"""
     actions = w._actions
     for key in ("update_market", "update_fx", "reload", "new", "edit", "delete",
-                "toggle_mode", "toggle_withdrawal", "toggle_inactive", "quit"):
+                "toggle_mode", "toggle_withdrawal", "toggle_inactive",
+                "change_data_dir", "open_data_dir", "quit"):
         assert key in actions, f"アクション {key} が無い: {sorted(actions)}"
 
     # 一文字ショートカットが残っていないこと（表で銘柄コードを打つと誤爆する）
@@ -82,6 +83,10 @@ def _check_actions(w) -> None:
     w._sync_action_states()
     assert not actions["update_market"].isEnabled(), "取得中も株価更新が押せる"
     assert not actions["reload"].isEnabled(), "取得中も再読込が押せる"
+    # データフォルダの切替も伏せる（走行中のワーカーが旧フォルダへ書き戻す）。
+    # 「開く」は読むだけなので取得中も押せてよい。
+    assert not actions["change_data_dir"].isEnabled(), "取得中もデータフォルダを変更できる"
+    assert actions["open_data_dir"].isEnabled(), "データフォルダを開くが無効になっている"
     w._busy = False
     w._sync_action_states()
     assert actions["update_market"].isEnabled(), "取得完了後に株価更新が戻らない"
@@ -414,6 +419,12 @@ def main() -> None:
     # ファイルメニューはエクスポート/インポートの対称サブメニューを持つ。
     assert any("エクスポート" in t for t in file_actions), f"エクスポートが無い: {file_actions}"
     assert any("インポート" in t for t in file_actions), f"インポートが無い: {file_actions}"
+    # データフォルダは「変更（フォルダ選択）」と「開く（エクスプローラー）」の2本立て。
+    # ここが消えると、既定以外のフォルダを使っている利用者は設定へ到達できなくなる。
+    assert any("データフォルダの変更" in t for t in file_actions), file_actions
+    assert any("データフォルダを開く" in t for t in file_actions), file_actions
+    # 現在のデータフォルダは io_csv 経由で参照する（値を import して固定しない）。
+    assert gui.io_csv.DATA_DIR.exists(), f"データフォルダが無い: {gui.io_csv.DATA_DIR}"
     help_actions = [a.text() for a in menus[3].menu().actions() if a.text()]
     assert any("ショートカット" in t for t in help_actions), help_actions
 

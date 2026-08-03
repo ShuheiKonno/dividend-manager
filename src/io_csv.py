@@ -7,6 +7,7 @@ from pathlib import Path
 from shutil import copy2
 from typing import Callable, Iterable, TypeVar
 
+from . import app_config
 from .models import (
     HOLDINGS_FIELDS,
     MARKET_DATA_FIELDS,
@@ -19,7 +20,10 @@ from .models import (
 )
 from .utils import now_jst, normalize_iso_date
 
-DATA_DIR = Path(__file__).resolve().parents[1] / "data"
+# データフォルダはユーザーが変更できる（set_data_dir）。以下は定数ではなく
+# 「現在値」で、set_data_dir が DATA_DIR ごとまとめて張り替える。個々の関数は
+# 呼び出し時にこのグローバルを読むため、切替後は次の読み書きから新フォルダを見る。
+DATA_DIR = app_config.load_data_dir()
 BACKUP_DIR = DATA_DIR / "backup"
 _WRITE_RETRIES = 3
 _WRITE_RETRY_DELAY_SECONDS = 0.2
@@ -92,6 +96,59 @@ HOLDINGS_PATH = DATA_DIR / "holdings.csv"
 MARKET_DATA_PATH = DATA_DIR / "market_data.csv"
 FX_PATH = DATA_DIR / "fx.csv"
 HISTORY_PATH = DATA_DIR / "history.csv"
+
+# DATA_DIR 配下に置くファイル（グローバル名 → ファイル名）。set_data_dir が
+# ここを回してパスを張り替えるので、**新しいファイルを足したらここにも足す**
+# （足し忘れると1つだけ旧フォルダを読み書きし続け、エラーも出ない）。
+# tests/test_io_csv.py が「*_PATH / *_DIR が全て DATA_DIR 配下か」を検証する。
+_DERIVED_PATHS = {
+    "BACKUP_DIR": "backup",
+    "HOLDINGS_PATH": "holdings.csv",
+    "MARKET_DATA_PATH": "market_data.csv",
+    "FX_PATH": "fx.csv",
+    "HISTORY_PATH": "history.csv",
+    "SETTINGS_PATH": "settings.json",
+}
+
+# copy_data_files の対象。settings.json（ウィンドウ位置・列幅）は「データ」では
+# ないので含めない——フォルダを分ける目的は資産データの置き場所であって、
+# 画面状態を持ち回ることではない。
+_DATA_FILE_NAMES = ("holdings.csv", "market_data.csv", "fx.csv", "history.csv")
+
+
+def set_data_dir(path: str | Path, persist: bool = True) -> Path:
+    """データフォルダを切り替える（フォルダ作成 → 設定保存 → パス張替の順）。
+
+    設定の保存に失敗したときに「今回だけ切り替わって次回は戻る」状態にしない
+    ため、永続化が成功してからグローバルを張り替える。`persist=False` は
+    テスト用（実ユーザーの %APPDATA% を汚さない）。
+    """
+    new_dir = Path(path).expanduser()
+    new_dir.mkdir(parents=True, exist_ok=True)
+    if persist:
+        app_config.save_data_dir(new_dir)
+    globals()["DATA_DIR"] = new_dir
+    for name, child in _DERIVED_PATHS.items():
+        globals()[name] = new_dir / child
+    return new_dir
+
+
+def copy_data_files(src: str | Path, dst: str | Path) -> list[str]:
+    """データ CSV を別フォルダへコピーし、コピーしたファイル名を返す。
+
+    **既に同名ファイルがある場合は上書きしない**（フォルダ切替は「データを
+    持って行く」操作であって、行き先の既存データを潰す操作ではない）。
+    """
+    src_dir, dst_dir = Path(src), Path(dst)
+    dst_dir.mkdir(parents=True, exist_ok=True)
+    copied: list[str] = []
+    for name in _DATA_FILE_NAMES:
+        source = src_dir / name
+        target = dst_dir / name
+        if source.exists() and not target.exists():
+            copy2(source, target)
+            copied.append(name)
+    return copied
 
 
 def load_holdings() -> list[Holding]:

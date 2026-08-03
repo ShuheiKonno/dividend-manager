@@ -8,11 +8,13 @@ from __future__ import annotations
 
 import sys
 from dataclasses import replace
+from pathlib import Path
 from typing import Optional
 
-from PySide6.QtCore import Qt, QObject, QThread, Signal, QSortFilterProxyModel, QRect
+from PySide6.QtCore import Qt, QObject, QThread, Signal, QSortFilterProxyModel, QRect, QUrl
 from PySide6.QtGui import (
     QAction,
+    QDesktopServices,
     QStandardItemModel,
     QStandardItem,
     QShortcut,
@@ -56,8 +58,13 @@ from .dialogs import (  # noqa: F401 — 再エクスポート
     _optional_rate,
     _parse_num,
 )
+# DATA_DIR は実行中に変わる（データフォルダの変更）ため、値を import して
+# 固定せずモジュール経由で参照する。
+from . import app_config, io_csv
 from .io_csv import (
     init_empty_files,
+    set_data_dir,
+    copy_data_files,
     load_holdings,
     save_holdings,
     load_market_data,
@@ -372,7 +379,23 @@ class DividendWindow(QMainWindow):
         self._register_shortcuts()
         self._apply_dark_title_bar()
 
-        init_empty_files()
+        # 設定されたデータフォルダが書けない（外付けドライブを外した・権限が無い）
+        # 場合は既定フォルダへ落として必ずウィンドウを出す。ここで例外のまま落ちると
+        # 「フォルダを直すメニュー」にも到達できず、config.json の手編集でしか復旧
+        # できなくなる。設定ファイルは書き換えないので、復旧すれば次回起動で戻る。
+        try:
+            init_empty_files()
+        except OSError as exc:
+            failed = io_csv.DATA_DIR
+            set_data_dir(app_config.DEFAULT_DATA_DIR, persist=False)
+            init_empty_files()
+            QMessageBox.warning(
+                self,
+                "データフォルダを使用できません",
+                f"{failed}\nを使用できませんでした（{exc}）。\n"
+                f"既定のフォルダ {io_csv.DATA_DIR} で起動します。\n"
+                "「ファイル」→「データフォルダの変更...」で設定し直せます。",
+            )
         self._reload_all()
 
     def _restore_window_geometry(self, geometry: list | None) -> None:
@@ -531,6 +554,8 @@ class DividendWindow(QMainWindow):
         ("export_history", "推移履歴...", None, "action_export_history"),
         ("import_holdings", "保有銘柄...", None, "action_import_holdings"),
         ("import_history", "推移履歴...", None, "action_import_history"),
+        ("change_data_dir", "データフォルダの変更...", None, "action_change_data_dir"),
+        ("open_data_dir", "データフォルダを開く", None, "action_open_data_dir"),
         ("focus_filter", "絞り込みへ移動", "Ctrl+F", "_focus_filter"),
         ("help_shortcuts", "キーボードショートカット一覧...", "F1", "_show_shortcut_help"),
         ("quit", "終了", "Ctrl+Q", "close"),
@@ -593,6 +618,9 @@ class DividendWindow(QMainWindow):
         import_menu = file_menu.addMenu("インポート (CSV)")
         import_menu.addAction(act["import_holdings"])
         import_menu.addAction(act["import_history"])
+        file_menu.addSeparator()
+        file_menu.addAction(act["change_data_dir"])
+        file_menu.addAction(act["open_data_dir"])
         file_menu.addSeparator()
         file_menu.addAction(act["quit"])
 
@@ -1151,8 +1179,9 @@ class DividendWindow(QMainWindow):
             self._actions[key].setEnabled(has_row)
         # 取得中は CSV を書き換える操作を一律で伏せる（多重実行と競合を防ぐ）。
         idle = not self._busy
+        # データフォルダの切替も同様（走行中のワーカーが旧フォルダへ書き戻す）。
         for key in ("update_market", "update_fx", "reload", "new",
-                    "import_holdings", "import_history"):
+                    "import_holdings", "import_history", "change_data_dir"):
             self._actions[key].setEnabled(idle)
         # 出力対象が無いエクスポートは押せないようにする。
         self._actions["export_holdings"].setEnabled(idle and bool(self.holdings))
@@ -1506,6 +1535,88 @@ class DividendWindow(QMainWindow):
         added = len(history) - before
         self._refresh_view()
         self._notify(f"履歴を取り込みました（新規 {added} 日分 / 計 {len(self.history)} 日分）")
+
+    # ---- データフォルダ（保存先の切替 / エクスプローラーで開く） ----
+
+    def action_change_data_dir(self) -> None:
+        """データフォルダをフォルダ選択ダイアログで選び直す。
+
+        設定値そのものはデータフォルダの外（app_config.config_path）に保存する。
+        `settings.json`（ウィンドウ位置・列幅・円グラフ閾値）は**データフォルダ側**
+        にあるため切替後は新フォルダのものになる。ただし切替した瞬間に読み直すと
+        画面状態だけが別データの設定へ飛んで見えるので、現在のセッションの表示状態
+        は保ったまま次回起動から新フォルダの設定を使う（確認ダイアログで明示する）。
+        """
+        if self._busy:
+            self._notify("更新処理が実行中です", error=True)
+            return
+        current = Path(io_csv.DATA_DIR)
+        chosen = QFileDialog.getExistingDirectory(
+            self, "データフォルダを選択", str(current),
+            QFileDialog.Option.ShowDirsOnly,
+        )
+        if not chosen:
+            return
+        new_dir = Path(chosen)
+        if new_dir.resolve() == current.resolve():
+            self._notify("現在と同じフォルダが選択されました")
+            return
+
+        note = (
+            "\n\nウィンドウ位置・列幅などの設定は新しいフォルダの settings.json を"
+            "使うようになります（次回起動から反映）。"
+        )
+        copy = False
+        if (new_dir / "holdings.csv").exists():
+            reply = QMessageBox.question(
+                self,
+                "データフォルダの変更",
+                f"データフォルダを切り替えます。\n\n変更前: {current}\n変更後: {new_dir}\n\n"
+                "選択したフォルダには既にデータがあります。そのデータを読み込みます"
+                "（現在のデータはコピーしません）。" + note,
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                QMessageBox.StandardButton.No,
+            )
+            if reply != QMessageBox.StandardButton.Yes:
+                return
+        else:
+            reply = QMessageBox.question(
+                self,
+                "データフォルダの変更",
+                f"データフォルダを切り替えます。\n\n変更前: {current}\n変更後: {new_dir}\n\n"
+                "選択したフォルダにデータがありません。現在のデータ"
+                f"（保有 {len(self.holdings)} 件 / 履歴 {len(self.history)} 日分）を"
+                "コピーしますか？\n"
+                "「いいえ」を選ぶと空のデータで開始します"
+                "（変更前のフォルダはそのまま残ります）。" + note,
+                QMessageBox.StandardButton.Yes
+                | QMessageBox.StandardButton.No
+                | QMessageBox.StandardButton.Cancel,
+                QMessageBox.StandardButton.Cancel,
+            )
+            if reply == QMessageBox.StandardButton.Cancel:
+                return
+            copy = reply == QMessageBox.StandardButton.Yes
+
+        try:
+            if copy:
+                copy_data_files(current, new_dir)
+            set_data_dir(new_dir)
+        except OSError as exc:
+            self._notify(f"データフォルダを変更できませんでした: {exc}", error=True)
+            return
+        init_empty_files()
+        self._reload_all()
+        self._notify(f"データフォルダを変更しました: {new_dir}")
+
+    def action_open_data_dir(self) -> None:
+        """現在のデータフォルダをエクスプローラーで開く。"""
+        path = Path(io_csv.DATA_DIR)
+        if not path.exists():
+            self._notify(f"データフォルダが見つかりません: {path}", error=True)
+            return
+        if not QDesktopServices.openUrl(QUrl.fromLocalFile(str(path))):
+            self._notify(f"フォルダを開けませんでした: {path}", error=True)
 
     def _refresh_monthly(self, div_label: str, div_empty: str) -> None:
         """月別タブ（棒グラフ・注記・内訳）を最新の集計で描き直す。
