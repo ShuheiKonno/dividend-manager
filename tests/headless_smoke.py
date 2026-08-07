@@ -45,6 +45,8 @@ def _check_actions(w) -> None:
     for key in ("update_market", "update_fx", "reload", "new", "edit", "delete",
                 "toggle_mode", "toggle_withdrawal", "toggle_inactive",
                 "theme_dark", "theme_light",
+                "export_holdings", "export_history", "export_holdings_md",
+                "import_holdings", "import_history",
                 "change_data_dir", "open_data_dir", "create_shortcut", "quit"):
         assert key in actions, f"アクション {key} が無い: {sorted(actions)}"
 
@@ -511,6 +513,18 @@ def main() -> None:
     # ファイルメニューはエクスポート/インポートの対称サブメニューを持つ。
     assert any("エクスポート" in t for t in file_actions), f"エクスポートが無い: {file_actions}"
     assert any("インポート" in t for t in file_actions), f"インポートが無い: {file_actions}"
+    # 形式名はサブメニュー名ではなく項目側（エクスポートは CSV と Markdown が並ぶ）。
+    # QAction の一時ラッパを掴んだままにする（内包表記の中で捨てると、
+    # 取り出した QMenu の C++ 側が先に解放されて RuntimeError になる）。
+    file_items = list(menus[0].menu().actions())
+    export_menu = next(a.menu() for a in file_items if a.text() == "エクスポート")
+    export_items = [a.text() for a in export_menu.actions() if a.text()]
+    assert any("Markdown" in t for t in export_items), (
+        f"Markdown エクスポートが無い: {export_items}"
+    )
+    assert all("CSV" in t or "Markdown" in t for t in export_items), (
+        f"形式名の無いエクスポート項目がある: {export_items}"
+    )
     # データフォルダは「変更（フォルダ選択）」と「開く（エクスプローラー）」の2本立て。
     # ここが消えると、既定以外のフォルダを使っている利用者は設定へ到達できなくなる。
     assert any("データフォルダの変更" in t for t in file_actions), file_actions

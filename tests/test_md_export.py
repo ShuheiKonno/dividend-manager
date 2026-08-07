@@ -1,0 +1,205 @@
+from __future__ import annotations
+
+from src.calc import Summary
+from src.md_export import build_holdings_markdown
+
+
+def _summary(**kw) -> Summary:
+    base = dict(
+        total_book_value_jpy=200000.0,
+        total_market_value_jpy=250000.0,
+        total_dividend_jpy=10000.0,
+        total_benefit_jpy=2000.0,
+        total_numerator_jpy=12000.0,
+        yield_on_cost=0.06,
+        yield_on_value=0.048,
+        total_profit_jpy=50000.0,
+        profit_rate=0.25,
+        missing_market_value_count=0,
+    )
+    base.update(kw)
+    return Summary(**base)
+
+
+def _row(**kw) -> dict:
+    base = dict(
+        symbol="7203",
+        name="トヨタ",
+        account="特定",
+        asset_type="stock",
+        active=True,
+        shares=100.0,
+        currency="JPY",
+        avg_cost=2000.0,
+        last_price=2500.0,
+        annual_div_ps=100.0,
+        annual_dividend_jpy=10000.0,
+        annual_benefit_jpy=2000.0,
+        annual_dividend_with_benefit_jpy=12000.0,
+        book_value_jpy=200000.0,
+        market_value_jpy=250000.0,
+        yield_on_cost=0.06,
+        yield_on_value=0.048,
+        profit_jpy=50000.0,
+        profit_rate=0.25,
+        div_forecast_as_of="2026-06-30",
+        benefit_detail="",
+    )
+    base.update(kw)
+    return base
+
+
+def _build(rows, summary=None, **kw) -> str:
+    params = dict(
+        dividend_mode="gross",
+        withdrawal_mode=None,
+        fx_rate=155.1234,
+        market_fetched_at="2026-08-08T09:12:00+09:00",
+        market_source="yfinance",
+        generated_at="2026-08-08T21:30:00+09:00",
+    )
+    params.update(kw)
+    return build_holdings_markdown(rows, summary or _summary(), **params)
+
+
+def _table_lines(text: str, heading: str) -> list[str]:
+    """指定した見出し直下のテーブル行（`|` 始まり）だけを返す。"""
+    lines = text.splitlines()
+    start = lines.index(f"## {heading}")
+    out = []
+    for line in lines[start + 1:]:
+        if line.startswith("## "):
+            break
+        if line.startswith("|"):
+            out.append(line)
+    return out
+
+
+def _cells(line: str) -> list[str]:
+    """テーブル行をセルへ分解する（エスケープ済みの `\\|` は区切りにしない）。"""
+    body = line.strip().strip("|")
+    cells, current, escaped = [], "", False
+    for ch in body:
+        if escaped:
+            current += ch
+            escaped = False
+        elif ch == "\\":
+            current += ch
+            escaped = True
+        elif ch == "|":
+            cells.append(current.strip())
+            current = ""
+        else:
+            current += ch
+    cells.append(current.strip())
+    return cells
+
+
+def test_escapes_pipe_in_free_text_without_breaking_columns():
+    """自由記述の `|` がエスケープされ、列数が保たれること。"""
+    text = _build([_row(name="A|B 株式会社", benefit_detail="お米|1kg")])
+    lines = _table_lines(text, "銘柄一覧")
+    header, _sep, data = lines[0], lines[1], lines[2]
+    assert "A\\|B 株式会社" in data
+    assert "お米\\|1kg" in data
+    assert len(_cells(data)) == len(_cells(header))
+
+
+def test_collapses_newlines_into_single_row():
+    """改行入りの値（旧 CSV 由来）がセルの外へ飛び出さないこと。"""
+    text = _build([_row(benefit_detail="クオカード\n1,000円分")])
+    lines = _table_lines(text, "銘柄一覧")
+    assert len(lines) == 3  # ヘッダ・区切り・データ1行のみ
+    assert "クオカード 1,000円分" in lines[2]
+
+
+def test_missing_values_are_blank_not_na():
+    """値が無いセルは空欄で、"N/A" を出さないこと。"""
+    text = _build([_row(last_price=None, market_value_jpy=None, profit_jpy=None,
+                        profit_rate=None, annual_dividend_jpy=None)],
+                  _summary(total_market_value_jpy=None, total_profit_jpy=None,
+                           profit_rate=None))
+    assert "N/A" not in text
+    data = _cells(_table_lines(text, "銘柄一覧")[2])
+    header = _cells(_table_lines(text, "銘柄一覧")[0])
+    assert data[header.index("現在株価")] == ""
+    assert data[header.index("損益率(%)")] == ""
+
+
+def test_numbers_have_no_thousands_separator():
+    """LLM が再計算しやすいよう桁区切りカンマを入れないこと。"""
+    text = _build([_row(book_value_jpy=1234567.0)])
+    assert "1,234,567" not in text
+    assert "1234567" in text
+
+
+def test_rates_are_scaled_to_percent_with_unit_in_header():
+    """率は ×100 した数値で出し、単位はヘッダの (%) が持つこと。"""
+    text = _build([_row(profit_rate=0.1644, yield_on_cost=0.0355)])
+    header = _cells(_table_lines(text, "銘柄一覧")[0])
+    data = _cells(_table_lines(text, "銘柄一覧")[2])
+    assert data[header.index("損益率(%)")] == "16.44"
+    assert data[header.index("簿価利回り(%)")] == "3.55"
+
+
+def test_income_header_follows_withdrawal_mode():
+    """収入モードでは画面と同じく「年間配当」→「年間収入」へ入れ替わること。"""
+    plain = _build([_row()])
+    assert "年間配当(円)" in plain and "年間収入(円)" not in plain
+
+    withdrawal = _build([_row()], withdrawal_mode="fixed")
+    assert "年間収入(円)" in withdrawal and "年間配当(円)" not in withdrawal
+    # サマリー側のラベルも揃う（片方だけ残ると同じ数字に2つの名前が付く）。
+    assert any("年間収入(円)" in line for line in _table_lines(withdrawal, "サマリー"))
+
+
+def test_every_data_row_matches_header_cell_count():
+    """列を足したときの取りこぼしを検出する（ヘッダとデータのセル数一致）。"""
+    rows = [_row(), _row(symbol="AAPL", currency="USD", benefit_detail="")]
+    lines = _table_lines(_build(rows), "銘柄一覧")
+    width = len(_cells(lines[0]))
+    assert len(lines) == 2 + len(rows)
+    for line in lines[2:]:
+        assert len(_cells(line)) == width
+
+
+def test_status_column_appears_only_with_inactive_rows():
+    """無効銘柄が無ければ「状態」列を出さないこと（意味の無い列を常設しない）。"""
+    active_only = _build([_row()])
+    assert "状態" not in _table_lines(active_only, "銘柄一覧")[0]
+
+    mixed = _build([_row(), _row(symbol="9999", active=False)])
+    header = _cells(_table_lines(mixed, "銘柄一覧")[0])
+    assert header[-1] == "状態"
+    rows = _table_lines(mixed, "銘柄一覧")[2:]
+    assert _cells(rows[0])[-1] == "有効"
+    assert _cells(rows[1])[-1] == "無効"
+    # 集計に入っていないことを注記で明示する（行を足してもサマリーと合わない）。
+    assert "サマリーの各合計には一切含まれていない" in mixed
+
+
+def test_holding_count_reports_inactive_share():
+    text = _build([_row(), _row(symbol="9999", active=False)])
+    assert "2（うち無効 1）" in text
+
+
+def test_asset_type_is_localized():
+    text = _build([_row(asset_type="fund")])
+    header = _cells(_table_lines(text, "銘柄一覧")[0])
+    assert _cells(_table_lines(text, "銘柄一覧")[2])[header.index("種別")] == "投信"
+
+
+def test_notes_explain_tax_rules_only_in_net_mode():
+    """税率の注記は税引後モードのときだけ出す（税引前で読むと誤解を生む）。"""
+    net = _build([_row()], dividend_mode="net")
+    assert "28.28%" in net and "外国税額控除" in net
+    gross = _build([_row()], dividend_mode="gross")
+    assert "28.28%" not in gross
+    assert "源泉徴収前" in gross
+
+
+def test_notes_explain_withdrawal_scope():
+    """取崩モード時、影響が投信に限られることを注記すること。"""
+    text = _build([_row()], withdrawal_mode="rate")
+    assert "定率取崩" in text
+    assert "株式・ETF の行は配当のまま" in text
