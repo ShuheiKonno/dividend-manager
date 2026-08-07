@@ -217,6 +217,29 @@ def export_history_csv(path: str | Path, rows: list[HistoryRecord]) -> None:
     )
 
 
+def write_text_export(path: str | Path, text: str) -> None:
+    """ユーザー指定パスへテキストを原子的に書き出す（Markdown エクスポート用）。
+
+    _atomic_write は csv.DictWriter 専用で自由テキストを通せないため別関数に
+    するが、.tmp → replace と _retry_on_permission_error（エディタが掴んでいる
+    ときに日本語で説明的な PermissionError を出す）は同じものを使う。
+
+    CSV エクスポートと違い **BOM は付けない**。utf-8-sig は Excel の文字化け
+    対策であって、Markdown の先頭に BOM が入ると多くのビューアで1行目の `#` が
+    見出しとして解釈されなくなる。ここを utf-8-sig へ「揃える」と壊れる。
+    バックアップも取らない（アプリの管理対象外のパスのため。export_*_csv と同方針）。
+    """
+    target = Path(path)
+    tmp_path = target.with_suffix(target.suffix + ".tmp")
+    # 書込みと置換の両方を包む（_atomic_write が copy2 と replace の両方を包むのと
+    # 同じ理由）。置換だけ包むと、書込み側が弾かれたときに Windows の生の
+    # PermissionError がそのまま出て、他の保存経路と案内文が食い違う。
+    _retry_on_permission_error(
+        lambda: tmp_path.write_text(text, encoding="utf-8", newline="\n"), target
+    )
+    _retry_on_permission_error(lambda: tmp_path.replace(target), target)
+
+
 def read_history_csv(path: str | Path) -> list[HistoryRecord]:
     """外部 CSV を推移履歴として読み込む（エクスポートした history CSV の取込用）。
 

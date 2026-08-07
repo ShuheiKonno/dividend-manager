@@ -160,6 +160,22 @@ def test_export_holdings_csv_roundtrips(monkeypatch, tmp_path):
     assert restored == holdings
 
 
+def test_write_text_export_has_no_bom_and_overwrites(monkeypatch, tmp_path):
+    """Markdown は BOM を付けない（CSV との意図的な差）。上書きし .tmp も残さない。"""
+    _configure_tmp_dirs(monkeypatch, tmp_path)
+    target = tmp_path / "out.md"
+    io_csv.write_text_export(target, "# 見出し\n本文\n")
+    # utf-8-sig にすると1行目の # が見出しとして解釈されないビューアがある。
+    assert not target.read_bytes().startswith(b"\xef\xbb\xbf")
+    assert target.read_text(encoding="utf-8").startswith("# 見出し")
+    # 改行を CRLF へ変換しない（newline="\n" 指定）。
+    assert b"\r\n" not in target.read_bytes()
+
+    io_csv.write_text_export(target, "# 別の内容\n")
+    assert target.read_text(encoding="utf-8") == "# 別の内容\n"
+    assert not (tmp_path / "out.md.tmp").exists()
+
+
 def test_read_history_csv_skips_blank_record_date(monkeypatch, tmp_path):
     _configure_tmp_dirs(monkeypatch, tmp_path)
     target = tmp_path / "history.csv"

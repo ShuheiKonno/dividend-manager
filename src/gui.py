@@ -79,9 +79,11 @@ from .io_csv import (
     save_history,
     export_holdings_csv,
     export_history_csv,
+    write_text_export,
     read_history_csv,
     read_holdings_csv,
 )
+from .md_export import build_holdings_markdown
 from .models import Holding, HistoryRecord
 from .calc import compute_rows, monthly_breakdown
 from .history import (
@@ -95,7 +97,14 @@ from .history import (
 # 配色はテーマ切替で張り替わる「現在値」なので、値で import せず theme.X で
 # 参照する（値 import すると切替後も旧テーマの色を使い続ける）。
 from . import theme
-from .utils import fmt_number, fmt_percent, now_jst, safe_float, today_jst_str
+from .utils import (
+    fmt_number,
+    fmt_percent,
+    now_jst,
+    now_jst_iso,
+    safe_float,
+    today_jst_str,
+)
 from .widgets import (
     BarChartWidget,
     TreemapWidget,
@@ -598,10 +607,15 @@ class DividendWindow(QMainWindow):
         ("delete", "削除", "Ctrl+D", "action_delete"),
         ("toggle_mode", "税引前 / 税引後 の切替", "Ctrl+M", "action_toggle_mode"),
         ("toggle_withdrawal", "収入モードの切替", "Ctrl+I", "action_toggle_withdrawal"),
-        ("export_holdings", "保有銘柄...", None, "action_export_holdings"),
-        ("export_history", "推移履歴...", None, "action_export_history"),
-        ("import_holdings", "保有銘柄...", None, "action_import_holdings"),
-        ("import_history", "推移履歴...", None, "action_import_history"),
+        # 形式名はサブメニュー名ではなく項目側に付ける（エクスポートに CSV と
+        # Markdown が並ぶため。サブメニュー名を "エクスポート (CSV)" のままに
+        # すると Markdown が CSV の下に入って読めない）。
+        ("export_holdings", "保有銘柄 (CSV)...", None, "action_export_holdings"),
+        ("export_history", "推移履歴 (CSV)...", None, "action_export_history"),
+        ("export_holdings_md", "保有銘柄 (Markdown)...", None,
+         "action_export_holdings_markdown"),
+        ("import_holdings", "保有銘柄 (CSV)...", None, "action_import_holdings"),
+        ("import_history", "推移履歴 (CSV)...", None, "action_import_history"),
         ("change_data_dir", "データフォルダの変更...", None, "action_change_data_dir"),
         ("open_data_dir", "データフォルダを開く", None, "action_open_data_dir"),
         ("create_shortcut", "デスクトップにショートカットを作成...", None,
@@ -682,10 +696,12 @@ class DividendWindow(QMainWindow):
         act = self._actions
 
         file_menu = bar.addMenu("ファイル(&F)")
-        export_menu = file_menu.addMenu("エクスポート (CSV)")
+        export_menu = file_menu.addMenu("エクスポート")
         export_menu.addAction(act["export_holdings"])
         export_menu.addAction(act["export_history"])
-        import_menu = file_menu.addMenu("インポート (CSV)")
+        export_menu.addSeparator()
+        export_menu.addAction(act["export_holdings_md"])
+        import_menu = file_menu.addMenu("インポート")
         import_menu.addAction(act["import_holdings"])
         import_menu.addAction(act["import_history"])
         file_menu.addSeparator()
@@ -1261,6 +1277,7 @@ class DividendWindow(QMainWindow):
             self._actions[key].setEnabled(idle)
         # 出力対象が無いエクスポートは押せないようにする。
         self._actions["export_holdings"].setEnabled(idle and bool(self.holdings))
+        self._actions["export_holdings_md"].setEnabled(idle and bool(self.holdings))
         self._actions["export_history"].setEnabled(idle and bool(self.history))
         # 絞り込みはテーブルにしか効かないため、グラフタブでは無効にする。
         filter_box = getattr(self, "_filter", None)
@@ -1533,6 +1550,11 @@ class DividendWindow(QMainWindow):
         """保存ダイアログが拡張子を付けない環境向けに .csv を補う。"""
         return path if path.lower().endswith(".csv") else path + ".csv"
 
+    @staticmethod
+    def _with_md_suffix(path: str) -> str:
+        """保存ダイアログが拡張子を付けない環境向けに .md を補う。"""
+        return path if path.lower().endswith(".md") else path + ".md"
+
     def action_export_holdings(self) -> None:
         """保有銘柄を CSV へエクスポートする（holdings.csv と同一フォーマット）。"""
         if not self.holdings:
@@ -1547,6 +1569,45 @@ class DividendWindow(QMainWindow):
         path = self._with_csv_suffix(path)
         if self._save_or_notify(lambda: export_holdings_csv(path, self.holdings)):
             self._notify(f"保有銘柄を書き出しました（{len(self.holdings)} 件）")
+
+    def action_export_holdings_markdown(self) -> None:
+        """保有銘柄を LLM 分析用の Markdown へエクスポートする。
+
+        CSV 版が holdings.csv と同じ「入力値のまま・取込で読み戻せる」形なのに対し、
+        こちらは compute_rows の計算済み行と Summary を出す（時価・損益・利回りが
+        無ければ分析できない）。往復は目的外。
+        """
+        if not self.holdings:
+            self._notify("エクスポートする保有銘柄がありません", error=True)
+            return
+        path, _ = QFileDialog.getSaveFileName(
+            self, "保有銘柄を Markdown でエクスポート",
+            f"holdings_{today_jst_str()}.md", "Markdown ファイル (*.md)",
+        )
+        if not path:
+            return
+        path = self._with_md_suffix(path)
+        # 画面と同じ条件で計算し直す。compute_rows は純関数で
+        # _record_history_snapshot も同様に追加で呼んでいる——表示結果を
+        # self._last_rows のようなキャッシュへ溜める経路は増やさない。
+        rows, summary = compute_rows(
+            self.holdings, self.market_data_map, self.fx_rate, self.dividend_mode,
+            self.withdrawal_mode, include_inactive=self.show_inactive,
+        )
+        text = build_holdings_markdown(
+            rows, summary,
+            dividend_mode=self.dividend_mode,
+            withdrawal_mode=self.withdrawal_mode,
+            fx_rate=self.fx_rate,
+            market_fetched_at=self.market_fetched_at,
+            market_source=self.market_source,
+            generated_at=now_jst_iso(),
+        )
+        if self._save_or_notify(lambda: write_text_export(path, text)):
+            # CSV 版は self.holdings を全件出すが、こちらは画面と同じく
+            # show_inactive に従うので件数が食い違い得る。理由を通知に残す。
+            note = "" if self.show_inactive else " / 無効を除く"
+            self._notify(f"保有銘柄を Markdown で書き出しました（{len(rows)} 件{note}）")
 
     def action_export_history(self) -> None:
         """推移履歴を CSV へエクスポートする（history.csv と同一フォーマット）。"""

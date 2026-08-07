@@ -147,6 +147,16 @@ def _io_stub(holdings, history):
             self.reloaded = True
 
         _with_csv_suffix = staticmethod(gui.DividendWindow._with_csv_suffix)
+        _with_md_suffix = staticmethod(gui.DividendWindow._with_md_suffix)
+
+        # Markdown エクスポートは compute_rows を呼び直すので、表示条件を持つ。
+        market_data_map: dict = {}
+        fx_rate = None
+        dividend_mode = "gross"
+        withdrawal_mode = None
+        show_inactive = False
+        market_fetched_at = None
+        market_source = None
 
     stub = WindowStub()
     stub.holdings = holdings
@@ -197,6 +207,58 @@ def test_export_holdings_appends_csv_suffix(monkeypatch, tmp_path):
     monkeypatch.setattr(gui, "export_holdings_csv", lambda path, rows: captured.update(path=path))
     gui.DividendWindow.action_export_holdings(_io_stub([_holding()], []))
     assert captured["path"].endswith(".csv")
+
+
+def test_export_holdings_markdown_appends_md_suffix(monkeypatch, tmp_path):
+    """保存ダイアログが拡張子を返さなくても .md を補ってから書き出すこと。"""
+    captured: dict = {}
+    monkeypatch.setattr(
+        gui.QFileDialog, "getSaveFileName", lambda *a, **k: (str(tmp_path / "noext"), "")
+    )
+    monkeypatch.setattr(
+        gui, "write_text_export", lambda path, text: captured.update(path=path, text=text)
+    )
+    gui.DividendWindow.action_export_holdings_markdown(_io_stub([_holding()], []))
+    assert captured["path"].endswith(".md")
+    # 計算済み行が入っていること（CSV 版と違い入力値の写しではない）。
+    assert "## サマリー" in captured["text"]
+    assert "7203" in captured["text"]
+
+
+def test_export_holdings_markdown_follows_show_inactive(monkeypatch, tmp_path):
+    """無効銘柄の出力は画面の show_inactive トグルに従うこと。"""
+    captured: dict = {}
+    monkeypatch.setattr(
+        gui.QFileDialog, "getSaveFileName", lambda *a, **k: (str(tmp_path / "a.md"), "")
+    )
+    monkeypatch.setattr(gui, "write_text_export", lambda path, text: captured.update(text=text))
+    holdings = [_holding(), _holding(symbol="9999", name="休眠", active=False)]
+
+    stub = _io_stub(holdings, [])
+    gui.DividendWindow.action_export_holdings_markdown(stub)
+    assert "9999" not in captured["text"]
+    assert "無効を除く" in stub.notes[-1][0]
+
+    stub = _io_stub(holdings, [])
+    stub.show_inactive = True
+    gui.DividendWindow.action_export_holdings_markdown(stub)
+    assert "9999" in captured["text"]
+    assert "無効を除く" not in stub.notes[-1][0]
+
+
+def test_export_holdings_markdown_empty_guard_skips_dialog(monkeypatch):
+    """保有が空ならダイアログを開かずエラー通知して早期 return すること。"""
+    opened = {"dialog": False}
+
+    def fake_dialog(*_a, **_k):
+        opened["dialog"] = True
+        return ("", "")
+
+    monkeypatch.setattr(gui.QFileDialog, "getSaveFileName", fake_dialog)
+    stub = _io_stub([], [])
+    gui.DividendWindow.action_export_holdings_markdown(stub)
+    assert opened["dialog"] is False
+    assert stub.notes and stub.notes[-1][1] is True
 
 
 def test_export_history_empty_guard_skips_dialog(monkeypatch):
