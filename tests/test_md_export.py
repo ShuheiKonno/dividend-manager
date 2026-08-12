@@ -203,3 +203,39 @@ def test_notes_explain_withdrawal_scope():
     text = _build([_row()], withdrawal_mode="rate")
     assert "定率取崩" in text
     assert "株式・ETF の行は配当のまま" in text
+
+
+def test_shares_follow_fund_share_unit():
+    """投信の株数が単位設定に追随し、株式は影響を受けないこと。"""
+    rows = [
+        _row(symbol="JP90C000H1T1", name="投信", asset_type="fund", shares=206.7284),
+        _row(),  # 株式（100株）
+    ]
+    per10k = _build(rows)
+    header = _cells(_table_lines(per10k, "銘柄一覧")[0])
+    assert "株数(投信:万口)" in header, header
+    body = [_cells(line) for line in _table_lines(per10k, "銘柄一覧")[2:]]
+    col = header.index("株数(投信:万口)")
+    assert body[0][col] == "206.73" and body[1][col] == "100.00"
+
+    per1 = _build(rows, fund_share_unit="per1")
+    header1 = _cells(_table_lines(per1, "銘柄一覧")[0])
+    assert "株数(投信:口数)" in header1, header1
+    body1 = [_cells(line) for line in _table_lines(per1, "銘柄一覧")[2:]]
+    col1 = header1.index("株数(投信:口数)")
+    # 投信だけ 1口単位（× 10,000）。株式の株数は動かさない。
+    assert body1[0][col1] == "2067284.00"
+    assert body1[1][col1] == "100.00"
+
+
+def test_fund_share_unit_appears_in_conditions_and_notes():
+    """単位は表の数字を変えるので「出力条件」に出し、前提の文言も入れ替わること。"""
+    per10k = _build([_row(asset_type="fund")])
+    assert "1万口単位（口数÷10,000）" in per10k
+    assert "口数 ÷ 10,000" in per10k
+
+    per1 = _build([_row(asset_type="fund")], fund_share_unit="per1")
+    conditions = "\n".join(_table_lines(per1, "出力条件"))
+    assert "投信の口数単位" in conditions and "1口単位" in conditions
+    assert "口数 ÷ 10,000" not in per1, "1口単位モードで旧い前提が残っている"
+    assert "口数そのもの（1口単位）" in per1

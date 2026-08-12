@@ -157,6 +157,7 @@ def _io_stub(holdings, history):
         show_inactive = False
         market_fetched_at = None
         market_source = None
+        fund_share_unit = gui.DEFAULT_FUND_SHARE_UNIT
 
     stub = WindowStub()
     stub.holdings = holdings

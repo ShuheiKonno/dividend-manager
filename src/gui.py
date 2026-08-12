@@ -85,7 +85,15 @@ from .io_csv import (
 )
 from .md_export import build_holdings_markdown
 from .models import Holding, HistoryRecord
-from .calc import compute_rows, monthly_breakdown
+from .calc import (
+    DEFAULT_FUND_SHARE_UNIT,
+    FUND_SHARE_UNITS,
+    FUND_SHARE_UNIT_COLUMN_LABELS,
+    FUND_SHARE_UNIT_LABELS,
+    compute_rows,
+    monthly_breakdown,
+    to_display_shares,
+)
 from .history import (
     INCOME_BASE_KEYS,
     upsert_record,
@@ -252,21 +260,46 @@ def row_for_holding_index(stored_indices: list[int], holding_idx: int) -> int | 
         return None
 
 
-def _format_cell(row: dict, key: str) -> tuple[str, Optional[QColor]]:
+def cell_sort_value(
+    row: dict, key: str, fund_share_unit: str = DEFAULT_FUND_SHARE_UNIT
+) -> Optional[float]:
+    """数値列の並び替えに使う生値。株数だけは表示単位へ揃える。
+
+    表示と別の値で並べると「上の行の方が数字が小さい」という見た目になるため、
+    投信を1口単位で表示しているときは並び替えも 1口単位の値で行う（株式の株数と
+    投信の口数が同じ列に混ざるのは単位設定に関わらず元からの性質）。
+    """
+    value = safe_float(row.get(key))
+    if key == "shares":
+        return to_display_shares(value, row.get("asset_type"), fund_share_unit)
+    return value
+
+
+def _format_cell(
+    row: dict, key: str, fund_share_unit: str = DEFAULT_FUND_SHARE_UNIT
+) -> tuple[str, Optional[QColor]]:
     """セル表示文字列と文字色を返す。
 
     無効（active=False）銘柄は集計対象外なので、損益の赤青より優先して
     行全体を淡色にする。
     """
-    text, color = _cell_text_and_color(row, key)
+    text, color = _cell_text_and_color(row, key, fund_share_unit)
     if row.get("active") is False:
         return text, QColor(theme.TEXT_DISABLED)
     return text, color
 
 
-def _cell_text_and_color(row: dict, key: str) -> tuple[str, Optional[QColor]]:
+def _cell_text_and_color(
+    row: dict, key: str, fund_share_unit: str = DEFAULT_FUND_SHARE_UNIT
+) -> tuple[str, Optional[QColor]]:
     """有効銘柄としての表示文字列と文字色（損益のみ赤青）を返す。"""
     val = row.get(key)
+    if key == "shares":
+        # 投信の口数は表示単位で見せる（保存値は常に万口単位）。
+        return fmt_number(
+            to_display_shares(safe_float(val), row.get("asset_type"), fund_share_unit),
+            2,
+        ), None
     if key == "asset_type":
         text = str(val or "")
         return ASSET_TYPE_LABELS.get(text, text), None
@@ -274,7 +307,7 @@ def _cell_text_and_color(row: dict, key: str) -> tuple[str, Optional[QColor]]:
         "symbol", "name", "account", "currency", "div_forecast_as_of", "benefit_detail",
     ):
         return str(val or ""), None
-    if key in ("shares", "avg_cost", "last_price", "annual_div_ps"):
+    if key in ("avg_cost", "last_price", "annual_div_ps"):
         return fmt_number(val, 2), None
     if key in ("annual_dividend_jpy", "annual_benefit_jpy", "book_value_jpy", "market_value_jpy"):
         return fmt_number(val, 0), None
@@ -399,6 +432,11 @@ class DividendWindow(QMainWindow):
         # 無効銘柄をテーブルへ表示するか。既定は非表示（従来どおり）だが、
         # 表示できないと編集ダイアログで無効化した銘柄を復帰できなくなる。
         self.show_inactive: bool = bool(_saved.get("show_inactive", False))
+        # 投信の口数の見せ方・入れ方（万口単位 / 1口単位）。CSV の shares は常に
+        # 万口単位で、この設定は表示と入力欄の変換だけに効く（calc の変換ヘルパー）。
+        self.fund_share_unit: str = _saved.get(
+            "fund_share_unit", DEFAULT_FUND_SHARE_UNIT
+        )
         # 月別配当タブ: 選択月は当月から始める（前回終了時の月を復元しても翌月には
         # 陳腐化するため保存しない）。
         self.monthly_month: int = now_jst().date().month
@@ -677,6 +715,21 @@ class DividendWindow(QMainWindow):
             self.addAction(action)
             self._actions[f"theme_{name}"] = action
 
+        # 投信の口数単位も排他選択（テーマと同じ作り）。トグル1個にすると
+        # 「今どちらの単位で表示されているか」がメニューを開いても読めない。
+        self._fund_unit_group = QActionGroup(self)
+        self._fund_unit_group.setExclusive(True)
+        for unit in FUND_SHARE_UNITS:
+            action = QAction(FUND_SHARE_UNIT_LABELS[unit], self)
+            action.setCheckable(True)
+            action.setChecked(unit == self.fund_share_unit)
+            action.setActionGroup(self._fund_unit_group)
+            action.triggered.connect(
+                lambda _checked=False, u=unit: self.action_set_fund_share_unit(u)
+            )
+            self.addAction(action)
+            self._actions[f"fund_unit_{unit}"] = action
+
         for index, label in enumerate(self._TAB_ACTION_LABELS):
             action = QAction(label, self)
             action.setShortcut(QKeySequence(f"Ctrl+{index + 1}"))
@@ -729,6 +782,9 @@ class DividendWindow(QMainWindow):
         theme_menu = view_menu.addMenu("テーマ")
         for name in theme.THEMES:
             theme_menu.addAction(act[f"theme_{name}"])
+        unit_menu = view_menu.addMenu("投信の口数単位")
+        for unit in FUND_SHARE_UNITS:
+            unit_menu.addAction(act[f"fund_unit_{unit}"])
         view_menu.addSeparator()
         view_menu.addAction(act["focus_filter"])
         view_menu.addSeparator()
@@ -1336,8 +1392,12 @@ class DividendWindow(QMainWindow):
         visible_indices = [
             i for i, h in enumerate(self.holdings) if h.active or self.show_inactive
         ]
-        self._render_table("price", PRICE_COLUMNS, self._price_model, self._price_view, rows, visible_indices)
-        income_cols = list(INCOME_COLUMNS)
+        # 株数列のヘッダは投信の口数単位を示すので、両テーブルとも毎回貼り直す
+        # （設定を切り替えたのに「株数」のままだと桁が変わった理由が読めない）。
+        price_cols = self._with_shares_label(PRICE_COLUMNS)
+        self._price_model.setHorizontalHeaderLabels([lbl for lbl, _ in price_cols])
+        self._render_table("price", price_cols, self._price_model, self._price_view, rows, visible_indices)
+        income_cols = self._with_shares_label(INCOME_COLUMNS)
         if self.withdrawal_mode is not None:
             income_cols = [
                 ("年間収入(円)", key) if lbl == "年間配当(円)" else (lbl, key)
@@ -1602,6 +1662,9 @@ class DividendWindow(QMainWindow):
             market_fetched_at=self.market_fetched_at,
             market_source=self.market_source,
             generated_at=now_jst_iso(),
+            # 画面と同じ単位で株数を出す（優待スイッチと違い、こちらは表に載る
+            # 数字そのものが変わるので「出力条件」にも書く）。
+            fund_share_unit=self.fund_share_unit,
         )
         if self._save_or_notify(lambda: write_text_export(path, text)):
             # CSV 版は self.holdings を全件出すが、こちらは画面と同じく
@@ -1933,6 +1996,13 @@ class DividendWindow(QMainWindow):
             self._monthly_view.resizeColumnsToContents()
             clamp_free_text_columns(self._monthly_view, MONTHLY_COLUMNS)
 
+    def _with_shares_label(
+        self, columns: list[tuple[str, str]]
+    ) -> list[tuple[str, str]]:
+        """株数列のヘッダを現在の口数単位のラベルへ差し替えた列定義を返す。"""
+        label = FUND_SHARE_UNIT_COLUMN_LABELS[self.fund_share_unit]
+        return [(label if key == "shares" else lbl, key) for lbl, key in columns]
+
     def _render_table(self, tab_key, columns, model, view, rows, holding_indices: list[int] | None = None) -> None:
         state = self._capture_table_state(tab_key)
         header = view.horizontalHeader()
@@ -1944,10 +2014,13 @@ class DividendWindow(QMainWindow):
         for i, row in enumerate(rows):
             items: list[QStandardItem] = []
             for _, key in columns:
-                text, color = _format_cell(row, key)
+                text, color = _format_cell(row, key, self.fund_share_unit)
                 item = QStandardItem(text)
                 if key in NUMERIC_SORT_COLUMNS:
-                    item.setData(safe_float(row.get(key)), Qt.ItemDataRole.UserRole)
+                    item.setData(
+                        cell_sort_value(row, key, self.fund_share_unit),
+                        Qt.ItemDataRole.UserRole,
+                    )
                     item.setTextAlignment(
                         Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter
                     )
@@ -2091,6 +2164,39 @@ class DividendWindow(QMainWindow):
         self._refresh_view()
         self._notify(f"テーマを「{theme.theme_label(applied)}」に切り替えました")
 
+    def action_set_fund_share_unit(self, unit: str) -> None:
+        """投信の口数を表示・入力する単位を切り替えて設定へ保存する。
+
+        変えるのは表示（株数列とヘッダ）と編集ダイアログの入力欄だけで、CSV の
+        shares は常に万口単位のまま＝計算結果（時価・簿価・配当）は動かない。
+        """
+        if unit not in FUND_SHARE_UNITS:
+            return
+        if unit == self.fund_share_unit:
+            self._sync_fund_unit_actions()
+            return
+        self.fund_share_unit = unit
+        self._sync_fund_unit_actions()
+        self._save_or_notify(lambda: save_settings(fund_share_unit=unit))
+        self._refresh_view()
+        # 株数列は桁数が 1万倍変わる。保存済みの列幅のままだと数字が切れて
+        # 読めないので、この列だけ内容へ合わせ直す（他の列の幅は触らない）。
+        for view, columns in (
+            (self._price_view, PRICE_COLUMNS), (self._income_view, INCOME_COLUMNS)
+        ):
+            view.resizeColumnToContents([key for _, key in columns].index("shares"))
+        self._notify(
+            f"投信の口数を「{FUND_SHARE_UNIT_LABELS[unit]}」で表示します"
+            "（保存値・計算結果は変わりません）"
+        )
+
+    def _sync_fund_unit_actions(self) -> None:
+        """口数単位のチェック状態を現在値へ揃える（不正な設定値で開いた場合の保険）。"""
+        for unit in FUND_SHARE_UNITS:
+            action = self._actions.get(f"fund_unit_{unit}")
+            if action is not None:
+                action.setChecked(unit == self.fund_share_unit)
+
     def _sync_theme_actions(self) -> None:
         """テーマのチェック状態を現在値へ揃える（未知の設定値で開いた場合の保険）。"""
         for name in theme.THEMES:
@@ -2136,7 +2242,8 @@ class DividendWindow(QMainWindow):
         holding = self.holdings[holding_idx]
         # market は支払月の自動判定プレビューに使う（率と同じく表示層で算出しない）。
         dlg = EditHoldingDialog(
-            replace(holding), self, market=self.market_data_map.get(holding.symbol)
+            replace(holding), self, market=self.market_data_map.get(holding.symbol),
+            fund_share_unit=self.fund_share_unit,
         )
         if dlg.exec() == QDialog.DialogCode.Accepted and dlg.result_holding is not None:
             holdings = list(self.holdings)
@@ -2190,7 +2297,7 @@ class DividendWindow(QMainWindow):
             div_forecast_as_of_override=None, annual_benefit_jpy=0.0,
             withdrawal_fixed_jpy=None, withdrawal_rate=None, tax_rate=None, active=True,
         )
-        dlg = NewHoldingDialog(holding, self)
+        dlg = NewHoldingDialog(holding, self, fund_share_unit=self.fund_share_unit)
         if dlg.exec() == QDialog.DialogCode.Accepted and dlg.result_holding is not None:
             result = dlg.result_holding
             holdings = [*self.holdings, result]

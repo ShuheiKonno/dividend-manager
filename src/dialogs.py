@@ -33,7 +33,12 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from .calc import resolve_payment_month_ratios
+from .calc import (
+    DEFAULT_FUND_SHARE_UNIT,
+    format_shares,
+    from_display_shares,
+    resolve_payment_month_ratios,
+)
 from .models import Holding, MarketData
 
 
@@ -146,6 +151,39 @@ def _build_account_combo(current: str | None) -> QComboBox:
         index = combo.count() - 1
     combo.setCurrentIndex(index)
     return combo
+
+
+def shares_field_label(asset_type: str | None, unit: str) -> str:
+    """保有数入力欄のラベル。投信は単位設定に応じて口数の桁を明示する。"""
+    if asset_type != "fund":
+        return "保有株数"
+    return "保有口数" if unit == "per1" else "保有口数(÷10,000)"
+
+
+def _shares_placeholder(asset_type: str | None, unit: str) -> str:
+    """保有数入力欄のプレースホルダ（新規登録で資産種別に追随させる）。"""
+    if asset_type != "fund":
+        return "0"
+    return "口数（1口単位）" if unit == "per1" else "口数÷10,000"
+
+
+def fund_share_note(unit: str) -> str:
+    """投信の口数単位についての注記（編集・新規で同じ文言を使う）。
+
+    どちらのモードでも「取得単価・基準価額は1万口あたり」を書く。1口単位で
+    口数を入れるモードでは、口数だけが1口単位で単価はそのままなので、
+    株数 × 単価 が簿価にならない（この表示のずれを注記で説明する）。
+    """
+    if unit == "per1":
+        return (
+            "投信の口数は1口単位で入力します（表示 →「投信の口数単位」で変更可）。"
+            "取得単価・基準価額は1万口あたりの額なので、口数 × 単価 は簿価に"
+            "なりません。"
+        )
+    return (
+        "投信は基準価額が1万口単位。保有口数には「口数 ÷ 10,000」を入力して"
+        "ください（表示 →「投信の口数単位」で1口単位に変更できます）。"
+    )
 
 
 def _build_section(title: str, rows: list[tuple[str, QWidget]]) -> QGroupBox:
@@ -302,17 +340,29 @@ class _HoldingDialogBase(QDialog):
 
 class EditHoldingDialog(_HoldingDialogBase):
     def __init__(
-        self, holding: Holding, parent=None, *, market: MarketData | None = None
+        self,
+        holding: Holding,
+        parent=None,
+        *,
+        market: MarketData | None = None,
+        fund_share_unit: str = DEFAULT_FUND_SHARE_UNIT,
     ) -> None:
         super().__init__(parent)
         self.setWindowTitle("銘柄編集")
         self.holding = holding
         self.result_holding: Optional[Holding] = None
+        # 口数単位は表示・入力の変換だけに使う（保存値は常に万口単位）。
+        # 設定の読み出しは呼び出し側（gui）の責務——dialogs は io_csv を import
+        # しない（テストがダイアログを直接生成するため）。
+        self._fund_share_unit = fund_share_unit
+        self._shares_label = shares_field_label(holding.asset_type, fund_share_unit)
 
         # 基本情報
         self._name = QLineEdit(holding.name)
         self._account = _build_account_combo(holding.account)
-        self._shares = QLineEdit(str(holding.shares))
+        self._shares = QLineEdit(
+            format_shares(holding.shares, holding.asset_type, fund_share_unit)
+        )
         self._avg_cost = QLineEdit(str(holding.avg_cost))
         self._active = QCheckBox("有効")
         self._active.setChecked(holding.active)
@@ -369,8 +419,17 @@ class EditHoldingDialog(_HoldingDialogBase):
         self._withdrawal_note.setObjectName("dialogNote")
         self._withdrawal_note.setWordWrap(True)
 
+        # 投信のときだけ口数の単位を注記する（株式には口数の概念が無い）。
+        self._shares_note: QLabel | None = None
+        if holding.asset_type == "fund":
+            self._shares_note = QLabel(fund_share_note(fund_share_unit))
+            self._shares_note.setObjectName("dialogNote")
+            self._shares_note.setWordWrap(True)
+
         # 即時バリデーション登録
-        self._attach_validator(self._shares, lambda t: validate_required_number(t, "保有株数"))
+        self._attach_validator(
+            self._shares, lambda t: validate_required_number(t, self._shares_label)
+        )
         self._attach_validator(self._avg_cost, lambda t: validate_required_number(t, "取得単価"))
         self._attach_validator(self._div_gross, lambda t: validate_optional_number(t, "配当(税引前)"))
         self._attach_validator(self._div_date, validate_optional_date)
@@ -385,13 +444,16 @@ class EditHoldingDialog(_HoldingDialogBase):
         buttons.rejected.connect(self.reject)
 
         layout = QVBoxLayout(self)
-        layout.addWidget(_build_section("基本情報", [
+        basic_section = _build_section("基本情報", [
             ("銘柄名", self._name),
             ("口座", self._account),
-            ("保有株数", self._shares),
+            (self._shares_label, self._shares),
             ("取得単価", self._avg_cost),
             ("", self._active),
-        ]))
+        ])
+        if self._shares_note is not None:
+            basic_section.layout().addRow(self._shares_note)
+        layout.addWidget(basic_section)
         # セクションは収入の種類ごとに切る（配当（取崩を含む）/ 優待）。月だけを
         # 別枠へ集めると、性質の違う配当と優待が同じ枠に並び、金額はさらに別の枠に
         # 載る——1銘柄の優待を設定するのに3枠を行き来することになる。
@@ -419,7 +481,12 @@ class EditHoldingDialog(_HoldingDialogBase):
     def _on_save(self) -> None:
         try:
             name = self._name.text().strip()
-            shares = _non_negative(_parse_num(self._shares.text()), "保有株数")
+            # 入力欄は表示単位。保存値（万口単位）へ戻してから代入する。
+            shares = from_display_shares(
+                _non_negative(_parse_num(self._shares.text()), self._shares_label),
+                self.holding.asset_type,
+                self._fund_share_unit,
+            )
             avg_cost = _non_negative(_parse_num(self._avg_cost.text()), "取得単価")
             div_gross_text = self._div_gross.text().strip()
             div_date = _optional_iso_date(self._div_date.text().strip() or None)
@@ -465,14 +532,21 @@ class EditHoldingDialog(_HoldingDialogBase):
 
 
 class NewHoldingDialog(_HoldingDialogBase):
-    def __init__(self, holding: Holding, parent=None) -> None:
+    def __init__(
+        self,
+        holding: Holding,
+        parent=None,
+        *,
+        fund_share_unit: str = DEFAULT_FUND_SHARE_UNIT,
+    ) -> None:
         super().__init__(parent)
         self.setWindowTitle("新規登録")
         self.holding = holding
         self.result_holding: Optional[Holding] = None
+        self._fund_share_unit = fund_share_unit
 
         note = QLabel(
-            "投信(fund)は基準価額が1万口単位。保有株数には「口数÷10,000」を入力してください。\n"
+            f"{fund_share_note(fund_share_unit)}\n"
             "投信の ISIN コードは基準価額を自動取得します。"
         )
         note.setObjectName("dialogNote")
@@ -496,7 +570,15 @@ class NewHoldingDialog(_HoldingDialogBase):
         if holding.currency == "USD":
             self._currency.setCurrentIndex(1)
         self._shares = QLineEdit("")
-        self._shares.setPlaceholderText("投信は口数÷10,000")
+        self._shares.setPlaceholderText(_shares_placeholder(
+            holding.asset_type, fund_share_unit
+        ))
+        # 資産種別は登録前に変えられる。入力済みの数字は書き換えず（ユーザーが
+        # 打った値を勝手に 1万倍しない）、ラベルとプレースホルダだけ追随させて
+        # 単位が変わったことを見せる。保存時は最終的な資産種別で解釈する。
+        self._asset_type.currentIndexChanged.connect(
+            lambda _index: self._sync_shares_labels()
+        )
         self._avg_cost = QLineEdit("")
         self._avg_cost.setPlaceholderText("0")
         self._active = QCheckBox("有効")
@@ -514,7 +596,10 @@ class NewHoldingDialog(_HoldingDialogBase):
         self._withdrawal_rate = QLineEdit("")
 
         # 即時バリデーション登録
-        self._attach_validator(self._shares, lambda t: validate_required_number(t, "保有株数"))
+        self._attach_validator(
+            self._shares,
+            lambda t: validate_required_number(t, self._shares_field_label()),
+        )
         self._attach_validator(self._avg_cost, lambda t: validate_required_number(t, "取得単価"))
         self._attach_validator(self._benefit, lambda t: validate_required_number(t, "優待換算額"))
         self._attach_validator(self._withdrawal_fixed, lambda t: validate_optional_number(t, "定額取崩額"))
@@ -528,16 +613,19 @@ class NewHoldingDialog(_HoldingDialogBase):
 
         layout = QVBoxLayout(self)
         layout.addWidget(note)
-        layout.addWidget(_build_section("基本情報", [
+        basic_section = _build_section("基本情報", [
             ("銘柄コード/ティッカー", self._symbol),
             ("銘柄名", self._name),
             ("口座", self._account),
             ("資産種別", self._asset_type),
             ("通貨", self._currency),
-            ("保有株数", self._shares),
+            (self._shares_field_label(), self._shares),
             ("取得単価", self._avg_cost),
             ("", self._active),
-        ]))
+        ])
+        # 資産種別の切替でラベル文言を書き換えるため参照を保持する。
+        self._shares_label_widget = basic_section.layout().labelForField(self._shares)
+        layout.addWidget(basic_section)
         # 編集ダイアログは取崩を配当セクションに含めるが、新規は配当欄そのものを
         # 持たないため（入れる枠が無い）取崩は独立セクションのまま残す。
         # 支払月・受取月は新規では扱わない（登録後に編集ダイアログで指定する）。
@@ -551,6 +639,24 @@ class NewHoldingDialog(_HoldingDialogBase):
         ]))
         layout.addWidget(self._error_label)
         layout.addWidget(buttons)
+
+    def _current_asset_type(self) -> str:
+        return str(self._asset_type.currentData())
+
+    def _shares_field_label(self) -> str:
+        return shares_field_label(self._current_asset_type(), self._fund_share_unit)
+
+    def _sync_shares_labels(self) -> None:
+        """資産種別に合わせて保有数欄のラベル・プレースホルダを更新する。"""
+        asset_type = self._current_asset_type()
+        self._shares.setPlaceholderText(
+            _shares_placeholder(asset_type, self._fund_share_unit)
+        )
+        label = getattr(self, "_shares_label_widget", None)
+        if label is not None:
+            label.setText(self._shares_field_label())
+        # ラベル（＝エラーメッセージ内の名称）が変わるので検証も引き直す。
+        self._revalidate(self._shares)
 
     def _on_save(self) -> None:
         symbol = self._symbol.text().strip()
@@ -569,7 +675,15 @@ class NewHoldingDialog(_HoldingDialogBase):
             QMessageBox.warning(self, "入力エラー", "通貨は JPY または USD を入力してください。")
             return
         try:
-            shares = _non_negative(_parse_num(self._shares.text()), "保有株数")
+            # 単位の解釈は「保存時点の資産種別」で行う（登録前に株式⇔投信を
+            # 切り替えても、最後に選ばれた種別の単位で読む）。
+            shares = from_display_shares(
+                _non_negative(
+                    _parse_num(self._shares.text()), self._shares_field_label()
+                ),
+                asset_type,
+                self._fund_share_unit,
+            )
             avg_cost = _non_negative(_parse_num(self._avg_cost.text()), "取得単価")
             benefit = _non_negative(_parse_num(self._benefit.text()), "優待換算額")
             withdrawal_fixed_text = self._withdrawal_fixed.text().strip()

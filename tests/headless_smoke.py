@@ -215,6 +215,74 @@ def _check_theme_toggle(w) -> None:
     assert widgets.profit_text_qcolor(-1.0).name() == theme.PALETTES[original]["PROFIT_DOWN"]
 
 
+def _check_fund_share_unit(w) -> None:
+    """投信の口数単位が表示・入力だけを変え、保存値を動かさないことを検証する。
+
+    ここが壊れると holdings.csv の口数が 1万倍ずれる（エラーは出ないまま時価と
+    配当だけが変わる）ので、往復（開いて保存しただけ）の恒等性まで見る。
+    """
+    from src.calc import FUND_SHARE_UNITS, FUND_SHARE_UNIT_COLUMN_LABELS
+
+    original = w.fund_share_unit
+    for unit in FUND_SHARE_UNITS:
+        assert f"fund_unit_{unit}" in w._actions, sorted(w._actions)
+
+    fund = _holding(
+        symbol="JP90C000H1T1", name="投信", asset_type="fund",
+        shares=206.7284, avg_cost=10_000.0,
+    )
+    row = {"asset_type": "fund", "shares": 206.7284, "active": True}
+
+    w.action_set_fund_share_unit("per1")
+    assert w.fund_share_unit == "per1"
+    assert w._actions["fund_unit_per1"].isChecked()
+    assert not w._actions["fund_unit_per10k"].isChecked()
+    # 表示（セル・ヘッダ・並び替えの生値）が 1口単位になること
+    assert gui._format_cell(row, "shares", "per1")[0] == "2,067,284.00"
+    assert gui.cell_sort_value(row, "shares", "per1") == 2_067_284.0
+    label = FUND_SHARE_UNIT_COLUMN_LABELS["per1"]
+    assert (label, "shares") in w._with_shares_label(gui.PRICE_COLUMNS)
+    header = w._price_view.model().headerData(
+        [k for _, k in gui.PRICE_COLUMNS].index("shares"), Qt.Orientation.Horizontal
+    )
+    assert header == label, f"株数列のヘッダが単位に追随しない: {header!r}"
+    # 株式は単位設定の影響を受けない
+    stock_row = {"asset_type": "stock", "shares": 100.0, "active": True}
+    assert gui._format_cell(stock_row, "shares", "per1")[0] == "100.00"
+
+    # 入力欄も 1口単位。開いて保存しただけで保存値が変わらないこと（往復が恒等）
+    dlg = EditHoldingDialog(fund, fund_share_unit="per1")
+    assert dlg._shares.text() == "2067284", dlg._shares.text()
+    dlg._on_save()
+    assert dlg.result_holding is not None
+    assert dlg.result_holding.shares == 206.7284, dlg.result_holding.shares
+
+    # 万口単位でも同様（既定モード）
+    w.action_set_fund_share_unit("per10k")
+    assert gui._format_cell(row, "shares", "per10k")[0] == "206.73"
+    dlg2 = EditHoldingDialog(
+        _holding(symbol="JP90C000H1T1", asset_type="fund", shares=206.7284),
+        fund_share_unit="per10k",
+    )
+    assert dlg2._shares.text() == "206.7284"
+    dlg2._on_save()
+    assert dlg2.result_holding is not None
+    assert dlg2.result_holding.shares == 206.7284
+
+    # 新規登録は「保存時点の資産種別」で単位を解釈する（株式→投信の切替に追随）
+    nd = NewHoldingDialog(_holding(symbol="JP90C000H1T1", name="投信"), fund_share_unit="per1")
+    nd._shares.setText("2,067,284")
+    nd._asset_type.setCurrentIndex(nd._asset_type.findData("fund"))
+    assert nd._shares.text() == "2,067,284", "種別を変えたら入力値が書き換えられた"
+    assert "口数" in nd._shares_label_widget.text(), nd._shares_label_widget.text()
+    nd._on_save()
+    assert nd.result_holding is not None
+    assert nd.result_holding.shares == 206.7284, nd.result_holding.shares
+
+    w.action_set_fund_share_unit(original)  # 設定（fund_share_unit）を元へ戻す
+    assert w.fund_share_unit == original
+
+
 def _check_account_combo() -> None:
     """口座が選択式で、既存値・未知値・未設定を取りこぼさないこと。"""
     dlg = EditHoldingDialog(_holding(account="特定"))
@@ -541,6 +609,10 @@ def main() -> None:
     # 表示メニュー: テーマ（ダーク / ライト）はここが唯一の切替導線
     view_actions = [a.text() for a in menus[2].menu().actions() if a.text()]
     assert any("テーマ" in t for t in view_actions), f"表示にテーマが無い: {view_actions}"
+    # 投信の口数単位（万口 / 1口）もここが唯一の切替導線
+    assert any("口数単位" in t for t in view_actions), (
+        f"表示に投信の口数単位が無い: {view_actions}"
+    )
     help_actions = [a.text() for a in menus[3].menu().actions() if a.text()]
     assert any("ショートカット" in t for t in help_actions), help_actions
 
@@ -560,6 +632,7 @@ def main() -> None:
     _check_monthly_tab(w)
     _check_withdrawal_trend_note(w)
     _check_theme_toggle(w)
+    _check_fund_share_unit(w)
 
     # 編集ダイアログ: 即時バリデーション（赤枠プロパティ＋集約エラーラベル）
     dlg = EditHoldingDialog(_holding())

@@ -12,7 +12,12 @@ CSV エクスポート（io_csv.export_holdings_csv）は holdings.csv と同一
 
 from __future__ import annotations
 
-from .calc import Summary
+from .calc import (
+    DEFAULT_FUND_SHARE_UNIT,
+    FUND_SHARE_UNIT_COLUMN_LABELS,
+    Summary,
+    to_display_shares,
+)
 from .utils import safe_float
 
 # 列定義 (ヘッダラベル, row のキー, 書式種別)。
@@ -26,7 +31,9 @@ COLUMNS: list[tuple[str, str, str]] = [
     ("銘柄名", "name", "text"),
     ("口座", "account", "text"),
     ("種別", "asset_type", "asset_type"),
-    ("株数", "shares", "num2"),
+    # 株数はラベル・値とも投信の口数単位（設定 fund_share_unit）に従う。
+    # ラベルは _columns が差し替え、値は _format が変換する。
+    ("株数", "shares", "shares"),
     ("通貨", "currency", "text"),
     ("購入単価", "avg_cost", "num2"),
     ("現在株価", "last_price", "num2"),
@@ -92,9 +99,18 @@ def _pct(value: object) -> str:
     return f"{number * 100:.2f}"
 
 
-def _format(row: dict, key: str, kind: str) -> str:
+def _format(
+    row: dict, key: str, kind: str, fund_share_unit: str = DEFAULT_FUND_SHARE_UNIT
+) -> str:
     """row の1セルを書式種別に従って文字列化する（エスケープは呼び出し側）。"""
     value = row.get(key)
+    if kind == "shares":
+        # 保存値は常に万口単位。画面と同じ単位で出す（1口単位モードでは
+        # 投信の行だけ 10,000 倍された数になる）。
+        return _num(
+            to_display_shares(safe_float(value), row.get("asset_type"), fund_share_unit),
+            2,
+        )
     if kind == "num0":
         return _num(value, 0)
     if kind == "num2":
@@ -120,9 +136,17 @@ def _table(headers: list[str], rows: list[list[str]]) -> list[str]:
     return lines
 
 
-def _columns(withdrawal_mode: str | None, has_inactive: bool) -> list[tuple[str, str, str]]:
+def _columns(
+    withdrawal_mode: str | None,
+    has_inactive: bool,
+    fund_share_unit: str = DEFAULT_FUND_SHARE_UNIT,
+) -> list[tuple[str, str, str]]:
     """出力する列定義を返す（収入モードでのラベル入替と状態列の有無を反映）。"""
-    columns = list(COLUMNS)
+    columns = [
+        (FUND_SHARE_UNIT_COLUMN_LABELS[fund_share_unit], key, kind)
+        if key == "shares" else (label, key, kind)
+        for label, key, kind in COLUMNS
+    ]
     if withdrawal_mode is not None:
         # 画面（gui._refresh_view）が同じ入替をしている。合わせないと、投信の
         # 取崩額が入った列に「年間配当」という誤ったラベルが付く。
@@ -135,7 +159,12 @@ def _columns(withdrawal_mode: str | None, has_inactive: bool) -> list[tuple[str,
     return columns
 
 
-def _notes(dividend_mode: str, withdrawal_mode: str | None, has_inactive: bool) -> list[str]:
+def _notes(
+    dividend_mode: str,
+    withdrawal_mode: str | None,
+    has_inactive: bool,
+    fund_share_unit: str = DEFAULT_FUND_SHARE_UNIT,
+) -> list[str]:
     """LLM が冷えた状態で読んだとき誤読しうる前提を列挙する。
 
     この節がこの機能の実質的な本体。数字だけ渡すと、税率・配当の近似・投信の
@@ -150,8 +179,14 @@ def _notes(dividend_mode: str, withdrawal_mode: str | None, has_inactive: bool) 
         "サマリーの `合計(円)` も配当＋優待。",
         "- 年間配当は直近約370日の**配当実績の合計**による近似で、会社予想ではない。"
         "四半期・月次配当はこの窓で年換算される。",
-        "- 投資信託の `株数` は口数 ÷ 10,000（日本の基準価額が1万口あたりのため）。"
-        "他の資産と口数の桁を直接比較しないこと。",
+        (
+            "- 投資信託の `株数` は口数そのもの（1口単位）。"
+            "`購入単価` と `現在株価` は1万口あたりの基準価額なので、"
+            "この行だけ 株数 × 単価 は簿価にならない（簿価・時価の列は換算済み）。"
+            if fund_share_unit == "per1"
+            else "- 投資信託の `株数` は口数 ÷ 10,000（日本の基準価額が1万口あたりのため）。"
+            "他の資産と口数の桁を直接比較しないこと。"
+        ),
         "- 価格を取得できない投資信託は簿価を時価の代わりに使っている。"
         "その行の損益は 0 になるが、実際に損益が無いという意味ではない。",
         "- サマリーの `評価額計` / `簿価計` / `損益` は、対象銘柄の**全件で値が揃った"
@@ -204,6 +239,7 @@ def build_holdings_markdown(
     market_fetched_at: str | None,
     market_source: str | None,
     generated_at: str,
+    fund_share_unit: str = DEFAULT_FUND_SHARE_UNIT,
 ) -> str:
     """計算済み行と Summary から、LLM が単体で読める Markdown 文書を組む。
 
@@ -216,7 +252,7 @@ def build_holdings_markdown(
     影響しない。「出力条件」に並べると影響したように読めるので載せない。
     """
     inactive_count = sum(1 for row in rows if row.get("active") is False)
-    columns = _columns(withdrawal_mode, inactive_count > 0)
+    columns = _columns(withdrawal_mode, inactive_count > 0, fund_share_unit)
     income_label = "年間収入" if withdrawal_mode is not None else "年間配当"
 
     count_text = str(len(rows))
@@ -236,6 +272,11 @@ def build_holdings_markdown(
             ["USDJPY", _num(fx_rate, 4)],
             ["株価の取得日時", market_fetched_at or ""],
             ["株価の取得元", market_source or ""],
+            # 優待スイッチと違い、この設定は表に出る数字そのものを変える。
+            [
+                "投信の口数単位",
+                "1口単位" if fund_share_unit == "per1" else "1万口単位（口数÷10,000）",
+            ],
             ["銘柄数", count_text],
             ["時価を算出できなかった銘柄数", str(summary.missing_market_value_count)],
         ],
@@ -264,13 +305,18 @@ def build_holdings_markdown(
     lines.append("")
     lines += _table(
         [label for label, _, _ in columns],
-        [[_format(row, key, kind) for _, key, kind in columns] for row in rows],
+        [
+            [_format(row, key, kind, fund_share_unit) for _, key, kind in columns]
+            for row in rows
+        ],
     )
     lines.append("")
 
     lines.append("## 前提・注意")
     lines.append("")
-    lines += _notes(dividend_mode, withdrawal_mode, inactive_count > 0)
+    lines += _notes(
+        dividend_mode, withdrawal_mode, inactive_count > 0, fund_share_unit
+    )
     lines.append("")
 
     return "\n".join(lines)
