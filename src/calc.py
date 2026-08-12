@@ -21,6 +21,85 @@ class Summary:
     missing_market_value_count: int
 
 
+# ---- 投資信託の口数単位（表示・入力の変換のみ） ----
+#
+# 日本の投信の基準価額は「1万口あたり」なので、CSV の shares は口数 ÷ 10,000 を
+# 正とする（この意味論は設定で変えない）。設定 fund_share_unit が変えるのは
+# **表示と入力欄だけ**で、保存値の意味は不変＝compute_rows の掛け算
+# （shares × 単価 / shares × 配当単価）は一切変わらない。ここを「1口単位で
+# 保存する」設計にすると、設定を切り替えた瞬間に既存の holdings.csv が 1万倍
+# ずれて読まれる（エラーは出ない）。
+FUND_SHARE_UNITS = ("per10k", "per1")
+DEFAULT_FUND_SHARE_UNIT = "per10k"
+FUND_SHARE_UNIT_LABELS = {
+    "per10k": "1万口単位（口数 ÷ 10,000 を入力）",
+    "per1": "1口単位（口数をそのまま入力）",
+}
+# 表の「株数」列のヘッダ。どちらのモードでも投信の単位を明示する
+# （片方だけ書くと、既定のまま使っている人には単位の手掛かりが無い）。
+FUND_SHARE_UNIT_COLUMN_LABELS = {
+    "per10k": "株数(投信:万口)",
+    "per1": "株数(投信:口数)",
+}
+_FUND_SHARE_UNIT_FACTOR = 10000.0
+
+
+def fund_share_factor(asset_type: str | None, unit: str | None) -> float:
+    """保存値 → 表示値の倍率を返す。投信かつ 1口単位のときだけ 10,000。
+
+    株式・ETF の株数は単位の指定に関わらず 1 倍（口数の概念が無い）。
+    """
+    if asset_type == "fund" and unit == "per1":
+        return _FUND_SHARE_UNIT_FACTOR
+    return 1.0
+
+
+def to_display_shares(
+    shares: float | None, asset_type: str | None, unit: str | None
+) -> float | None:
+    """CSV の shares（万口単位）を、表示・入力欄で見せる値へ変換する。"""
+    if shares is None:
+        return None
+    factor = fund_share_factor(asset_type, unit)
+    if factor == 1.0:
+        return shares
+    # 206.7284 × 10000 が 2067283.9999999998 にならないよう丸める。
+    return round(shares * factor, 6)
+
+
+def from_display_shares(
+    value: float, asset_type: str | None, unit: str | None
+) -> float:
+    """入力欄の値を CSV の shares（万口単位）へ戻す。
+
+    to_display_shares と往復して元へ戻る必要がある（編集ダイアログを開いて
+    そのまま保存しただけで CSV の数字が変わってはいけない）。
+    """
+    factor = fund_share_factor(asset_type, unit)
+    if factor == 1.0:
+        return value
+    return round(value / factor, 10)
+
+
+def format_shares(
+    shares: float | None, asset_type: str | None, unit: str | None
+) -> str:
+    """入力欄へ入れる文字列。末尾の余分な 0 と小数点を落とす。
+
+    str(float) をそのまま使うと 1口単位で 2067284.0000000002 のような値が
+    入力欄へ出る（そのまま保存すると CSV の数字が微妙に変わる）。
+    """
+    value = to_display_shares(shares, asset_type, unit)
+    if value is None:
+        return ""
+    text = f"{value:.6f}".rstrip("0").rstrip(".") or "0"
+    if float(text) != value:
+        # 6桁に収まらない値（口未満の端数を持つ投信など）は丸めずそのまま出す。
+        # 桁を落とすと「開いて保存しただけ」で保有数が減る。
+        return repr(value)
+    return text
+
+
 _DEFAULT_TAX_RATE = 0.20315  # 日本の源泉税率（所得税15.315% + 住民税5%）
 # 米国株の配当は日米租税条約により米国側で 10% 源泉徴収される。NISA は国内が
 # 非課税＝外国税額控除に充てる国内税額が無いため、この 10% は引かれたまま残る。

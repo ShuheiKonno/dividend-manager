@@ -5,6 +5,8 @@ from __future__ import annotations
 from src.dialogs import (
     ACCOUNT_CHOICES,
     auto_dividend_months,
+    fund_share_note,
+    shares_field_label,
     validate_optional_date,
     validate_optional_number,
     validate_optional_rate,
@@ -70,3 +72,20 @@ def test_auto_dividend_months_ignores_manual_setting():
     # 権利落ち 3月/9月 → 支払 6月/12月。手動の [1, 2] には引きずられない。
     assert auto_dividend_months(holding, market) == [6, 12]
     assert auto_dividend_months(holding, None) == []
+
+
+# ---- 投信の口数単位（ラベル・注記） ----
+
+def test_shares_field_label_follows_asset_type_and_unit():
+    assert shares_field_label("stock", "per10k") == "保有株数"
+    assert shares_field_label("stock", "per1") == "保有株数"  # 株式は単位設定と無関係
+    assert shares_field_label("fund", "per10k") == "保有口数(÷10,000)"
+    assert shares_field_label("fund", "per1") == "保有口数"
+
+
+def test_fund_share_note_mentions_price_basis_in_both_modes():
+    """どちらの単位でも「単価は1万口あたり」を書く（そこは設定で変わらない）。"""
+    for unit in ("per10k", "per1"):
+        assert "1万口" in fund_share_note(unit)
+    assert "口数 ÷ 10,000" in fund_share_note("per10k")
+    assert "1口単位" in fund_share_note("per1")

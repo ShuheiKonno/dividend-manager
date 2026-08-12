@@ -11,7 +11,11 @@ from src.calc import (
     _pick_div_ps,
     compute_rows,
     default_tax_rate,
+    format_shares,
+    from_display_shares,
+    fund_share_factor,
     is_nisa_account,
+    to_display_shares,
 )
 from src.models import Holding, MarketData
 
@@ -413,3 +417,38 @@ def test_rows_month_ratios_none_when_unknown():
     h = _holding(annual_div_ps_gross_override=60.0)
     rows, _ = compute_rows([h], {"7203": _market()}, 150.0, "gross")
     assert rows[0]["dividend_month_ratios"] is None
+
+
+# ---- 投信の口数単位（表示・入力の変換のみ） ----
+
+def test_fund_share_factor_only_scales_funds_in_per1_mode():
+    assert fund_share_factor("fund", "per1") == 10000.0
+    assert fund_share_factor("fund", "per10k") == 1.0
+    # 株式・ETF は単位設定に関わらず素通し（口数の概念が無い）。
+    assert fund_share_factor("stock", "per1") == 1.0
+    assert fund_share_factor(None, "per1") == 1.0
+
+
+def test_display_shares_round_trip_is_exact():
+    """開いて保存しただけで CSV の数字が変わらないこと（往復が恒等）。"""
+    # 6桁に収まらない値・極小値も丸めない（保存で保有数が減らないこと）。
+    for shares in (206.7284, 0.0, 1.0, 12345.6789, 0.0001, 1e-7, 1234.56789012):
+        for unit in ("per10k", "per1"):
+            shown = to_display_shares(shares, "fund", unit)
+            assert from_display_shares(shown, "fund", unit) == shares
+    # 表示側も浮動小数の誤差を出さない（2067283.9999999998 にならない）。
+    assert to_display_shares(206.7284, "fund", "per1") == 2067284.0
+    assert format_shares(206.7284, "fund", "per1") == "2067284"
+    assert format_shares(206.7284, "fund", "per10k") == "206.7284"
+    assert format_shares(100.0, "stock", "per1") == "100"
+    assert to_display_shares(None, "fund", "per1") is None
+
+
+def test_compute_rows_ignores_fund_share_unit():
+    """計算は保存値（万口単位）だけを見る＝単位設定で時価・簿価が動かないこと。"""
+    h = _holding(asset_type="fund", symbol="JP90C000H1T1", shares=206.7284, avg_cost=10_000.0)
+    rows, summary = compute_rows([h], {}, 150.0, "gross")
+    # 価格未取得のファンドは簿価を時価の代わりに使う（既存仕様）。
+    assert rows[0]["book_value_jpy"] == pytest.approx(2_067_284.0)
+    assert rows[0]["shares"] == 206.7284  # row は常に保存値のまま
+    assert summary.total_market_value_jpy == pytest.approx(2_067_284.0)

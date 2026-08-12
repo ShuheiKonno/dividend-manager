@@ -321,6 +321,31 @@ def test_settings_theme_roundtrip(monkeypatch, tmp_path):
     assert io_csv.load_settings()["theme"] == theme.THEMES[-1]
 
 
+def test_settings_fund_share_unit_roundtrip(monkeypatch, tmp_path):
+    """投信の口数単位が往復し、未知の値は拒否されること（許容値は calc 側が定義）。"""
+    from src.calc import FUND_SHARE_UNITS
+
+    _configure_tmp_dirs(monkeypatch, tmp_path)
+    for unit in FUND_SHARE_UNITS:
+        io_csv.save_settings(fund_share_unit=unit)
+        assert io_csv.load_settings()["fund_share_unit"] == unit
+    io_csv.save_settings(fund_share_unit="per100")  # 未知の単位は拒否
+    assert io_csv.load_settings()["fund_share_unit"] == FUND_SHARE_UNITS[-1]
+
+
+def test_export_holdings_csv_keeps_canonical_shares(monkeypatch, tmp_path):
+    """エクスポートは shares を保存値（万口単位）のまま出すこと。
+
+    表示単位を掛けて出すと export → import が恒等でなくなり、取り込むたびに
+    口数が 1万倍ずれる（エラーは出ない）。
+    """
+    _configure_tmp_dirs(monkeypatch, tmp_path)
+    holding = _holding("JP90C000H1T1", asset_type="fund", shares=206.7284)
+    path = tmp_path / "export.csv"
+    io_csv.export_holdings_csv(path, [holding])
+    assert io_csv.read_holdings_csv(path)[0].shares == 206.7284
+
+
 def test_settings_pie_threshold_and_column_widths(monkeypatch, tmp_path):
     _configure_tmp_dirs(monkeypatch, tmp_path)
     io_csv.save_settings(

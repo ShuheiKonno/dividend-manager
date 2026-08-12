@@ -18,6 +18,7 @@ from .models import (
     FXRate,
     HistoryRecord,
 )
+from .calc import FUND_SHARE_UNITS as _FUND_SHARE_UNITS  # 設定 "fund_share_unit"
 from .theme import THEMES as _THEMES  # 設定 "theme" の許容値（Qt 非依存）
 from .utils import now_jst, normalize_iso_date
 
@@ -195,7 +196,12 @@ def save_history(rows: list[HistoryRecord]) -> None:
 
 
 def export_holdings_csv(path: str | Path, rows: list[Holding]) -> None:
-    """保有銘柄を外部パスへ CSV 出力する（holdings.csv と同一フォーマット）。"""
+    """保有銘柄を外部パスへ CSV 出力する（holdings.csv と同一フォーマット）。
+
+    shares は保存値のまま（投信は万口単位）出す。設定 fund_share_unit は表示と
+    入力欄だけの変換で、ここで掛けると export → import が恒等でなくなり、
+    取り込むたびに口数が 1万倍ずれる。read_holdings_csv 側も同様に変換しない。
+    """
     _atomic_write(
         Path(path),
         [row.to_dict() for row in rows],
@@ -349,6 +355,10 @@ _SETTINGS_VALIDATORS: dict[str, set | Callable[[object], bool]] = {
     "show_inactive": lambda v: isinstance(v, bool),
     # 表示テーマ（ダーク / ライト）。許容値は theme.THEMES が唯一の定義元。
     "theme": set(_THEMES),
+    # 投信の口数を「万口単位（口数÷10,000）」と「1口単位」のどちらで
+    # 表示・入力するか。CSV の shares は常に万口単位で、この設定は表示層と
+    # 入力欄だけを変換する（calc の変換ヘルパー参照）。
+    "fund_share_unit": set(_FUND_SHARE_UNITS),
 }
 
 
