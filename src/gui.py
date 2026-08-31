@@ -93,6 +93,13 @@ from .calc import (
     compute_rows,
     monthly_breakdown,
     to_display_shares,
+    summary_yields,
+    row_yield_keys,
+    DEFAULT_YIELD_SCOPE,
+    YIELD_SCOPES,
+    YIELD_SCOPE_LABELS,
+    YIELD_SCOPE_SUFFIX,
+    YIELD_BENEFIT_SUFFIX,
 )
 from .history import (
     INCOME_BASE_KEYS,
@@ -230,6 +237,8 @@ NUMERIC_SORT_COLUMNS = {
     "market_value_jpy",
     "yield_on_cost",
     "yield_on_value",
+    "yield_on_cost_div_only",
+    "yield_on_value_div_only",
     "profit_jpy",
     "profit_rate",
     "dividend_jpy",
@@ -315,7 +324,10 @@ def _cell_text_and_color(
         return fmt_number(val, 0), profit_text_qcolor(val)
     if key == "profit_rate":
         return fmt_percent(val, 2), profit_text_qcolor(val)
-    if key in ("yield_on_cost", "yield_on_value"):
+    if key in (
+        "yield_on_cost", "yield_on_value",
+        "yield_on_cost_div_only", "yield_on_value_div_only",
+    ):
         return fmt_percent(val, 2), None
     return str(val or ""), None
 
@@ -426,6 +438,10 @@ class DividendWindow(QMainWindow):
         # 取崩の有無は「収入」モード（withdrawal_mode）が唯一の入口なので独立の
         # 選択肢を持たない（二重に持つと表と推移で別々の状態になり食い違う）。
         self.income_benefit: str = _saved.get("income_benefit", "without")
+        # 簿価/時価利回りに投信を含めるか。無分配ファンドが「利回り 0%」として
+        # 分母だけを膨らませるため、株式・ETF だけの利回りも見られるようにする。
+        # 効くのは KPI カード2枚と Markdown サマリーだけ（行の利回り列は不変）。
+        self.yield_scope: str = _saved.get("yield_scope", DEFAULT_YIELD_SCOPE)
         # 円グラフの「その他」集約閾値（評価額/配当タブで独立）と起動時の表示タブ。
         self.pie_threshold_asset: float = float(_saved.get("pie_threshold_asset", 2.0))
         self.pie_threshold_income: float = float(_saved.get("pie_threshold_income", 2.0))
@@ -1003,6 +1019,14 @@ class DividendWindow(QMainWindow):
             self._on_income_benefit,
         )
         bar.addWidget(self._benefit_combo)
+        # 利回りの集計対象。優待と同じく「同じ画面の別の数え方」なのでここへ並べる。
+        bar.addWidget(QLabel("   利回り: "))
+        self._yield_scope_combo = self._make_combo(
+            [(key, YIELD_SCOPE_LABELS[key]) for key in YIELD_SCOPES],
+            self.yield_scope,
+            self._on_yield_scope,
+        )
+        bar.addWidget(self._yield_scope_combo)
 
         spacer = QWidget()
         spacer.setSizePolicy(
@@ -1034,6 +1058,9 @@ class DividendWindow(QMainWindow):
         combo = getattr(self, "_withdrawal_combo", None)
         if combo is not None:
             combo.setCurrentIndex(combo.findData(self.withdrawal_mode or "none"))
+        combo = getattr(self, "_yield_scope_combo", None)
+        if combo is not None:
+            combo.setCurrentIndex(combo.findData(self.yield_scope))
 
     def _make_combo(
         self, defs: list[tuple[str, str]], current_key: str, on_select
@@ -1289,6 +1316,20 @@ class DividendWindow(QMainWindow):
         # 内訳テーブルの列構成（優待・合計の表示/非表示）が変わるので幅を取り直す。
         self._monthly_columns_sized = False
         self._refresh_view()
+        self._resize_yield_columns()
+
+    def _on_yield_scope(self, key: str) -> None:
+        """利回りの集計対象（投信込み/投信除く）を切り替える。
+
+        変わるのは KPI カード2枚（値とカード名の接尾辞）と Markdown サマリー
+        だけ。行データ・構成グラフ・月別・推移には効かないので、列幅の取り直し
+        は不要。
+        """
+        if key == self.yield_scope:
+            return
+        self.yield_scope = key
+        self._save_or_notify(lambda: save_settings(yield_scope=key))
+        self._refresh_view()
 
     def _on_filter_changed(self, text: str) -> None:
         self._price_proxy.set_filter_text(text)
@@ -1392,6 +1433,17 @@ class DividendWindow(QMainWindow):
         visible_indices = [
             i for i, h in enumerate(self.holdings) if h.active or self.show_inactive
         ]
+        # 優待スイッチは構成グラフ・月別・推移だけでなく、KPI カードと両テーブルの
+        # 利回り（分子）にも効く。先に決めて表・カード・グラフで同じ値を使う。
+        with_benefit = self.income_benefit == "with"
+        yield_suffix = YIELD_BENEFIT_SUFFIX if with_benefit else ""
+        # 利回りの定義（分子と集計対象）。KPI カードと表のヘッダの両方へ
+        # ツールチップで載せる——接尾辞は幅次第で切れるので、切れても読める
+        # 経路を必ず用意する（自由記述列と同じ作法）。
+        yield_tip = (
+            f"分子: {'配当＋優待' if with_benefit else '配当のみ'}"
+            f" / 対象: {'投資信託を除く' if self.yield_scope == 'ex_fund' else '投資信託を含む'}"
+        )
         # 株数列のヘッダは投信の口数単位を示すので、両テーブルとも毎回貼り直す
         # （設定を切り替えたのに「株数」のままだと桁が変わった理由が読めない）。
         price_cols = self._with_shares_label(PRICE_COLUMNS)
@@ -1403,7 +1455,23 @@ class DividendWindow(QMainWindow):
                 ("年間収入(円)", key) if lbl == "年間配当(円)" else (lbl, key)
                 for lbl, key in income_cols
             ]
+        # 利回りの分子は優待スイッチで変わる。KPI カードだけ切り替えて列を据え置くと、
+        # 同じ「簿価利回り」が画面によって別の定義になる。列数・並びは変えず
+        # キーとラベルだけ差し替える（列幅の保存値は列数ぶんの配列なので）。
+        yoc_key, yov_key = row_yield_keys(with_benefit)
+        yield_key_map = {"簿価利回り": yoc_key, "時価利回り": yov_key}
+        income_cols = [
+            (f"{lbl}{yield_suffix}", yield_key_map[lbl]) if lbl in yield_key_map
+            else (lbl, key)
+            for lbl, key in income_cols
+        ]
         self._income_model.setHorizontalHeaderLabels([lbl for lbl, _ in income_cols])
+        for _col, (_lbl, _) in enumerate(income_cols):
+            if _lbl.startswith(("簿価利回り", "時価利回り")):
+                self._income_model.setHeaderData(
+                    _col, Qt.Orientation.Horizontal, yield_tip,
+                    Qt.ItemDataRole.ToolTipRole,
+                )
         self._render_table("income", income_cols, self._income_model, self._income_view, rows, visible_indices)
         # 構成グラフは集計と揃えるため常に有効銘柄のみを対象にする
         # （無効銘柄は Summary に含まれず、構成比に混ぜると割合が狂う）。
@@ -1417,7 +1485,6 @@ class DividendWindow(QMainWindow):
         # ラベルだけ別に作る（両方に足すと「＋優待＋優待」になる）。
         div_label = "年間収入" if self.withdrawal_mode is not None else "年間配当"
         div_empty = f"{div_label}データがありません（F5 で取得 / 配当のある銘柄が必要です）"
-        with_benefit = self.income_benefit == "with"
         comp_key = (
             "annual_dividend_with_benefit_jpy" if with_benefit
             else "annual_dividend_jpy"
@@ -1460,8 +1527,20 @@ class DividendWindow(QMainWindow):
         self._cards["年間配当"].set_value(fmt_number(summary.total_dividend_jpy, 0))
         self._cards["優待"].set_value(fmt_number(summary.total_benefit_jpy, 0))
         self._cards["合計"].set_value(fmt_number(summary.total_numerator_jpy, 0))
-        self._cards["簿価利回り"].set_value(fmt_percent(summary.yield_on_cost, 2))
-        self._cards["時価利回り"].set_value(fmt_percent(summary.yield_on_value, 2))
+        # 利回りは集計対象（投信込み/投信除く）で値もカード名も変わる。
+        # どちらを見ているか画面だけで分かるよう接尾辞を付ける
+        # （年間配当 → 年間収入 の入替と同じやり方）。
+        yoc, yov = summary_yields(summary, self.yield_scope, with_benefit)
+        scope_suffix = YIELD_SCOPE_SUFFIX.get(self.yield_scope, "")
+        self._cards["簿価利回り"].set_title(f"簿価利回り{yield_suffix}{scope_suffix}")
+        self._cards["時価利回り"].set_title(f"時価利回り{yield_suffix}{scope_suffix}")
+        # 接尾辞2つが付くと最長の名前はカードに収まらず、狭い幅では切れる
+        # （実測: 「簿価利回り＋優待(投信除く)」は 168px 必要で、ウィンドウ最小幅
+        # 900px ではラベル幅 145px。1024px 以上で収まる）。切れた分は yield_tip で読む。
+        for _title in ("簿価利回り", "時価利回り"):
+            self._cards[_title].setToolTip(yield_tip)
+        self._cards["簿価利回り"].set_value(fmt_percent(yoc, 2))
+        self._cards["時価利回り"].set_value(fmt_percent(yov, 2))
         self._cards["損益"].set_value(
             fmt_number(summary.total_profit_jpy, 0),
             profit_text_qcolor(summary.total_profit_jpy),
@@ -1658,6 +1737,8 @@ class DividendWindow(QMainWindow):
             rows, summary,
             dividend_mode=self.dividend_mode,
             withdrawal_mode=self.withdrawal_mode,
+            yield_scope=self.yield_scope,
+            with_benefit=self.income_benefit == "with",
             fx_rate=self.fx_rate,
             market_fetched_at=self.market_fetched_at,
             market_source=self.market_source,
@@ -2036,6 +2117,30 @@ class DividendWindow(QMainWindow):
         view.sortByColumn(sort_col, sort_order)
         self._size_columns_once(tab_key, view, columns)
         self._restore_table_state(tab_key, state)
+
+    def _resize_yield_columns(self) -> None:
+        """配当優待詳細タブの利回り2列を、必要なときだけ広げる。
+
+        優待スイッチでヘッダが `簿価利回り` ⇔ `簿価利回り＋優待` と伸び縮みする。
+        列幅は初回描画時に確定して以降は維持する（_size_columns_once）ので、
+        短いヘッダで確定したあと優待を含めると接尾辞が切れ、利回りの定義が
+        判別できなくなる。**_columns_sized を落として全体をやり直さないこと**
+        ——ユーザーが広げた他の列の幅まで巻き戻る。動かすのはこの2列だけにする。
+
+        **resizeColumnToContents は使わない**——内容幅ちょうどに合わせる＝
+        ユーザーが手で広げた幅を縮めてしまう（優待を切り替えただけで列が痩せる）。
+        収まらないときだけ広げる片方向にする。
+        """
+        header = self._income_view.horizontalHeader()
+        for col, (label, _) in enumerate(INCOME_COLUMNS):
+            if label not in ("簿価利回り", "時価利回り"):
+                continue
+            # ヘッダ（文字＋余白＋ソート矢印）と中身、どちらも収まる幅。
+            needed = max(
+                header.sectionSizeHint(col), self._income_view.sizeHintForColumn(col)
+            )
+            if header.sectionSize(col) < needed:
+                header.resizeSection(col, needed)
 
     def _size_columns_once(
         self, tab_key: str, view: QTableView, columns: list[tuple[str, str]]

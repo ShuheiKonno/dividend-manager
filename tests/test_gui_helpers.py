@@ -154,6 +154,8 @@ def _io_stub(holdings, history):
         fx_rate = None
         dividend_mode = "gross"
         withdrawal_mode = None
+        yield_scope = "all"
+        income_benefit = "without"
         show_inactive = False
         market_fetched_at = None
         market_source = None
