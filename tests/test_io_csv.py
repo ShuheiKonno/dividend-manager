@@ -383,6 +383,18 @@ def test_settings_load_drops_invalid_values(monkeypatch, tmp_path):
     assert loaded == {"dividend_mode": "net", "window_geometry": [0, 0, 1180, 760]}
 
 
+def test_settings_yield_scope_roundtrip(monkeypatch, tmp_path):
+    """利回りの集計対象が往復し、未知の値は拒否されること（許容値は calc.YIELD_SCOPES）。"""
+    from src import calc
+
+    _configure_tmp_dirs(monkeypatch, tmp_path)
+    for scope in calc.YIELD_SCOPES:
+        io_csv.save_settings(yield_scope=scope)
+        assert io_csv.load_settings()["yield_scope"] == scope
+    io_csv.save_settings(yield_scope="only_funds")  # 未知の値は拒否
+    assert io_csv.load_settings()["yield_scope"] == calc.YIELD_SCOPES[-1]
+
+
 def test_settings_unknown_key_not_saved(monkeypatch, tmp_path):
     _configure_tmp_dirs(monkeypatch, tmp_path)
     io_csv.save_settings(unknown_key="x", dividend_mode="gross")

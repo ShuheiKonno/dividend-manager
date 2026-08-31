@@ -5,6 +5,10 @@ from __future__ import annotations
 import pytest
 
 from src.calc import (
+    DEFAULT_YIELD_SCOPE,
+    YIELD_SCOPES,
+    row_yield_keys,
+    summary_yields,
     _DEFAULT_TAX_RATE,
     _US_TAXABLE_COMBINED_RATE,
     _US_WITHHOLDING_RATE,
@@ -452,3 +456,216 @@ def test_compute_rows_ignores_fund_share_unit():
     assert rows[0]["book_value_jpy"] == pytest.approx(2_067_284.0)
     assert rows[0]["shares"] == 206.7284  # row は常に保存値のまま
     assert summary.total_market_value_jpy == pytest.approx(2_067_284.0)
+
+
+# ---- compute_rows: 利回りの集計対象（投信を含む / 除く） ----
+#
+# 無分配ファンドは _pick_div_ps の fallback で配当 0 になるため、全体の利回りは
+# 分母だけ膨らんで押し下げられる。ex_fund 系はそれを分子・分母の両方から外す。
+
+def _stock_and_fund():
+    """配当のある株式1件（簿価20万・配当6千）と無分配ファンド1件（簿価10万）。"""
+    stock = _holding(annual_div_ps_gross_override=60.0)
+    fund = _holding(
+        symbol="JP0000", name="投信", asset_type="fund", shares=10.0, avg_cost=10_000.0
+    )
+    return [stock, fund]
+
+
+def test_yield_ex_fund_excludes_fund_from_both_sides():
+    rows, summary = compute_rows(
+        _stock_and_fund(), {"7203": _market()}, 150.0, "gross"
+    )
+    # 全体: 分子 6,000 / 簿価 300,000 / 時価 350,000
+    assert summary.total_book_value_jpy == pytest.approx(300_000)
+    assert summary.yield_on_cost == pytest.approx(6_000 / 300_000)
+    assert summary.yield_on_value == pytest.approx(6_000 / 350_000)
+    # 投信除外: 分子 6,000 / 簿価 200,000 / 時価 250,000（分母から投信が消える）
+    assert summary.total_book_value_ex_fund_jpy == pytest.approx(200_000)
+    assert summary.total_market_value_ex_fund_jpy == pytest.approx(250_000)
+    assert summary.total_numerator_ex_fund_jpy == pytest.approx(6_000)
+    assert summary.yield_on_cost_ex_fund == pytest.approx(6_000 / 200_000)
+    assert summary.yield_on_value_ex_fund == pytest.approx(6_000 / 250_000)
+
+
+def test_yield_ex_fund_drops_fund_income_from_numerator():
+    """分配金のあるファンドは分子からも外れる（分母だけ引く実装になっていない）。"""
+    stock = _holding(annual_div_ps_gross_override=60.0)
+    fund = _holding(
+        symbol="JP0000", asset_type="fund", shares=10.0, avg_cost=10_000.0,
+        annual_div_ps_gross_override=500.0,  # 10 × 500 = 5,000 の分配
+    )
+    _, summary = compute_rows([stock, fund], {"7203": _market()}, 150.0, "gross")
+    assert summary.total_numerator_jpy == pytest.approx(11_000)
+    assert summary.total_numerator_ex_fund_jpy == pytest.approx(6_000)
+
+
+def test_yield_ex_fund_excludes_fund_benefit():
+    """優待も投信の分は除外側の分子に入らない。"""
+    stock = _holding(annual_div_ps_gross_override=60.0, annual_benefit_jpy=1_000.0)
+    fund = _holding(
+        symbol="JP0000", asset_type="fund", shares=10.0, avg_cost=10_000.0,
+        annual_benefit_jpy=2_000.0,
+    )
+    _, summary = compute_rows([stock, fund], {"7203": _market()}, 150.0, "gross")
+    assert summary.total_benefit_jpy == pytest.approx(3_000)
+    assert summary.total_benefit_ex_fund_jpy == pytest.approx(1_000)
+    assert summary.total_numerator_ex_fund_jpy == pytest.approx(7_000)
+
+
+def test_yield_ex_fund_is_none_when_only_funds():
+    """投信しか無ければ分母が無いので None（0% にも例外にもしない）。"""
+    fund = _holding(
+        symbol="JP0000", asset_type="fund", shares=10.0, avg_cost=10_000.0
+    )
+    _, summary = compute_rows([fund], {}, 150.0, "gross")
+    assert summary.yield_on_cost is not None  # 全体側は従来どおり出る
+    assert summary.total_book_value_ex_fund_jpy is None
+    assert summary.total_market_value_ex_fund_jpy is None
+    assert summary.total_numerator_ex_fund_jpy is None
+    assert summary.yield_on_cost_ex_fund is None
+    assert summary.yield_on_value_ex_fund is None
+
+
+def test_yield_ex_fund_all_or_nothing_counts_only_non_funds():
+    """時価が欠けた非投信が1件でもあれば投信除外の時価計も None になる。"""
+    stock_ok = _holding(annual_div_ps_gross_override=60.0)
+    stock_ng = _holding(symbol="9999", name="価格なし")  # market 無し＝時価が None
+    fund = _holding(
+        symbol="JP0000", asset_type="fund", shares=10.0, avg_cost=10_000.0
+    )
+    _, summary = compute_rows(
+        [stock_ok, stock_ng, fund], {"7203": _market()}, 150.0, "gross"
+    )
+    assert summary.total_market_value_jpy is None
+    assert summary.total_market_value_ex_fund_jpy is None
+    assert summary.yield_on_value_ex_fund is None
+    # 簿価は全件揃うので、投信を外した分だけ小さくなる
+    assert summary.total_book_value_ex_fund_jpy == pytest.approx(400_000)
+
+
+def test_yield_ex_fund_ignores_inactive_like_the_totals():
+    """無効銘柄は投信除外側の集計にも入らない。"""
+    stock = _holding(annual_div_ps_gross_override=60.0)
+    inactive = _holding(symbol="9984", name="無効株", active=False)
+    _, summary = compute_rows(
+        [stock, inactive], {"7203": _market()}, 150.0, "gross", include_inactive=True
+    )
+    assert summary.total_book_value_ex_fund_jpy == pytest.approx(200_000)
+    assert summary.yield_on_cost_ex_fund == pytest.approx(6_000 / 200_000)
+
+
+def test_yield_ex_fund_drops_withdrawal_income():
+    """取崩収入は投信にしか付かないので、投信除外の分子はゼロ扱いになる。"""
+    stock = _holding(annual_div_ps_gross_override=60.0)
+    fund = _holding(
+        symbol="JP0000", asset_type="fund", shares=10.0, avg_cost=10_000.0,
+        withdrawal_fixed_jpy=40_000.0,
+    )
+    _, summary = compute_rows(
+        [stock, fund], {"7203": _market()}, 150.0, "gross", withdrawal_mode="fixed"
+    )
+    assert summary.total_numerator_jpy == pytest.approx(46_000)
+    assert summary.total_numerator_ex_fund_jpy == pytest.approx(6_000)
+    assert summary.yield_on_cost_ex_fund == pytest.approx(6_000 / 200_000)
+
+
+def test_yield_scope_does_not_change_row_values():
+    """行の利回り列は集計対象の切替と無関係（1銘柄それぞれの自己利回り）。"""
+    rows, _ = compute_rows(_stock_and_fund(), {"7203": _market()}, 150.0, "gross")
+    assert rows[0]["yield_on_cost"] == pytest.approx(6_000 / 200_000)
+    assert rows[1]["yield_on_cost"] == pytest.approx(0.0)
+
+
+def test_summary_yields_picks_the_scope():
+    _, summary = compute_rows(_stock_and_fund(), {"7203": _market()}, 150.0, "gross")
+    assert summary_yields(summary, "all") == (
+        summary.yield_on_cost,
+        summary.yield_on_value,
+    )
+    assert summary_yields(summary, "ex_fund") == (
+        summary.yield_on_cost_ex_fund,
+        summary.yield_on_value_ex_fund,
+    )
+    # 未知の値と None は既定（全体）へ落とす
+    assert summary_yields(summary, "bogus") == summary_yields(summary, "all")
+    assert summary_yields(summary, None) == summary_yields(summary, "all")
+    assert DEFAULT_YIELD_SCOPE in YIELD_SCOPES
+
+
+# ---- 利回りの分子（優待を含む / 含まない） ----
+#
+# 優待スイッチは KPI カード・配当優待詳細タブの利回り列・Markdown の3箇所に効く。
+# 行は両方の値を載せ、表示側は row_yield_keys でキーを選ぶだけにする。
+
+def test_row_carries_both_yield_definitions():
+    h = _holding(annual_div_ps_gross_override=60.0, annual_benefit_jpy=2_000.0)
+    rows, _ = compute_rows([h], {"7203": _market()}, 150.0, "gross")
+    r = rows[0]
+    # 簿価 200,000 / 時価 250,000 / 配当 6,000 / 優待 2,000
+    assert r["yield_on_cost"] == pytest.approx(8_000 / 200_000)
+    assert r["yield_on_value"] == pytest.approx(8_000 / 250_000)
+    assert r["yield_on_cost_div_only"] == pytest.approx(6_000 / 200_000)
+    assert r["yield_on_value_div_only"] == pytest.approx(6_000 / 250_000)
+
+
+def test_row_div_only_yield_is_none_for_benefit_only_holding():
+    """配当が N/A で優待だけの銘柄は、配当のみの利回りが空（0% にしない）。"""
+    h = _holding(annual_benefit_jpy=3_000.0)  # market も override も無い＝配当 N/A
+    rows, _ = compute_rows([h], {}, 150.0, "gross")
+    r = rows[0]
+    assert r["yield_on_cost"] == pytest.approx(3_000 / 200_000)  # 優待込みなら出る
+    assert r["yield_on_cost_div_only"] is None
+    assert r["yield_on_value_div_only"] is None
+
+
+def test_row_yield_keys_maps_both_definitions():
+    assert row_yield_keys(True) == ("yield_on_cost", "yield_on_value")
+    assert row_yield_keys(False) == (
+        "yield_on_cost_div_only",
+        "yield_on_value_div_only",
+    )
+
+
+def test_summary_yields_drops_benefit_from_the_numerator():
+    h = _holding(annual_div_ps_gross_override=60.0, annual_benefit_jpy=2_000.0)
+    _, summary = compute_rows([h], {"7203": _market()}, 150.0, "gross")
+    assert summary_yields(summary, "all", True) == (
+        pytest.approx(8_000 / 200_000),
+        pytest.approx(8_000 / 250_000),
+    )
+    assert summary_yields(summary, "all", False) == (
+        pytest.approx(6_000 / 200_000),
+        pytest.approx(6_000 / 250_000),
+    )
+    # 既定は優待込み（従来の Summary.yield_on_cost と一致する）
+    assert summary_yields(summary, "all") == (
+        summary.yield_on_cost,
+        summary.yield_on_value,
+    )
+
+
+def test_summary_yields_combines_benefit_and_scope():
+    stock = _holding(annual_div_ps_gross_override=60.0, annual_benefit_jpy=1_000.0)
+    fund = _holding(
+        symbol="JP0000", asset_type="fund", shares=10.0, avg_cost=10_000.0,
+        annual_benefit_jpy=2_000.0,
+    )
+    _, summary = compute_rows([stock, fund], {"7203": _market()}, 150.0, "gross")
+    # 投信除外 × 配当のみ: 6,000 / 200,000
+    assert summary_yields(summary, "ex_fund", False)[0] == pytest.approx(
+        6_000 / 200_000
+    )
+    # 投信除外 × 優待込み: 7,000 / 200,000
+    assert summary_yields(summary, "ex_fund", True)[0] == pytest.approx(
+        7_000 / 200_000
+    )
+
+
+def test_summary_yields_none_when_no_dividend_and_benefit_excluded():
+    """優待だけの銘柄しか無ければ、配当のみの利回りは None。"""
+    h = _holding(annual_benefit_jpy=3_000.0)
+    _, summary = compute_rows([h], {}, 150.0, "gross")
+    assert summary_yields(summary, "all", True)[0] is not None
+    assert summary_yields(summary, "all", False) == (None, None)
+

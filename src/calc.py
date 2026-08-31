@@ -19,6 +19,156 @@ class Summary:
     total_profit_jpy: float | None
     profit_rate: float | None
     missing_market_value_count: int
+    # ---- 投信を除いた集計（利回りの対象切替 yield_scope 用） ----
+    # 既存フィールドの意味を設定で変えず、並列に持つ。除外は分子（配当＋優待）と
+    # 分母（簿価／時価）の両方へ掛かる。既定値付きなのは Summary(**base) で組む
+    # 呼び出し（tests/test_md_export.py）を壊さないため。
+    total_book_value_ex_fund_jpy: float | None = None
+    total_market_value_ex_fund_jpy: float | None = None
+    total_dividend_ex_fund_jpy: float | None = None
+    total_benefit_ex_fund_jpy: float | None = None
+    total_numerator_ex_fund_jpy: float | None = None
+    yield_on_cost_ex_fund: float | None = None
+    yield_on_value_ex_fund: float | None = None
+
+
+# ---- 利回りの集計対象（表示・出力の切替のみ） ----
+#
+# 無分配ファンドは _pick_div_ps の最終 fallback で 0.0 になるため、全体の利回りを
+# 分母だけ膨らませて押し下げる。取崩モードでは逆に分配金でない取崩額が分子へ乗る。
+# そこで「株式・ETF だけの利回り」を並べて選べるようにする。効くのは **集計値**
+# （KPI カード2枚と Markdown のサマリー）だけで、行ごとの yield_on_cost /
+# yield_on_value・構成グラフ・月別・推移・history.csv には一切効かない。
+YIELD_SCOPES = ("all", "ex_fund")
+DEFAULT_YIELD_SCOPE = "all"
+YIELD_SCOPE_LABELS = {"all": "投信込み", "ex_fund": "投信除く"}
+# KPI カード名・Markdown のラベルへ足す接尾辞（どちらを見ているか画面から分かるように）。
+YIELD_SCOPE_SUFFIX = {"all": "", "ex_fund": "(投信除く)"}
+# 優待を分子に含めているときの接尾辞。優待スイッチは KPI カード・両テーブル・
+# Markdown の利回りに効くので、付けないと同じ「簿価利回り」が別定義のまま変わる
+# （月別タブが「＋優待」を足すのと同じ言い回し）。gui と md_export の双方が
+# ここを読む——表示層に書き写すと片方だけ変わる。
+YIELD_BENEFIT_SUFFIX = "＋優待"
+
+
+def _numerator(dividend: float | None, benefit: float | None) -> float | None:
+    """利回りの分子（配当＋優待）。両方とも未知なら None（0 に潰さない）。"""
+    if dividend is None and benefit is None:
+        return None
+    return (dividend or 0.0) + (benefit or 0.0)
+
+
+def _yield_pair(
+    numerator: float | None, book: float | None, market: float | None
+) -> tuple[float | None, float | None]:
+    """(簿価利回り, 時価利回り)。分母が未知か 0 なら None（0% にしない）。
+
+    行・全体・投信除外・優待あり/なしの全通りがこの1式を通る。式を書き写すと、
+    どれか1つだけ古い定義のまま残ってもエラーが出ない。
+    """
+    return (
+        numerator / book if numerator is not None and book else None,
+        numerator / market if numerator is not None and market else None,
+    )
+
+
+def summary_yields(
+    summary: Summary, scope: str | None, with_benefit: bool = True
+) -> tuple[float | None, float | None]:
+    """(簿価利回り, 時価利回り) を集計対象と優待の有無に応じて返す。
+
+    未知の scope は "all" 扱い。Summary が持つ合計から組み直すので、4通り
+    （投信込み/除く × 優待込み/なし）ぶんのフィールドを増やさずに済む。
+    表示側（gui / md_export）が同じ分岐を二重に書かないための唯一の入口。
+    """
+    if scope == "ex_fund":
+        dividend = summary.total_dividend_ex_fund_jpy
+        benefit = summary.total_benefit_ex_fund_jpy
+        book = summary.total_book_value_ex_fund_jpy
+        market = summary.total_market_value_ex_fund_jpy
+    else:
+        dividend = summary.total_dividend_jpy
+        benefit = summary.total_benefit_jpy
+        book = summary.total_book_value_jpy
+        market = summary.total_market_value_jpy
+    return _yield_pair(_numerator(dividend, benefit if with_benefit else None), book, market)
+
+
+def row_yield_keys(with_benefit: bool) -> tuple[str, str]:
+    """行テーブル用の (簿価利回り, 時価利回り) の row キー。
+
+    優待を含めない表示では配当だけを分子にした列へ差し替える。行の値を
+    表示側で作り直さず、compute_rows が両方を載せて表示側はキーを選ぶだけにする。
+    """
+    if with_benefit:
+        return "yield_on_cost", "yield_on_value"
+    return "yield_on_cost_div_only", "yield_on_value_div_only"
+
+
+@dataclass
+class _Totals:
+    """集計の途中経過。全銘柄版と投信除外版で **同じ導出式** を使い回すための器。
+
+    式をコピーして2箇所に置くと、片方だけ直したときに画面のどちらが古いのか
+    分からなくなる（しかもエラーは出ない）ので、必ずここを通す。
+    損益（profit）は投信除外版を持たないので compute_rows 側のローカル変数のまま。
+    """
+
+    active_count: int = 0
+    sum_book: float = 0.0
+    known_book: int = 0
+    sum_market: float = 0.0
+    known_market: int = 0
+    sum_dividend: float = 0.0
+    known_dividend: int = 0
+    sum_benefit: float = 0.0
+
+    def add(
+        self,
+        book_value_jpy: float | None,
+        market_value_jpy: float | None,
+        annual_dividend_jpy: float | None,
+        benefit_jpy: float,
+    ) -> None:
+        self.active_count += 1
+        if book_value_jpy is not None:
+            self.sum_book += book_value_jpy
+            self.known_book += 1
+        if market_value_jpy is not None:
+            self.sum_market += market_value_jpy
+            self.known_market += 1
+        if annual_dividend_jpy is not None:
+            self.sum_dividend += annual_dividend_jpy
+            self.known_dividend += 1
+        self.sum_benefit += benefit_jpy
+
+    @property
+    def book(self) -> float | None:
+        # 1件でも欠けたら None（all-or-nothing）。投信除外版では母数も除外後の件数。
+        if self.active_count > 0 and self.known_book == self.active_count:
+            return self.sum_book
+        return None
+
+    @property
+    def market(self) -> float | None:
+        if self.active_count > 0 and self.known_market == self.active_count:
+            return self.sum_market
+        return None
+
+    @property
+    def dividend(self) -> float | None:
+        return self.sum_dividend if self.known_dividend > 0 else None
+
+    @property
+    def benefit(self) -> float | None:
+        return self.sum_benefit if self.sum_benefit > 0 else None
+
+    @property
+    def numerator(self) -> float | None:
+        return _numerator(self.dividend, self.benefit)
+
+    def yields(self) -> tuple[float | None, float | None]:
+        return _yield_pair(self.numerator, self.book, self.market)
 
 
 # ---- 投資信託の口数単位（表示・入力の変換のみ） ----
@@ -255,23 +405,16 @@ def compute_rows(
     既存の呼び出し側（legacy_tui / 履歴スナップショット）の結果は変わらない。
     """
     rows: list[dict[str, float | str | None]] = []
-    sum_book = 0.0
-    sum_market = 0.0
-    sum_dividend = 0.0
-    sum_benefit = 0.0
+    totals = _Totals()
+    # 投信を除いた並行集計。行データは投信を含めたまま返し、絞るのは集計だけ。
+    totals_ex_fund = _Totals()
     sum_profit = 0.0
-    active_count = 0
-    known_book_count = 0
-    known_market_count = 0
-    known_dividend_count = 0
     known_profit_count = 0
 
     for holding in holdings:
         if not holding.active and not include_inactive:
             continue
         is_active = holding.active
-        if is_active:
-            active_count += 1
         market = market_map.get(holding.symbol)
         div_ps = _pick_div_ps(holding, market, mode)
         annual_dividend = holding.shares * div_ps if div_ps is not None else None
@@ -309,15 +452,13 @@ def compute_rows(
         elif benefit_jpy:
             numerator_jpy = benefit_jpy
 
-        yield_on_cost = (
-            numerator_jpy / book_value_jpy
-            if numerator_jpy is not None and book_value_jpy
-            else None
+        yield_on_cost, yield_on_value = _yield_pair(
+            numerator_jpy, book_value_jpy, market_value_jpy
         )
-        yield_on_value = (
-            numerator_jpy / market_value_jpy
-            if numerator_jpy is not None and market_value_jpy
-            else None
+        # 優待を含めない表示用。行を表示側で計算し直さず、両方を載せてキーで選ばせる
+        # （row_yield_keys が唯一の対応表）。
+        yield_on_cost_div_only, yield_on_value_div_only = _yield_pair(
+            annual_dividend_jpy, book_value_jpy, market_value_jpy
         )
         profit_jpy = None
         profit_rate = None
@@ -351,6 +492,8 @@ def compute_rows(
                 "market_value_jpy": market_value_jpy,
                 "yield_on_cost": yield_on_cost,
                 "yield_on_value": yield_on_value,
+                "yield_on_cost_div_only": yield_on_cost_div_only,
+                "yield_on_value_div_only": yield_on_value_div_only,
                 "profit_jpy": profit_jpy,
                 "profit_rate": profit_rate,
                 "div_forecast_as_of": holding.div_forecast_as_of_override
@@ -370,43 +513,22 @@ def compute_rows(
         # 無効銘柄は行として返しても集計には一切加算しない（集計対象外の意味論）。
         if not is_active:
             continue
-        if book_value_jpy is not None:
-            sum_book += book_value_jpy
-            known_book_count += 1
-        if market_value_jpy is not None:
-            sum_market += market_value_jpy
-            known_market_count += 1
-        if annual_dividend_jpy is not None:
-            sum_dividend += annual_dividend_jpy
-            known_dividend_count += 1
-        sum_benefit += benefit_jpy
+        totals.add(book_value_jpy, market_value_jpy, annual_dividend_jpy, benefit_jpy)
+        if not is_fund:
+            totals_ex_fund.add(
+                book_value_jpy, market_value_jpy, annual_dividend_jpy, benefit_jpy
+            )
         if profit_jpy is not None:
             sum_profit += profit_jpy
             known_profit_count += 1
 
-    total_book = (
-        sum_book if active_count > 0 and known_book_count == active_count else None
-    )
-    total_market = (
-        sum_market if active_count > 0 and known_market_count == active_count else None
-    )
-    total_dividend = sum_dividend if known_dividend_count > 0 else None
-    total_benefit = sum_benefit if sum_benefit > 0 else None
-    total_numerator = None
-    if total_dividend is not None or total_benefit is not None:
-        total_numerator = (total_dividend or 0.0) + (total_benefit or 0.0)
-    yield_on_cost = (
-        total_numerator / total_book
-        if total_numerator is not None and total_book
-        else None
-    )
-    yield_on_value = (
-        total_numerator / total_market
-        if total_numerator is not None and total_market
-        else None
-    )
+    total_book = totals.book
+    yield_on_cost, yield_on_value = totals.yields()
+    yoc_ex_fund, yov_ex_fund = totals_ex_fund.yields()
     total_profit = (
-        sum_profit if active_count > 0 and known_profit_count == active_count else None
+        sum_profit
+        if totals.active_count > 0 and known_profit_count == totals.active_count
+        else None
     )
     profit_rate = (
         total_profit / total_book if total_profit is not None and total_book else None
@@ -414,15 +536,22 @@ def compute_rows(
 
     summary = Summary(
         total_book_value_jpy=total_book,
-        total_market_value_jpy=total_market,
-        total_dividend_jpy=total_dividend,
-        total_benefit_jpy=total_benefit,
-        total_numerator_jpy=total_numerator,
+        total_market_value_jpy=totals.market,
+        total_dividend_jpy=totals.dividend,
+        total_benefit_jpy=totals.benefit,
+        total_numerator_jpy=totals.numerator,
         yield_on_cost=yield_on_cost,
         yield_on_value=yield_on_value,
         total_profit_jpy=total_profit,
         profit_rate=profit_rate,
-        missing_market_value_count=active_count - known_market_count,
+        missing_market_value_count=totals.active_count - totals.known_market,
+        total_book_value_ex_fund_jpy=totals_ex_fund.book,
+        total_market_value_ex_fund_jpy=totals_ex_fund.market,
+        total_dividend_ex_fund_jpy=totals_ex_fund.dividend,
+        total_benefit_ex_fund_jpy=totals_ex_fund.benefit,
+        total_numerator_ex_fund_jpy=totals_ex_fund.numerator,
+        yield_on_cost_ex_fund=yoc_ex_fund,
+        yield_on_value_ex_fund=yov_ex_fund,
     )
     return rows, summary
 

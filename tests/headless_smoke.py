@@ -128,6 +128,8 @@ def _check_toolbar(w) -> None:
     assert w._withdrawal_combo.currentData() == (w.withdrawal_mode or "none")
     # 優待は推移グラフの操作行ではなくツールバー（税引・収入と同じ行）にある
     assert w._benefit_combo.currentData() == w.income_benefit
+    # 利回りの集計対象も同じ「収入の数え方」の行に並ぶ
+    assert w._yield_scope_combo.currentData() == w.yield_scope
     assert not hasattr(w, "income_withdrawal"), (
         "取崩の独立スイッチが復活している（収入モードと二重管理になる）"
     )
@@ -281,6 +283,146 @@ def _check_fund_share_unit(w) -> None:
 
     w.action_set_fund_share_unit(original)  # 設定（fund_share_unit）を元へ戻す
     assert w.fund_share_unit == original
+
+
+def _check_yield_scope(w) -> None:
+    """利回りの集計対象・優待スイッチが KPI カードと表の利回り列へ届くこと。
+
+    値だけ切り替えてカード名が「簿価利回り」のままだと、画面から今どの定義を見て
+    いるのか分からず、投信を除いた（あるいは優待込みの）高い数字を全体の利回りと
+    して読んでしまう。集計対象は行データに効かない＝表示行が増減しないことも見る。
+    """
+    from src.calc import (
+        compute_rows,
+        row_yield_keys,
+        summary_yields,
+        YIELD_BENEFIT_SUFFIX,
+        YIELD_SCOPES,
+        YIELD_SCOPE_SUFFIX,
+    )
+    from src.utils import fmt_percent
+
+    original = w.yield_scope
+    original_benefit = w.income_benefit
+    before_rows = w._price_proxy.rowCount()
+    rows, summary = compute_rows(
+        w.holdings, w.market_data_map, w.fx_rate, w.dividend_mode,
+        w.withdrawal_mode, include_inactive=w.show_inactive,
+    )
+    header = w._income_view.horizontalHeader().model()
+    yield_col = next(
+        i for i, (label, _) in enumerate(gui.INCOME_COLUMNS) if label == "簿価利回り"
+    )
+
+    for benefit in ("without", "with"):
+        w._on_income_benefit(benefit)
+        with_benefit = benefit == "with"
+        benefit_suffix = YIELD_BENEFIT_SUFFIX if with_benefit else ""
+        for scope in YIELD_SCOPES:
+            w._on_yield_scope(scope)
+            assert w.yield_scope == scope
+            w._sync_mode_controls()
+            assert w._yield_scope_combo.currentData() == scope, (
+                "ドロップダウンが現在の集計対象を示していない"
+            )
+            suffix = f"{benefit_suffix}{YIELD_SCOPE_SUFFIX[scope]}"
+            assert w._cards["簿価利回り"]._title.text() == f"簿価利回り{suffix}", (
+                f"カード名が定義を示していない: {w._cards['簿価利回り']._title.text()}"
+            )
+            assert w._cards["時価利回り"]._title.text() == f"時価利回り{suffix}"
+            yoc, yov = summary_yields(summary, scope, with_benefit)
+            assert w._cards["簿価利回り"]._value.text() == fmt_percent(yoc, 2), (
+                f"{scope}/{benefit} の簿価利回りが Summary と食い違う"
+            )
+            assert w._cards["時価利回り"]._value.text() == fmt_percent(yov, 2)
+            assert w._price_proxy.rowCount() == before_rows, (
+                "利回りの集計対象で表示行が増減している（効くのは集計だけのはず）"
+            )
+
+        # 表の利回り列も同じ定義へ差し替わること（KPI だけ切り替えると、同じ名前の
+        # 「簿価利回り」がタブによって別の数字になる）。
+        assert (
+            header.headerData(yield_col, Qt.Orientation.Horizontal)
+            == f"簿価利回り{benefit_suffix}"
+        ), "表のヘッダが優待の有無を示していない"
+        if rows:
+            key = row_yield_keys(with_benefit)[0]
+            expected, _ = gui._format_cell(rows[0], key)
+            actual = w._income_model.item(0, yield_col).text()
+            assert actual == expected, (
+                f"表の簿価利回りが {key} と食い違う: {actual} != {expected}"
+            )
+
+    # 「含まない」で列幅が確定した直後に「含む」へ切り替える起動時の並びを再現する。
+    # 保存済みの列幅（前回終了時が「含む」なら既に広い）に結果が左右されないよう、
+    # 短いヘッダに合わせた幅を明示的に当ててから切り替える。
+    w._on_income_benefit("without")
+    income_header = w._income_view.horizontalHeader()
+    income_header.resizeSection(yield_col, income_header.sectionSizeHint(yield_col))
+    narrow_width = income_header.sectionSize(yield_col)
+    w._on_income_benefit("with")
+    assert income_header.sectionSize(yield_col) > narrow_width, (
+        "「＋優待」でヘッダが伸びたのに利回り列の幅が確定時のまま "
+        f"({narrow_width}px)。接尾辞が切れて定義が読めない"
+    )
+    assert income_header.sectionSize(yield_col) >= income_header.sectionSizeHint(
+        yield_col
+    ), "広げたのにヘッダが収まっていない"
+
+    # 逆に、手で広げた幅を切替で縮めないこと（内容幅ちょうどに合わせる実装だと痩せる）。
+    widened = income_header.sectionSize(yield_col) + 80
+    income_header.resizeSection(yield_col, widened)
+    w._on_income_benefit("without")
+    assert income_header.sectionSize(yield_col) == widened, (
+        "優待を切り替えただけで手動調整した利回り列の幅が巻き戻っている"
+    )
+    w._on_income_benefit("with")
+    assert income_header.sectionSize(yield_col) == widened
+
+    # 接尾辞2つが付くとカード名は素の「簿価利回り」の3倍近い長さになる。KPI カードは
+    # 等分割（addWidget(card, 1)）なので幅次第で切れる——実測でウィンドウ最小幅
+    # 900px では収まらず 1024px 以上で収まる。ここでは通常使う幅で切れないこと、
+    # 2行目が折り返さないこと、切れる幅でも定義をツールチップで読めることを見る。
+    # 一番長くなる組（優待込み × 投信除く）で確かめる。
+    w._on_income_benefit("with")
+    w._on_yield_scope("ex_fund")
+    original_size = w.size()
+    w.show()
+    for width in (1100, 1536):
+        w.resize(width, max(620, w.minimumHeight()))
+        QApplication.processEvents()
+        row2 = ("年間配当", "優待", "合計", "簿価利回り", "時価利回り")
+        ys = {title: w._cards[title].y() for title in row2}
+        assert len(set(ys.values())) == 1, (
+            f"幅 {width}px・接尾辞付きの名前で2行目が折り返した: {ys}"
+        )
+        for title in ("簿価利回り", "時価利回り"):
+            card = w._cards[title]
+            assert card.isVisible(), f"幅 {width}px で {title} カードが消えている"
+            assert card._title.sizeHint().width() <= card._title.width(), (
+                f"幅 {width}px で {card._title.text()} がラベル幅 "
+                f"{card._title.width()}px に収まらない"
+            )
+    for title in ("簿価利回り", "時価利回り"):
+        tip = w._cards[title].toolTip()
+        assert "配当＋優待" in tip and "投資信託を除く" in tip, (
+            f"{title} のツールチップが定義を説明していない: {tip!r}"
+        )
+    # 表のヘッダにも定義を載せる。列幅はユーザーが手で狭められるので、
+    # 幅を取り直すだけでは読めなくなる場合が残る（カードと同じ逃げ道を用意する）。
+    header_tip = w._income_model.headerData(
+        yield_col, Qt.Orientation.Horizontal, Qt.ItemDataRole.ToolTipRole
+    )
+    assert header_tip and "配当＋優待" in header_tip, (
+        f"表のヘッダに利回りの定義が無い: {header_tip!r}"
+    )
+    w.resize(original_size)
+    w.hide()
+    QApplication.processEvents()
+
+    w._on_yield_scope(original)  # 設定（yield_scope / income_benefit）を元へ戻す
+    w._on_income_benefit(original_benefit)
+    assert w.yield_scope == original and w.income_benefit == original_benefit
 
 
 def _check_account_combo() -> None:
@@ -633,6 +775,7 @@ def main() -> None:
     _check_withdrawal_trend_note(w)
     _check_theme_toggle(w)
     _check_fund_share_unit(w)
+    _check_yield_scope(w)
 
     # 編集ダイアログ: 即時バリデーション（赤枠プロパティ＋集約エラーラベル）
     dlg = EditHoldingDialog(_holding())

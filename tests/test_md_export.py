@@ -16,6 +16,13 @@ def _summary(**kw) -> Summary:
         total_profit_jpy=50000.0,
         profit_rate=0.25,
         missing_market_value_count=0,
+        total_book_value_ex_fund_jpy=100000.0,
+        total_market_value_ex_fund_jpy=120000.0,
+        total_dividend_ex_fund_jpy=8000.0,
+        total_benefit_ex_fund_jpy=2000.0,
+        total_numerator_ex_fund_jpy=10000.0,
+        yield_on_cost_ex_fund=0.10,
+        yield_on_value_ex_fund=0.0833,
     )
     base.update(kw)
     return Summary(**base)
@@ -40,6 +47,8 @@ def _row(**kw) -> dict:
         market_value_jpy=250000.0,
         yield_on_cost=0.06,
         yield_on_value=0.048,
+        yield_on_cost_div_only=0.05,
+        yield_on_value_div_only=0.04,
         profit_jpy=50000.0,
         profit_rate=0.25,
         div_forecast_as_of="2026-06-30",
@@ -139,7 +148,7 @@ def test_rates_are_scaled_to_percent_with_unit_in_header():
     header = _cells(_table_lines(text, "銘柄一覧")[0])
     data = _cells(_table_lines(text, "銘柄一覧")[2])
     assert data[header.index("損益率(%)")] == "16.44"
-    assert data[header.index("簿価利回り(%)")] == "3.55"
+    assert data[header.index("簿価利回り＋優待(%)")] == "3.55"
 
 
 def test_income_header_follows_withdrawal_mode():
@@ -239,3 +248,115 @@ def test_fund_share_unit_appears_in_conditions_and_notes():
     assert "投信の口数単位" in conditions and "1口単位" in conditions
     assert "口数 ÷ 10,000" not in per1, "1口単位モードで旧い前提が残っている"
     assert "口数そのもの（1口単位）" in per1
+
+
+# ---- 利回りの集計対象（yield_scope） ----
+
+def test_yield_scope_appears_in_conditions():
+    """サマリーの数値そのものが変わる設定なので「出力条件」に出す。"""
+    conditions = "\n".join(_table_lines(_build([_row()]), "出力条件"))
+    assert "利回りの対象" in conditions and "投信込み" in conditions
+    conditions = "\n".join(
+        _table_lines(_build([_row()], yield_scope="ex_fund"), "出力条件")
+    )
+    assert "投信除く" in conditions
+
+
+def test_yield_scope_switches_summary_values_and_labels():
+    summary = "\n".join(_table_lines(_build([_row()]), "サマリー"))
+    assert "| 簿価利回り＋優待(%) | 6.00 |" in summary
+    assert "| 時価利回り＋優待(%) | 4.80 |" in summary
+    summary = "\n".join(_table_lines(_build([_row()], yield_scope="ex_fund"), "サマリー"))
+    assert "| 簿価利回り＋優待(投信除く)(%) | 10.00 |" in summary
+    assert "| 時価利回り＋優待(投信除く)(%) | 8.33 |" in summary
+
+
+def test_yield_scope_does_not_touch_the_holdings_table():
+    """銘柄一覧の利回り列は集計対象の切替と無関係（1銘柄それぞれの自己利回り）。"""
+    rows = _table_lines(_build([_row()], yield_scope="ex_fund"), "銘柄一覧")
+    assert "簿価利回り＋優待(%)" in rows[0]
+    assert "投信除く" not in rows[0]
+    assert "| 6.00 |" in rows[-1]
+
+
+def test_notes_explain_fund_exclusion_only_when_excluding():
+    text = _build([_row()], yield_scope="ex_fund")
+    assert "投資信託を除いた値" in text
+    assert "分子（配当＋優待）と分母（簿価／時価）の**両方**" in text
+    assert "投信除外の影響を受けない" in text
+    assert "投資信託を除いた値" not in _build([_row()])
+
+
+def test_fund_exclusion_note_follows_the_benefit_switch():
+    """投信除外の注記が分子を「配当＋優待」で決め打ちしないこと。
+
+    優待を外した出力の中で注記だけが別の計算条件を説明すると、LLM は分子を
+    取り違えたまま尤もらしい分析を返す（数字自体は正しいので気付けない）。
+    """
+    text = _build([_row()], yield_scope="ex_fund", with_benefit=False)
+    assert "分子（配当のみ）と分母（簿価／時価）の**両方**" in text
+    assert "分子（配当＋優待）" not in text
+    # 銘柄一覧側の列名も実際に出しているヘッダと揃っていること
+    assert "`簿価利回り(%)`" in text
+    with_benefit = _build([_row()], yield_scope="ex_fund")
+    assert "`簿価利回り＋優待(%)`" in with_benefit
+
+
+def test_notes_warn_withdrawal_income_is_dropped_when_excluding_funds():
+    """取崩モード × 投信除外は「取崩収入ゼロの利回り」になる旨を出す。"""
+    text = _build([_row()], withdrawal_mode="fixed", yield_scope="ex_fund")
+    assert "取崩収入をゼロとした値" in text
+    # 投信を含める側では出さない（含めているのに除外の説明が付くと誤読する）
+    assert "取崩収入をゼロとした値" not in _build([_row()], withdrawal_mode="fixed")
+
+
+# ---- 優待スイッチ（with_benefit） ----
+
+def test_benefit_switch_appears_in_conditions():
+    conditions = "\n".join(_table_lines(_build([_row()]), "出力条件"))
+    assert "| 利回りの優待 | 含む |" in conditions
+    conditions = "\n".join(
+        _table_lines(_build([_row()], with_benefit=False), "出力条件")
+    )
+    assert "| 利回りの優待 | 含まない |" in conditions
+
+
+def test_benefit_switch_changes_summary_yield_values_and_labels():
+    summary = "\n".join(
+        _table_lines(_build([_row()], with_benefit=False), "サマリー")
+    )
+    # 分子が配当だけ（10,000）になる: 10,000 / 200,000 = 5.00%
+    assert "| 簿価利回り(%) | 5.00 |" in summary
+    assert "| 時価利回り(%) | 4.00 |" in summary
+    assert "＋優待" not in summary
+
+
+def test_benefit_switch_swaps_the_row_yield_columns():
+    """画面と同じく銘柄一覧の利回り列も配当のみへ差し替わること。"""
+    text = _build([_row()], with_benefit=False)
+    header = _cells(_table_lines(text, "銘柄一覧")[0])
+    data = _cells(_table_lines(text, "銘柄一覧")[2])
+    assert "簿価利回り(%)" in header and "簿価利回り＋優待(%)" not in header
+    assert data[header.index("簿価利回り(%)")] == "5.00"
+    assert data[header.index("時価利回り(%)")] == "4.00"
+
+
+def test_notes_state_the_yield_numerator():
+    assert "利回りの分子は「配当＋優待」。" in _build([_row()])
+    without = _build([_row()], with_benefit=False)
+    assert "**配当のみ**（優待を含めない）" in without
+    assert "利回りの分子とは一致しない" in without
+
+
+def test_benefit_and_scope_suffixes_combine():
+    summary = "\n".join(
+        _table_lines(_build([_row()], yield_scope="ex_fund"), "サマリー")
+    )
+    assert "| 簿価利回り＋優待(投信除く)(%) | 10.00 |" in summary
+    summary = "\n".join(
+        _table_lines(
+            _build([_row()], yield_scope="ex_fund", with_benefit=False), "サマリー"
+        )
+    )
+    # 投信除外の配当のみ: 8,000 / 100,000 = 8.00%
+    assert "| 簿価利回り(投信除く)(%) | 8.00 |" in summary
