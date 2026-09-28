@@ -204,3 +204,83 @@ def test_only_stale_dividends_yield_no_ratios():
     )
     assert total is None
     assert ratios is None
+
+
+def _ymd(d):
+    return (d.year, d.month, d.day)
+
+
+def test_semiannual_dividends_on_ex_date_do_not_count_three_times():
+    """権利落ち当日に前年同日の配当が窓へ残り、半期配当が3回分にならないこと。
+
+    実例: 東京海上 105.5(前年9/29) + 112.5(3/30) + 122.5(当日9/29) を 340.5 と数えていた。
+    """
+    from datetime import date, timedelta
+
+    today = date.today()
+    series = _series([
+        (_ymd(today - timedelta(days=365)), 105.5),
+        (_ymd(today - timedelta(days=183)), 112.5),
+        (_ymd(today), 122.5),
+    ])
+    total, latest, ratios = md._parse_yfinance_dividends(series)
+    assert total == pytest.approx(235.0)
+    assert latest == today.isoformat()
+    assert sum(ratios.values()) == pytest.approx(1.0)
+
+
+def test_semiannual_dividends_between_ex_dates_keep_two_payments():
+    """通常時（最新の権利落ちから半年後）は従来どおり直近2回分になること。"""
+    from datetime import date, timedelta
+
+    today = date.today()
+    series = _series([
+        (_ymd(today - timedelta(days=365)), 105.5),
+        (_ymd(today - timedelta(days=180)), 112.5),
+    ])
+    total, _, _ = md._parse_yfinance_dividends(series)
+    assert total == pytest.approx(218.0)
+
+
+def test_previous_year_ex_date_shifted_by_days_is_still_excluded():
+    """前年の権利落ち日が今年より数日遅れていても3回分にならないこと。"""
+    from datetime import date, timedelta
+
+    today = date.today()
+    series = _series([
+        (_ymd(today - timedelta(days=360)), 105.5),  # 前年は5日遅かった
+        (_ymd(today - timedelta(days=180)), 112.5),
+        (_ymd(today), 122.5),
+    ])
+    total, _, _ = md._parse_yfinance_dividends(series)
+    assert total == pytest.approx(235.0)
+
+
+def test_quarterly_and_monthly_dividends_keep_full_year():
+    from datetime import date, timedelta
+
+    today = date.today()
+    quarterly = _series(
+        [(_ymd(today - timedelta(days=91 * k)), 10.0) for k in range(5)]
+    )
+    total, _, _ = md._parse_yfinance_dividends(quarterly)
+    assert total == pytest.approx(40.0)  # 最新から 364 日前の5件目は含めない
+
+    monthly = _series(
+        [(_ymd(today - timedelta(days=30 * k)), 1.0) for k in range(13)]
+    )
+    total, _, _ = md._parse_yfinance_dividends(monthly)
+    assert total == pytest.approx(12.0)
+
+
+def test_future_dated_dividend_does_not_shift_the_window():
+    from datetime import date, timedelta
+
+    today = date.today()
+    series = _series([
+        (_ymd(today - timedelta(days=200)), 100.0),
+        (_ymd(today - timedelta(days=20)), 100.0),
+        (_ymd(today + timedelta(days=60)), 50.0),
+    ])
+    total, _, _ = md._parse_yfinance_dividends(series)
+    assert total == pytest.approx(250.0)
