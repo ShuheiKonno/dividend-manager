@@ -66,10 +66,23 @@ def _yfinance_company_name(symbol: str) -> str | None:
     return None
 
 
+# 配当年額の集計窓。「今日から」ではなく「最新の権利落ち日から」数える。
+# 今日起点の 370 日窓だと、権利落ち当日に前年の同じ権利落ち日も入って半期配当が
+# 3 回分（四半期は 5 回分）になり、年額が約 1.5 倍に膨らむ。350 日は
+# 月次（11 回前≒335 日）まで入り、前年同期の支払い（≒365 日前）が権利落ち日の
+# 曜日ずれ（±数日〜2 週間）で混ざらない幅。
+_DIV_WINDOW_DAYS = 350
+# 配当を出さなくなった銘柄を拾い続けないための、今日からの上限。
+_DIV_STALE_DAYS = 370
+
+
 def _parse_yfinance_dividends(
     series,
 ) -> tuple[float | None, str | None, dict[int, float] | None]:
-    """直近約370日の配当合計・最新権利落ち日・権利落ち月別の構成比を返す。
+    """直近1年分の配当合計・最新権利落ち日・権利落ち月別の構成比を返す。
+
+    窓は最新の権利落ち日から `_DIV_WINDOW_DAYS` 日（今日から
+    `_DIV_STALE_DAYS` 日より古い配当は除外）。
 
     比率は支払月ではなく**権利落ち月**ベース（yfinance のインデックスは ex-date）。
     支払月への変換は calc.shift_ex_month_to_payment が担う——ここで焼き込むと、
@@ -81,17 +94,28 @@ def _parse_yfinance_dividends(
     """
     if series is None or len(series) == 0:
         return None, None, None
-    cutoff = date.today() - timedelta(days=370)
+    today = date.today()
+    stale_cutoff = today - timedelta(days=_DIV_STALE_DAYS)
+    entries: list[tuple[date, float]] = []
+    for idx, value in series.items():
+        d = idx.date() if hasattr(idx, "date") else None
+        if d is None or d < stale_cutoff:
+            continue
+        try:
+            entries.append((d, float(value)))
+        except (TypeError, ValueError):
+            continue
+    if not entries:
+        return None, None, None
+    # 起点は今日以前の最新の権利落ち日（先日付が混ざっても窓を未来へずらさない）。
+    past = [d for d, _ in entries if d <= today]
+    anchor = max(past) if past else max(d for d, _ in entries)
+    window_start = anchor - timedelta(days=_DIV_WINDOW_DAYS)
     total = 0.0
     latest_date = None
     by_month: dict[int, float] = {}
-    for idx, value in series.items():
-        d = idx.date() if hasattr(idx, "date") else None
-        if d is None or d < cutoff:
-            continue
-        try:
-            val = float(value)
-        except (TypeError, ValueError):
+    for d, val in entries:
+        if d <= window_start:
             continue
         total += val
         by_month[d.month] = by_month.get(d.month, 0.0) + val
@@ -154,7 +178,10 @@ def _fetch_one(
         ticker = None
         try:
             ticker = _yf().Ticker(yf_symbol)
-            history = ticker.history(period="10d")
+            # 最新の終値だけ使うので配当・分割の調整は不要。既定の auto_adjust=True だと、
+            # 最新バーの後ろに未来の権利落ち日の配当があるとき最新バーまで調整され
+            # 市場価格より安い値が入る（分割直後は分割前基準の配当で -23% になった）。
+            history = ticker.history(period="10d", auto_adjust=False)
             # 最終行の Close が NaN（最新バー未確定）の銘柄があるため、
             # 最後の非 NaN 終値を採用する。
             close = history["Close"].dropna()
