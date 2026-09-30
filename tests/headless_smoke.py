@@ -610,6 +610,15 @@ def _check_auto_fields_are_untouched() -> None:
         "保存で手編集の税引後上書きが消えた"
     )
 
+    # 分割の反映済み日も同じ扱い。開いて保存しただけで消えると、反映済みの分割へ
+    # 旗が再び立ち、補正を押すと二重適用になる（エラーは出ない）。
+    dlg = EditHoldingDialog(_holding(split_applied_through="2026-09-29"))
+    dlg._on_save()
+    assert dlg.result_holding is not None
+    assert dlg.result_holding.split_applied_through == "2026-09-29", (
+        "保存で分割の反映済み日が消えた"
+    )
+
     # 新規登録は両方 None のまま（＝自動計算に任せる）で追加される
     nd = NewHoldingDialog(_holding(symbol="8306", name="三菱UFJ"))
     assert not hasattr(nd, "_tax_rate"), "新規ダイアログに源泉税率の欄が残っている"
