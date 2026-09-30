@@ -47,7 +47,8 @@ def _check_actions(w) -> None:
                 "theme_dark", "theme_light",
                 "export_holdings", "export_history", "export_holdings_md",
                 "import_holdings", "import_history",
-                "change_data_dir", "open_data_dir", "create_shortcut", "quit"):
+                "change_data_dir", "open_data_dir", "create_shortcut", "quit",
+                "split_apply", "split_dismiss", "split_apply_all"):
         assert key in actions, f"アクション {key} が無い: {sorted(actions)}"
 
     # 一文字ショートカットが残っていないこと（表で銘柄コードを打つと誤爆する）
@@ -425,6 +426,144 @@ def _check_yield_scope(w) -> None:
     assert w.yield_scope == original and w.income_benefit == original_benefit
 
 
+def _check_split_flags(w) -> None:
+    """株式分割の旗・補正ボタン・メニューが実ウィンドウで配線されていること。
+
+    保有・市場データはメモリ上の合成データへ差し替え、保存と再読込は差し替えて
+    実データを汚さない（build_window() は実データを読むので、元へ戻して終える）。
+    旗の立て方そのもの（未反映の判定）は tests/test_splits.py が固定する。ここでは
+    「旗が両テーブルへ描かれる / 選択に応じてボタンが押せる / 押すと旗が消える /
+    テーマ切替で旗の色が追随する」という配線だけを見る。
+    """
+    from datetime import date, timedelta
+
+    from src import theme
+
+    split_day = (date.today() - timedelta(days=3)).isoformat()
+
+    def market(symbol: str, with_split: bool = True) -> MarketData:
+        return MarketData(
+            symbol=symbol, currency="JPY", last_price=3737.0, price_as_of=split_day,
+            annual_div_ps_gross=100.0, annual_div_ps_net=None, div_forecast_as_of=None,
+            source="smoke", fetched_at=None,
+            recent_splits=[(split_day, 2.0)] if with_split else [],
+        )
+
+    pending = _holding(symbol="9901", name="未反映", account="特定", shares=300.0,
+                       avg_cost=2503.0, annual_div_ps_gross_override=108.0)
+    done = _holding(symbol="9902", name="反映済み", account="特定",
+                    split_applied_through=split_day)
+    fund = _holding(symbol="9903", name="投信", asset_type="fund")
+    market_map = {s: market(s) for s in ("9901", "9902", "9903")}
+
+    original_holdings = w.holdings
+    original_market = w.market_data_map
+    original_tab = w._tabs.currentIndex()
+    original_theme = w.theme_name
+    original_save = gui.save_holdings
+    original_question = gui.QMessageBox.question
+    saved: dict = {}
+    gui.save_holdings = lambda rows: saved.update(rows=rows)
+    w._reload_all = w._refresh_view  # 保存後の再読込を、ディスクを読まない再描画へ
+    try:
+        w.holdings = [pending, done, fund]
+        w.market_data_map = market_map
+        w._tabs.setCurrentIndex(3)
+        w._refresh_view()
+
+        def flag_cells(tab_key, model, columns):
+            col = [k for _, k in columns].index("split_flag")
+            indices = w.row_holding_indices[tab_key]
+            return {indices[r]: model.item(r, col) for r in range(model.rowCount())}
+
+        # 旗は両テーブルに、未反映の行だけ立つ（反映済み・投信には立たない）。
+        for tab_key, model, columns in (
+            ("price", w._price_model, gui.PRICE_COLUMNS),
+            ("income", w._income_model, gui.INCOME_COLUMNS),
+        ):
+            cells = flag_cells(tab_key, model, columns)
+            assert cells[0].text().startswith("⚑ 2:1("), (tab_key, cells[0].text())
+            assert cells[1].text() == "" and cells[2].text() == "", tab_key
+            assert "→" in cells[0].toolTip() and "分割を反映" in cells[0].toolTip(), tab_key
+            assert cells[0].font().bold(), f"{tab_key}: 旗が強調されていない"
+            assert cells[0].foreground().color().name() == theme.SPLIT_FLAG, tab_key
+
+        # 補正ボタンは、メニュー・ツールバー・右クリックが同じ QAction を共有する。
+        acts = w._actions
+        data_menu = [a for a in w.menuBar().actions() if a.text().startswith("データ")][0]
+        data_actions = data_menu.menu().actions()
+        assert acts["split_apply"] in data_actions, "データメニューに分割を反映が無い"
+        assert acts["split_dismiss"] in data_actions
+        assert acts["split_apply_all"] in data_actions
+        assert acts["split_apply"] in w._toolbar.actions(), "ツールバーに補正ボタンが無い"
+
+        # 押せるのは「旗の立った行を選んでいるとき」だけ（無反応ボタンを作らない）。
+        def select_holding(index: int) -> None:
+            src_row = w.row_holding_indices["price"].index(index)
+            proxy_idx = w._price_proxy.mapFromSource(w._price_model.index(src_row, 0))
+            w._price_view.selectRow(proxy_idx.row())
+
+        select_holding(0)
+        assert acts["split_apply"].isEnabled(), "旗の行を選んでも補正が押せない"
+        assert acts["split_dismiss"].isEnabled()
+        assert acts["split_apply_all"].isEnabled()
+        select_holding(1)
+        assert not acts["split_apply"].isEnabled(), "反映済みの行で補正が押せる"
+        assert not acts["split_dismiss"].isEnabled()
+        assert acts["split_apply_all"].isEnabled(), "未反映の行が残っているのにまとめて反映が押せない"
+        select_holding(0)
+        w._busy = True
+        w._sync_action_states()
+        assert not acts["split_apply"].isEnabled(), "取得中も補正が押せる"
+        assert not acts["split_apply_all"].isEnabled()
+        w._busy = False
+        w._sync_action_states()
+        w._tabs.setCurrentIndex(0)
+        assert not acts["split_apply"].isEnabled(), "グラフタブで補正が押せる"
+        w._tabs.setCurrentIndex(3)
+        select_holding(0)
+
+        # 押す → 補正が保存され、旗が消えてボタンも押せなくなる（二度押しの二重適用が無い）。
+        gui.QMessageBox.question = staticmethod(
+            lambda *a, **k: gui.QMessageBox.StandardButton.Yes
+        )
+        w.action_apply_split()
+        row = saved["rows"][0]
+        assert (row.shares, row.avg_cost, row.annual_div_ps_gross_override) == (
+            600.0, 1251.5, 54.0
+        ), row
+        assert row.split_applied_through == split_day
+        assert saved["rows"][1:] == [done, fund], "選択していない行を書き換えた"
+        assert flag_cells("price", w._price_model, gui.PRICE_COLUMNS)[0].text() == "", (
+            "補正後も旗が残っている"
+        )
+        select_holding(0)
+        assert not acts["split_apply"].isEnabled(), "補正後も補正ボタンが押せる"
+        assert not acts["split_apply_all"].isEnabled()
+
+        # 旗の色はテーマ切替で追随する（値 import していないこと）。
+        w.holdings = [pending, done, fund]
+        w._refresh_view()
+        other = next(t for t in theme.THEMES if t != original_theme)
+        w.action_set_theme(other)
+        cell = flag_cells("price", w._price_model, gui.PRICE_COLUMNS)[0]
+        assert cell.foreground().color().name() == theme.PALETTES[other]["SPLIT_FLAG"], (
+            "テーマ切替後も旗が旧テーマの色のまま"
+        )
+    finally:
+        gui.QMessageBox.question = original_question
+        gui.save_holdings = original_save
+        del w._reload_all  # インスタンス属性を外し、クラスの _reload_all へ戻す
+        w._busy = False
+        if w.theme_name != original_theme:
+            w.action_set_theme(original_theme)  # 設定（theme）を元へ戻す
+        w.holdings = original_holdings
+        w.market_data_map = original_market
+        w._tabs.setCurrentIndex(original_tab)
+        w._refresh_view()
+        w._sync_action_states()
+
+
 def _check_account_combo() -> None:
     """口座が選択式で、既存値・未知値・未設定を取りこぼさないこと。"""
     dlg = EditHoldingDialog(_holding(account="特定"))
@@ -776,6 +915,7 @@ def main() -> None:
     _check_theme_toggle(w)
     _check_fund_share_unit(w)
     _check_yield_scope(w)
+    _check_split_flags(w)
 
     # 編集ダイアログ: 即時バリデーション（赤枠プロパティ＋集約エラーラベル）
     dlg = EditHoldingDialog(_holding())

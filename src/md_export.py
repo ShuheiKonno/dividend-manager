@@ -12,6 +12,7 @@ CSV エクスポート（io_csv.export_holdings_csv）は holdings.csv と同一
 
 from __future__ import annotations
 
+from .splits import flag_text
 from .calc import (
     DEFAULT_FUND_SHARE_UNIT,
     FUND_SHARE_UNIT_COLUMN_LABELS,
@@ -186,6 +187,7 @@ def _notes(
     with_benefit: bool,
     has_inactive: bool,
     fund_share_unit: str = DEFAULT_FUND_SHARE_UNIT,
+    pending_splits: list[str] | None = None,
 ) -> list[str]:
     """LLM が冷えた状態で読んだとき誤読しうる前提を列挙する。
 
@@ -261,6 +263,16 @@ def _notes(
             f"- 収入モードが「{WITHDRAWAL_LABELS[withdrawal_mode]}」のため、"
             "投資信託の行の `年間収入(円)` は分配金ではなく取崩による現金収入。"
             "株式・ETF の行は配当のまま（影響を受けない）。"
+        )
+    if pending_splits:
+        # 旗の立った行は株価だけが分割後基準で、株数・購入単価は分割前のまま
+        # （利用者が補正するまで書き換えない）。数字だけ渡すと、時価が急落した
+        # 銘柄として読まれる。
+        notes.append(
+            "- 株式分割が株数・購入単価へ**未反映**の銘柄がある: "
+            + "、".join(pending_splits)
+            + "。これらの行は現在株価だけが分割後の基準で、株数が分割前のままなので、"
+            "時価・損益・年間配当が実態より小さく出ている（値下がりしたわけではない）。"
         )
     if has_inactive:
         notes.append(
@@ -368,6 +380,11 @@ def build_holdings_markdown(
 
     lines.append("## 前提・注意")
     lines.append("")
+    pending_splits = [
+        f"{row.get('symbol')}（{flag_text(row['pending_splits']).removeprefix('⚑ ')}）"
+        for row in rows
+        if row.get("pending_splits")
+    ]
     lines += _notes(
         dividend_mode,
         withdrawal_mode,
@@ -375,6 +392,7 @@ def build_holdings_markdown(
         with_benefit,
         inactive_count > 0,
         fund_share_unit,
+        pending_splits,
     )
     lines.append("")
 

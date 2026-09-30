@@ -1,5 +1,6 @@
 ﻿from __future__ import annotations
 
+import math
 import re
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
@@ -75,14 +76,106 @@ _DIV_WINDOW_DAYS = 350
 # 配当を出さなくなった銘柄を拾い続けないための、今日からの上限。
 _DIV_STALE_DAYS = 370
 
+# 市場データへ保存する分割の遡及日数。未反映の分割を探すには直近だけあればよく
+# （splits.UNSET_LOOKBACK_DAYS は60日）、反映済み日を持つ行が長く放置されても
+# 拾えるよう余裕を持たせる。何年も前の分割まで持つとキャッシュが膨らむだけ。
+_SPLIT_KEEP_DAYS = 800
+# 分割比が 2/3〜1.5（両端を含む）の範囲では、分割前基準の配当（比率倍）と配当の
+# 自然な増減（数十%）を見分けられないので補正しない。
+_SPLIT_DIV_MIN_STEP = 1.5
+# 分割当日の配当と比べる参照配当として、前年同期を探す幅（±日）。
+_SAME_SEASON_DAYS = 45
+
+
+def _parse_yfinance_splits(series) -> list[tuple[str, float]]:
+    """yfinance の splits（比率=1株が何株になったか）を [(ISO 日付, 比率)] へ。"""
+    if series is None or len(series) == 0:
+        return []
+    result: dict[str, float] = {}
+    for idx, value in series.items():
+        d = idx.date() if hasattr(idx, "date") else None
+        try:
+            ratio = float(value)
+        except (TypeError, ValueError):
+            continue
+        if d is None or not math.isfinite(ratio) or ratio <= 0 or ratio == 1.0:
+            continue
+        result[d.isoformat()] = ratio
+    return sorted(result.items())
+
+
+def _reference_dividend(
+    entries: list[tuple[date, float]], target: date, skip: int
+) -> float | None:
+    """分割当日の配当と比べる参照配当。前年同期を優先し、無ければ直前の配当。
+
+    前年同期を優先するのは、中間と期末で額が大きく違う銘柄があるため（8473:
+    中間 15〜20円 / 期末 70〜75円）。直前の配当だけと比べると、期末配当を「分割前基準」と
+    取り違える。Yahoo は分割当日**以前**の配当を分割後基準へ調整済みなので、そのまま
+    比べられる。
+    """
+    year_ago = target - timedelta(days=365)
+    same_season = [
+        (abs((d - year_ago).days), v)
+        for i, (d, v) in enumerate(entries)
+        if i != skip and v > 0 and abs((d - year_ago).days) <= _SAME_SEASON_DAYS
+    ]
+    if same_season:
+        return min(same_season)[1]
+    earlier = [v for i, (d, v) in enumerate(entries) if i != skip and d < target and v > 0]
+    return earlier[-1] if earlier else None
+
+
+def _correct_split_day_dividends(
+    entries: list[tuple[date, float]], splits: list[tuple[str, float]]
+) -> list[tuple[date, float]]:
+    """分割当日の権利落ち配当が分割前基準のままなら、分割後基準へ直す。
+
+    Yahoo は分割当日以前の配当を分割後基準へ調整するが、**分割当日の配当だけは
+    未調整のまま返すことがある**（2026-09-29 の 5334: 105円が正しくは 52.5円）。数日で
+    調整される銘柄もあれば、5401（2025-09-29 の 60円）のように1年以上そのままの銘柄も
+    ある。逆に 9101・7267・8316（2024）などは当日分も調整済みで、割ると二重に割る。
+
+    そこで**無条件には割らず**、参照配当（前年同期／直前）と比べて、生値が「参照 × 比率」
+    （未調整）と「参照 × 1」（調整済み）のどちらに対数距離で近いかで決める。Yahoo が
+    後で調整すれば自動で割るのをやめる。
+
+    既知の弱点: 比率2の分割と、4割超の増配が同時に重なると、調整済みの配当を未調整と
+    誤判定して半分にする。参照が取れない銘柄（上場直後など）は補正せず、銘柄ごとの
+    配当上書きに任せる。
+    """
+    by_date = {date.fromisoformat(d): r for d, r in splits}
+    if not by_date:
+        return entries
+    ordered = sorted(entries)
+    corrected: list[tuple[date, float]] = []
+    for i, (d, value) in enumerate(ordered):
+        ratio = by_date.get(d)
+        if (
+            ratio is not None
+            and value > 0
+            and not (1 / _SPLIT_DIV_MIN_STEP <= ratio <= _SPLIT_DIV_MIN_STEP)
+        ):
+            ref = _reference_dividend(ordered, d, skip=i)
+            if ref is not None:
+                gap = math.log(value / ref)
+                if abs(gap - math.log(ratio)) < abs(gap):
+                    value = value / ratio
+        corrected.append((d, value))
+    return corrected
+
 
 def _parse_yfinance_dividends(
-    series,
+    series, splits: list[tuple[str, float]] | None = None
 ) -> tuple[float | None, str | None, dict[int, float] | None]:
     """直近1年分の配当合計・最新権利落ち日・権利落ち月別の構成比を返す。
 
     窓は最新の権利落ち日から `_DIV_WINDOW_DAYS` 日（今日から
     `_DIV_STALE_DAYS` 日より古い配当は除外）。
+
+    splits を渡すと、分割当日の配当が分割前基準のままなら分割後基準へ直す
+    （_correct_split_day_dividends）。参照配当に前年の配当が要るため、補正は古い配当を
+    捨てる前に行う。
 
     比率は支払月ではなく**権利落ち月**ベース（yfinance のインデックスは ex-date）。
     支払月への変換は calc.shift_ex_month_to_payment が担う——ここで焼き込むと、
@@ -96,15 +189,18 @@ def _parse_yfinance_dividends(
         return None, None, None
     today = date.today()
     stale_cutoff = today - timedelta(days=_DIV_STALE_DAYS)
-    entries: list[tuple[date, float]] = []
+    raw: list[tuple[date, float]] = []
     for idx, value in series.items():
         d = idx.date() if hasattr(idx, "date") else None
-        if d is None or d < stale_cutoff:
+        if d is None:
             continue
         try:
-            entries.append((d, float(value)))
+            raw.append((d, float(value)))
         except (TypeError, ValueError):
             continue
+    if splits:
+        raw = _correct_split_day_dividends(raw, splits)
+    entries = [(d, v) for d, v in raw if d >= stale_cutoff]
     if not entries:
         return None, None, None
     # 起点は今日以前の最新の権利落ち日（先日付が混ざっても窓を未来へずらさない）。
@@ -167,6 +263,7 @@ def _fetch_one(
     name_update: tuple[str, str] | None = None
     price, price_date = None, None
     div_ps, div_date, div_ratios = None, None, None
+    recent_splits: list[tuple[str, float]] = []
 
     if holding.asset_type == "fund" and _is_isin(holding.symbol):
         # 投資信託 ISIN → ToushinReader で基準価額を取得
@@ -194,9 +291,20 @@ def _fetch_one(
             errors.append(f"株価取得失敗: {holding.symbol} ({exc})")
 
         if ticker is not None:
+            # 分割の取得失敗は株価・配当の取得を止めない（補正と旗が効かないだけ）。
+            # 配当と同じ履歴から取れるので、通常は追加の通信は発生しない。
+            all_splits: list[tuple[str, float]] = []
+            try:
+                all_splits = _parse_yfinance_splits(ticker.splits)
+            except Exception:
+                all_splits = []
+            keep_since = (date.today() - timedelta(days=_SPLIT_KEEP_DAYS)).isoformat()
+            recent_splits = [(d, r) for d, r in all_splits if d >= keep_since]
             try:
                 series = ticker.dividends
-                div_ps, div_date, div_ratios = _parse_yfinance_dividends(series)
+                div_ps, div_date, div_ratios = _parse_yfinance_dividends(
+                    series, all_splits
+                )
             except Exception as exc:
                 errors.append(f"配当取得失敗: {holding.symbol} ({exc})")
 
@@ -216,6 +324,7 @@ def _fetch_one(
         source=source,
         fetched_at=fetched_at,
         div_ex_month_ratios=div_ratios,
+        recent_splits=recent_splits,
     )
     return md, errors, name_update
 

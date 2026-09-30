@@ -101,6 +101,8 @@ _DARK = {
     "SERIES_INCOME": "#66bb6a",    # 配当（収入）推移
     "SERIES_DIVIDEND": "#1565c0",  # 月別: 配当の棒
     "SERIES_BENEFIT": "#ffa726",   # 月別: 優待の棒（配当推移の緑と取り違えない橙）
+    # ---- 表の注意喚起 ----
+    "SPLIT_FLAG": "#ffca28",       # 株式分割の未反映フラグ（損益の赤青と取り違えない黄）
 }
 
 _LIGHT = {
@@ -176,6 +178,7 @@ _LIGHT = {
     "SERIES_INCOME": "#2e7d32",
     "SERIES_DIVIDEND": "#1565c0",
     "SERIES_BENEFIT": "#ef6c00",
+    "SPLIT_FLAG": "#b26a00",
 }
 
 PALETTES = {"dark": _DARK, "light": _LIGHT}
