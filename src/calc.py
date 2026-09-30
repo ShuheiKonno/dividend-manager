@@ -4,6 +4,7 @@ from dataclasses import dataclass
 from typing import Iterable
 
 from .models import Holding, MarketData
+from .splits import applied_splits, pending_splits
 from .utils import safe_float
 
 
@@ -507,6 +508,13 @@ def compute_rows(
                 # 優待内容（自由記述）。金額だけでは何の優待か分からないので
                 # 表示側が金額の隣に出せるよう row へ載せる。
                 "benefit_detail": holding.benefit_detail,
+                # 株数・取得単価へ未反映の株式分割 [(ISO 日付, 比率)]。無ければ空。
+                # 判定は splits.pending_splits の1箇所（表示側で計算し直さない）。
+                # 数値そのものは補正しない——補正は利用者が押したときだけ書き換える。
+                "pending_splits": pending_splits(holding, market),
+                # 直近に反映済みにした分割（一覧へ「完了」表示で残す）。未反映と同じく
+                # 判定は splits の1箇所。数値は変えない。
+                "applied_splits": applied_splits(holding, market),
             }
         )
 

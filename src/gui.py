@@ -62,7 +62,7 @@ from .dialogs import (  # noqa: F401 — 再エクスポート
 )
 # DATA_DIR は実行中に変わる（データフォルダの変更）ため、値を import して
 # 固定せずモジュール経由で参照する。
-from . import app_config, io_csv, shortcut
+from . import app_config, io_csv, shortcut, splits
 from .io_csv import (
     init_empty_files,
     set_data_dir,
@@ -138,6 +138,8 @@ PRICE_COLUMNS = [
     ("コード", "symbol"),
     ("銘柄名", "name"),
     ("口座", "account"),
+    # 未反映の株式分割の旗。列 0/1/2 は絞り込みが前提なので、その後ろへ置く。
+    ("分割", "split_flag"),
     ("種別", "asset_type"),
     ("株数", "shares"),
     ("通貨", "currency"),
@@ -152,6 +154,7 @@ INCOME_COLUMNS = [
     ("コード", "symbol"),
     ("銘柄名", "name"),
     ("口座", "account"),
+    ("分割", "split_flag"),
     ("種別", "asset_type"),
     ("株数", "shares"),
     ("通貨", "currency"),
@@ -227,6 +230,7 @@ FREE_TEXT_COLUMNS = {"benefit_detail"}
 FREE_TEXT_COLUMN_MAX_WIDTH = 280
 
 NUMERIC_SORT_COLUMNS = {
+    "split_flag",
     "shares",
     "avg_cost",
     "last_price",
@@ -245,6 +249,10 @@ NUMERIC_SORT_COLUMNS = {
     "benefit_jpy",
     "total_jpy",
 }
+
+
+# 数値として並び替えるが、文字列を表示するので右寄せにしない列。
+LEFT_ALIGNED_SORT_COLUMNS = {"split_flag"}
 
 
 def clamp_free_text_columns(view: QTableView, columns: list[tuple[str, str]]) -> None:
@@ -278,6 +286,11 @@ def cell_sort_value(
     投信を1口単位で表示しているときは並び替えも 1口単位の値で行う（株式の株数と
     投信の口数が同じ列に混ざるのは単位設定に関わらず元からの性質）。
     """
+    if key == "split_flag":
+        # 旗のある行だけ値を持たせる（値の無い行は昇順・降順どちらでも末尾へ沈む）。
+        if row.get("pending_splits"):
+            return 1.0
+        return 2.0 if row.get("applied_splits") else None
     value = safe_float(row.get(key))
     if key == "shares":
         return to_display_shares(value, row.get("asset_type"), fund_share_unit)
@@ -303,6 +316,15 @@ def _cell_text_and_color(
 ) -> tuple[str, Optional[QColor]]:
     """有効銘柄としての表示文字列と文字色（損益のみ赤青）を返す。"""
     val = row.get(key)
+    if key == "split_flag":
+        events = row.get("pending_splits") or []
+        if events:
+            return splits.flag_text(events), QColor(theme.SPLIT_FLAG)
+        # 反映済みにした直後は旗を消さず、色と印を変えて残す（押したことが画面で読める）。
+        done = row.get("applied_splits") or []
+        if done:
+            return splits.done_flag_text(done), QColor(theme.SPLIT_DONE)
+        return "", None
     if key == "shares":
         # 投信の口数は表示単位で見せる（保存値は常に万口単位）。
         return fmt_number(
@@ -659,6 +681,13 @@ class DividendWindow(QMainWindow):
         ("new", "新規登録...", "Ctrl+N", "action_new_holding"),
         ("edit", "編集...", "Ctrl+E", "action_edit"),
         ("delete", "削除", "Ctrl+D", "action_delete"),
+        # 株式分割の補正。旗（「分割」列）が立った行に対して押す。自動では書き換えない
+        # （証券会社の反映時期とずれ、手で直済みの行に自動適用すると二重適用になる）。
+        ("split_apply", "分割を反映...", "Ctrl+Shift+S", "action_apply_split"),
+        ("split_dismiss", "分割を反映済みにする（数値は変えない）", None,
+         "action_dismiss_split"),
+        ("split_apply_all", "未反映の分割をすべて反映...", None,
+         "action_apply_all_splits"),
         ("toggle_mode", "税引前 / 税引後 の切替", "Ctrl+M", "action_toggle_mode"),
         ("toggle_withdrawal", "収入モードの切替", "Ctrl+I", "action_toggle_withdrawal"),
         # 形式名はサブメニュー名ではなく項目側に付ける（エクスポートに CSV と
@@ -789,6 +818,10 @@ class DividendWindow(QMainWindow):
         data_menu.addAction(act["new"])
         data_menu.addAction(act["edit"])
         data_menu.addAction(act["delete"])
+        data_menu.addSeparator()
+        data_menu.addAction(act["split_apply"])
+        data_menu.addAction(act["split_dismiss"])
+        data_menu.addAction(act["split_apply_all"])
 
         view_menu = bar.addMenu("表示(&V)")
         view_menu.addAction(act["toggle_mode"])
@@ -822,6 +855,7 @@ class DividendWindow(QMainWindow):
             "Ctrl+N: 新規登録\n"
             "Ctrl+E: 選択銘柄の編集（ダブルクリック / Enter でも可）\n"
             "Ctrl+D / Delete: 選択銘柄の削除\n"
+            "Ctrl+Shift+S: 選択銘柄の株式分割を反映（「分割」列に旗が立った行）\n"
             "\n"
             "Ctrl+M: 税引前 / 税引後 の切替\n"
             "Ctrl+I: 収入モードの切替（配当 → 定額取崩 → 定率取崩）\n"
@@ -893,6 +927,9 @@ class DividendWindow(QMainWindow):
         menu.addAction(self._actions["edit"])
         menu.addAction(self._actions["delete"])
         menu.addSeparator()
+        menu.addAction(self._actions["split_apply"])
+        menu.addAction(self._actions["split_dismiss"])
+        menu.addSeparator()
         menu.addAction(self._actions["new"])
         menu.exec(view.viewport().mapToGlobal(pos))
 
@@ -961,6 +998,8 @@ class DividendWindow(QMainWindow):
         bar.addSeparator()
         for key in ("new", "edit", "delete"):
             bar.addAction(act[key])
+        bar.addSeparator()
+        bar.addAction(act["split_apply"])
         # 削除は取り消せない操作なので、ホバー時の配色で他と区別する。
         delete_button = bar.widgetForAction(act["delete"])
         if delete_button is not None:
@@ -976,6 +1015,12 @@ class DividendWindow(QMainWindow):
             action.setToolTip(
                 f"{action.text().rstrip('.')} ({sequence})" if sequence else action.text()
             )
+        # ボタン面は短い名前にしてあるので、何をするボタンかはツールチップで補う。
+        act["split_apply"].setToolTip(
+            "選択行の株式分割を、株数・購入単価・配当の上書き値へ反映します "
+            f"({act['split_apply'].shortcut().toString()})。"
+            "「分割」列に旗が立った行だけ押せます"
+        )
 
         self.addToolBar(bar)
         self._toolbar = bar
@@ -1368,6 +1413,13 @@ class DividendWindow(QMainWindow):
             self._actions[key].setEnabled(has_row)
         # 取得中は CSV を書き換える操作を一律で伏せる（多重実行と競合を防ぐ）。
         idle = not self._busy
+        # 分割の補正は、選択行に未反映の分割があるときだけ（旗の無い行では押せない）。
+        selected_pending = self._selected_pending_splits() is not None
+        for key in ("split_apply", "split_dismiss"):
+            self._actions[key].setEnabled(idle and selected_pending)
+        self._actions["split_apply_all"].setEnabled(
+            idle and bool(splits.pending_holdings(self.holdings, self.market_data_map))
+        )
         # データフォルダの切替も同様（走行中のワーカーが旧フォルダへ書き戻す）。
         for key in ("update_market", "update_fx", "reload", "new",
                     "import_holdings", "import_history", "change_data_dir"):
@@ -2102,9 +2154,18 @@ class DividendWindow(QMainWindow):
                         cell_sort_value(row, key, self.fund_share_unit),
                         Qt.ItemDataRole.UserRole,
                     )
-                    item.setTextAlignment(
-                        Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter
-                    )
+                    if key not in LEFT_ALIGNED_SORT_COLUMNS:
+                        item.setTextAlignment(
+                            Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter
+                        )
+                if key == "split_flag" and text:
+                    holding_idx = holding_indices[i] if holding_indices is not None else i
+                    item.setToolTip(self._split_flag_tooltip(row, holding_idx))
+                    # 太字は未反映の旗だけ。完了表示は目立たせない（対応が要るのは旗のほう）。
+                    if row.get("pending_splits"):
+                        flag_font = item.font()
+                        flag_font.setBold(True)
+                        item.setFont(flag_font)
                 if key in FREE_TEXT_COLUMNS and text:
                     # 列幅の上限で切れた分をツールチップで読めるようにする。
                     item.setToolTip(text)
@@ -2401,6 +2462,9 @@ class DividendWindow(QMainWindow):
             annual_div_ps_gross_override=None, annual_div_ps_net_override=None,
             div_forecast_as_of_override=None, annual_benefit_jpy=0.0,
             withdrawal_fixed_jpy=None, withdrawal_rate=None, tax_rate=None, active=True,
+            # 今日入力する株数・単価は今日時点の値（過去の分割は反映済み）。空のままだと
+            # 直近60日の分割に旗が立ち、入力済みの数値へ二重に補正をかけかねない。
+            split_applied_through=today_jst_str(),
         )
         dlg = NewHoldingDialog(holding, self, fund_share_unit=self.fund_share_unit)
         if dlg.exec() == QDialog.DialogCode.Accepted and dlg.result_holding is not None:
@@ -2412,6 +2476,181 @@ class DividendWindow(QMainWindow):
             self._reload_all()
             self._select_holding_row(len(self.holdings) - 1)
             self._notify("銘柄を追加しました")
+
+    # ---- 株式分割の補正 ----
+    def _current_holding_index(self) -> int | None:
+        """現在のテーブルタブで選択中の行に対応する holdings インデックス。無ければ None。"""
+        tab_key = self._active_tab_key()
+        if tab_key == "dashboard":
+            return None
+        view = self._view_for_tab(tab_key)
+        idx = view.currentIndex()
+        if not idx.isValid():
+            return None
+        src_row = self._proxy_for_tab(tab_key).mapToSource(idx).row()
+        indices = self.row_holding_indices[tab_key]
+        if src_row < 0 or src_row >= len(indices):
+            return None
+        holding_idx = indices[src_row]
+        if holding_idx < 0 or holding_idx >= len(self.holdings):
+            return None
+        return holding_idx
+
+    def _selected_pending_splits(self) -> tuple[int, list[splits.Split]] | None:
+        """選択行が未反映の分割を持つなら (holdings インデックス, 分割)。無ければ None。"""
+        holding_idx = self._current_holding_index()
+        if holding_idx is None:
+            return None
+        holding = self.holdings[holding_idx]
+        events = splits.pending_splits(holding, self.market_data_map.get(holding.symbol))
+        return (holding_idx, events) if events else None
+
+    def _split_flag_tooltip(self, row: dict, holding_idx: int) -> str:
+        """旗セルのツールチップ。補正前後を見せて、押す前に中身を確認できるようにする。"""
+        events = row.get("pending_splits") or []
+        if not events:
+            done = row.get("applied_splits") or []
+            if not done:
+                return ""
+            return (
+                "株式分割は反映済みです（"
+                + "、".join(f"{d} {splits.format_ratio(r)}" for d, r in done)
+                + "）。\n株数・購入単価は分割後の値として扱っています。"
+                f"この表示は反映から{splits.APPLIED_DISPLAY_DAYS}日で消えます。"
+            )
+        if not (0 <= holding_idx < len(self.holdings)):
+            return ""
+        lines = splits.correction_lines(
+            self.holdings[holding_idx], events, row.get("last_price")
+        )
+        return (
+            "株式分割が株数・購入単価へ未反映です\n\n"
+            + "\n".join(lines)
+            + "\n\nデータメニューの「分割を反映」で補正します。"
+            "証券会社の値に合わせて手で直済みなら「分割を反映済みにする」を選びます。"
+        )
+
+    @staticmethod
+    def _holding_label(holding: Holding) -> str:
+        name = holding.name or holding.symbol or "(無名)"
+        return f"{name}（{holding.symbol}／{holding.account or '口座なし'}）"
+
+    def _split_notice(self) -> str:
+        """取得後にステータスバーへ添える、未反映の分割の件数メッセージ（無ければ ""）。"""
+        pending = splits.pending_holdings(self.holdings, self.market_data_map)
+        if not pending:
+            return ""
+        symbols = ", ".join(dict.fromkeys(self.holdings[i].symbol for i, _ in pending))
+        return (
+            f" ／ 株式分割の未反映 {len(pending)}件: {symbols}"
+            "（「分割」列の旗を確認し、データメニューの「分割を反映」で補正）"
+        )
+
+    def _commit_split_holdings(self, updates: dict[int, Holding], message: str) -> None:
+        """holdings の該当行を差し替えて保存し、再読込する（補正・反映済み記録の共通経路）。"""
+        holdings = list(self.holdings)
+        for index, holding in updates.items():
+            holdings[index] = holding
+        if not self._save_or_notify(lambda: save_holdings(holdings)):
+            return
+        self.holdings = holdings
+        self._reload_all()
+        self._notify(message)
+
+    def action_apply_split(self) -> None:
+        """選択行の未反映の分割を、株数・購入単価・配当の上書き値へ反映する。
+
+        書き換える前に補正前後と現在株価を見せて確認する。手で直済みの行への二重適用は
+        エラーにならず時価だけが狂うので、既定は「いいえ」にして、逃げ道
+        （分割を反映済みにする）を文面で案内する。
+        """
+        target = self._selected_pending_splits()
+        if target is None or self._busy:
+            return
+        holding_idx, events = target
+        holding = self.holdings[holding_idx]
+        market = self.market_data_map.get(holding.symbol)
+        lines = splits.correction_lines(
+            holding, events, market.last_price if market else None
+        )
+        reply = QMessageBox.question(
+            self,
+            "株式分割の反映",
+            f"{self._holding_label(holding)} に株式分割を反映します。\n\n"
+            + "\n".join(lines)
+            + "\n\n購入単価と現在株価の桁が合っているか確認してください。"
+            "すでに証券会社の値に合わせて株数・単価を手で直してある場合は"
+            "「いいえ」を選び、「分割を反映済みにする」を使ってください"
+            "（二重に反映されます）。",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No,
+        )
+        if reply != QMessageBox.StandardButton.Yes:
+            return
+        corrected = splits.apply_correction(holding, events)
+        self._commit_split_holdings(
+            {holding_idx: corrected},
+            f"{holding.name or holding.symbol} に分割を反映しました"
+            f"（株数 {holding.shares:g} → {corrected.shares:g}）",
+        )
+
+    def action_dismiss_split(self) -> None:
+        """選択行の分割を「反映済み」とだけ記録する（株数・単価は変えない）。"""
+        target = self._selected_pending_splits()
+        if target is None or self._busy:
+            return
+        holding_idx, events = target
+        holding = self.holdings[holding_idx]
+        reply = QMessageBox.question(
+            self,
+            "分割を反映済みにする",
+            f"{self._holding_label(holding)} の分割（"
+            + "、".join(f"{d} {splits.format_ratio(r)}" for d, r in events)
+            + "）を反映済みとして記録します。\n株数・購入単価・配当の上書きは変更しません。",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No,
+        )
+        if reply != QMessageBox.StandardButton.Yes:
+            return
+        self._commit_split_holdings(
+            {holding_idx: splits.mark_applied(holding, events)},
+            f"{holding.name or holding.symbol} の分割を反映済みにしました",
+        )
+
+    def action_apply_all_splits(self) -> None:
+        """未反映の分割を持つ全行へ、まとめて反映する（確認は1回）。"""
+        if self._busy:
+            return
+        pending = splits.pending_holdings(self.holdings, self.market_data_map)
+        if not pending:
+            return
+        summary = []
+        for holding_idx, events in pending:
+            holding = self.holdings[holding_idx]
+            plan = splits.plan_correction(holding, events)
+            summary.append(
+                f"{self._holding_label(holding)}: "
+                + "、".join(f"{d} {splits.format_ratio(r)}" for d, r in events)
+                + f" / 株数 {holding.shares:g} → {plan.shares[1]:g}"
+                f" / 単価 {holding.avg_cost:g} → {plan.avg_cost[1]:g}"
+            )
+        reply = QMessageBox.question(
+            self,
+            "未反映の分割をすべて反映",
+            f"{len(pending)} 行に株式分割を反映します。\n\n"
+            + "\n".join(summary)
+            + "\n\nすでに手で直してある行が混ざっていると二重に反映されます。"
+            "その行は「いいえ」で戻り、1行ずつ「分割を反映済みにする」を使ってください。",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No,
+        )
+        if reply != QMessageBox.StandardButton.Yes:
+            return
+        updates = {
+            holding_idx: splits.apply_correction(self.holdings[holding_idx], events)
+            for holding_idx, events in pending
+        }
+        self._commit_split_holdings(updates, f"{len(updates)} 行に分割を反映しました")
 
     def _select_holding_row(self, holding_idx: int) -> None:
         """指定 holdings インデックスの行を現在のテーブルタブで選択・表示する。
@@ -2518,13 +2757,15 @@ class DividendWindow(QMainWindow):
         self._refresh_view()
         # 最新株価で評価額が確定した時点で当日スナップショットを記録。
         self._record_history_snapshot()
+        split_notice = self._split_notice()
         if result.errors:
             self._notify(
-                f"一部の取得に失敗しました（{len(result.errors)}件）: {result.errors[0]}",
+                f"一部の取得に失敗しました（{len(result.errors)}件）: {result.errors[0]}"
+                + split_notice,
                 error=True,
             )
         else:
-            self._notify("株価・配当を更新しました")
+            self._notify("株価・配当を更新しました" + split_notice)
 
     def action_update_fx(self) -> None:
         if self._busy:

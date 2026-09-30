@@ -6,8 +6,11 @@ from typing import Any
 from .utils import (
     format_month_ratios,
     format_months,
+    format_splits,
+    normalize_iso_date,
     parse_month_ratios,
     parse_months,
+    parse_splits,
     safe_float,
     safe_str,
 )
@@ -37,6 +40,7 @@ HOLDINGS_FIELDS = [
     "dividend_months",
     "benefit_months",
     "benefit_detail",
+    "split_applied_through",
 ]
 
 MARKET_DATA_FIELDS = [
@@ -50,6 +54,7 @@ MARKET_DATA_FIELDS = [
     "source",
     "fetched_at",
     "div_ex_month_ratios",
+    "recent_splits",
 ]
 
 FX_FIELDS = [
@@ -107,6 +112,12 @@ class Holding:
     # 見ただけでは何の優待か分からないため、表示専用のメモとして持つ。
     # 未設定は None ではなく "" で表す（表示層で毎回 None を潰さずに済む）。
     benefit_detail: str = ""
+    # 「この日（含む）までの株式分割は株数・取得単価へ反映済み」を表す ISO 日付。
+    # 行ごとに持つ（同じ銘柄を複数口座で持てるので銘柄コード単位では足りない）。
+    # 空は「記録なし」＝直近の分割だけを未反映候補として旗を立てる（splits.pending_splits）。
+    # 自動で書き換えず、補正ボタン・「反映済みにする」・新規登録でだけ書く
+    # （証券会社の反映時期とアプリの更新時期はずれるため、自動適用は二重適用になる）。
+    split_applied_through: str = ""
 
     @classmethod
     def from_dict(cls, row: dict[str, Any]) -> "Holding":
@@ -137,6 +148,9 @@ class Holding:
             # safe_str は未設定を None にするが、この項目は "" を空とする
             # （表示層・CSV の双方で None 判定を増やさないため）。
             benefit_detail=str(row.get("benefit_detail") or "").strip(),
+            # 列を後から足したので旧 CSV には無い（→ ""）。解析不能な値も "" へ落とす。
+            split_applied_through=normalize_iso_date(row.get("split_applied_through"))
+            or "",
         )
 
     def to_dict(self) -> dict[str, Any]:
@@ -160,6 +174,7 @@ class Holding:
             "dividend_months": format_months(self.dividend_months),
             "benefit_months": format_months(self.benefit_months),
             "benefit_detail": self.benefit_detail,
+            "split_applied_through": self.split_applied_through,
         }
 
 
@@ -178,6 +193,10 @@ class MarketData:
     # 支払月ではない——ここは取得結果のキャッシュなので観測値をそのまま保持し、
     # 支払月への変換は calc.shift_ex_month_to_payment が担う。
     div_ex_month_ratios: dict[int, float] | None = None
+    # 直近の株式分割 [(ISO 日付, 比率)]（比率=1株が何株になったか。2:1 分割=2.0）。
+    # 取得結果のキャッシュなので観測値をそのまま持ち、未反映かどうかの判定は保有行側
+    # （Holding.split_applied_through）と突き合わせる splits.pending_splits が担う。
+    recent_splits: list[tuple[str, float]] = field(default_factory=list)
 
     @classmethod
     def from_dict(cls, row: dict[str, Any]) -> "MarketData":
@@ -192,6 +211,7 @@ class MarketData:
             source=safe_str(row.get("source")),
             fetched_at=safe_str(row.get("fetched_at")),
             div_ex_month_ratios=parse_month_ratios(row.get("div_ex_month_ratios")),
+            recent_splits=parse_splits(row.get("recent_splits")),
         )
 
     def to_dict(self) -> dict[str, Any]:
@@ -207,6 +227,7 @@ class MarketData:
             "source": self.source or "",
             "fetched_at": self.fetched_at or "",
             "div_ex_month_ratios": format_month_ratios(self.div_ex_month_ratios),
+            "recent_splits": format_splits(self.recent_splits),
         }
 
 

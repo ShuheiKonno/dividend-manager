@@ -128,6 +128,43 @@ def format_month_ratios(ratios: object) -> str:
     return ",".join(f"{month}:{ratio:.4f}" for month, ratio in sorted(parsed.items()))
 
 
+def parse_splits(raw: object) -> list[tuple[str, float]]:
+    """ "2026-09-29:2,2025-09-29:5" → [("2025-09-29", 5.0), ("2026-09-29", 2.0)]。
+
+    比率は「1株が何株になったか」（2:1 分割=2.0、5→1 併合=0.2）。日付昇順・同日は
+    後勝ちに正規化する。日付が解析不能・比率が正の有限値でない・比率が 1.0（変化なし）
+    の要素は捨てる（parse_months / parse_month_ratios と同じ「壊れた要素は捨てる」方針）。
+    """
+    if raw is None:
+        return []
+    if isinstance(raw, (list, tuple)):
+        items = [(a, b) for a, b in raw]
+    else:
+        text = str(raw).strip()
+        if not text:
+            return []
+        items = []
+        for chunk in text.replace("，", ",").split(","):
+            key, sep, value = chunk.strip().partition(":")
+            if sep:
+                items.append((key, value))
+    by_date: dict[str, float] = {}
+    for key, value in items:
+        iso = normalize_iso_date(key)
+        ratio = safe_float(value)
+        if iso is None or ratio is None or not math.isfinite(ratio):
+            continue
+        if ratio <= 0 or ratio == 1.0:
+            continue
+        by_date[iso] = ratio
+    return sorted(by_date.items())
+
+
+def format_splits(splits: object) -> str:
+    """[("2026-09-29", 2.0)] → "2026-09-29:2"。空/None は ""（parse_splits で正規化）。"""
+    return ",".join(f"{d}:{r:g}" for d, r in parse_splits(splits))
+
+
 def safe_float(value: Any) -> float | None:
     if value is None:
         return None
