@@ -63,6 +63,19 @@ def flag_text(events: list[Split]) -> str:
     return "⚑ " + " / ".join(f"{format_ratio(r)}({_short_date(d)})" for d, r in events)
 
 
+# 反映済みの分割を「完了」として一覧に残す日数。旗が反映の瞬間に消えると、押したのが
+# 効いたのか（別の行を押したのではないか）が画面から読み取れない。一定期間だけ色を変えて
+# 残し、以降は消す（いつまでも残すと、何年も前の分割が全行に並ぶ）。
+APPLIED_DISPLAY_DAYS = 60
+
+
+def done_flag_text(events: list[Split]) -> str:
+    """反映済みの分割の短い文字列。無ければ ""。例: "✓ 2:1(9/29)"。"""
+    if not events:
+        return ""
+    return "✓ " + " / ".join(f"{format_ratio(r)}({_short_date(d)})" for d, r in events)
+
+
 def pending_splits(
     holding: Holding, market: MarketData | None, today: date | None = None
 ) -> list[Split]:
@@ -85,6 +98,26 @@ def pending_splits(
         (d, r)
         for d, r in market.recent_splits
         if d <= today_iso and (d >= low if inclusive else d > low)
+    )
+
+
+def applied_splits(
+    holding: Holding, market: MarketData | None, today: date | None = None
+) -> list[Split]:
+    """直近に反映済みにした分割（一覧へ「完了」表示で残すもの）。無ければ空。
+
+    補正・「反映済みにする」は反映済み日をその分割の日付にするので、**反映済み日と同じ
+    日付の分割**だけを対象にする。反映済み日以前の分割を全部拾うと、新規登録した行
+    （反映済み日＝今日）に、登録前の分割まで「完了」として並ぶ。表示は
+    APPLIED_DISPLAY_DAYS 日で消える。投信は対象外。
+    """
+    baseline = holding.split_applied_through
+    if not baseline or holding.asset_type == "fund" or market is None:
+        return []
+    today = today or _today()
+    since = (today - timedelta(days=APPLIED_DISPLAY_DAYS)).isoformat()
+    return sorted(
+        (d, r) for d, r in market.recent_splits if d == baseline and d >= since
     )
 
 

@@ -103,6 +103,7 @@ _DARK = {
     "SERIES_BENEFIT": "#ffa726",   # 月別: 優待の棒（配当推移の緑と取り違えない橙）
     # ---- 表の注意喚起 ----
     "SPLIT_FLAG": "#ffca28",       # 株式分割の未反映フラグ（損益の赤青と取り違えない黄）
+    "SPLIT_DONE": "#81c784",       # 株式分割の反映済み表示（未反映の黄と見分ける緑）
 }
 
 _LIGHT = {
@@ -179,6 +180,7 @@ _LIGHT = {
     "SERIES_DIVIDEND": "#1565c0",
     "SERIES_BENEFIT": "#ef6c00",
     "SPLIT_FLAG": "#b26a00",
+    "SPLIT_DONE": "#2e7d32",
 }
 
 PALETTES = {"dark": _DARK, "light": _LIGHT}

@@ -234,6 +234,54 @@ def test_flag_column_is_blank_without_pending_split():
     assert gui._format_cell({"symbol": "5334"}, "split_flag") == ("", None)
 
 
+def test_applied_split_shows_a_done_mark_in_a_different_color():
+    """反映済みにした行は、旗を消さず「✓」と別の色で残す（押したことが画面で読める）。"""
+    row = _row(pending_splits=[], applied_splits=[(_split_day(), 2.0)])
+    text, color = gui._format_cell(row, "split_flag")
+    assert text.startswith("✓ 2:1(")
+    assert color == QColor(theme.SPLIT_DONE)
+    assert color != QColor(theme.SPLIT_FLAG)
+
+
+def test_pending_takes_precedence_over_done_mark():
+    row = _row(applied_splits=[("2026-03-30", 4.0)])  # 未反映の旗が優先
+    text, color = gui._format_cell(row, "split_flag")
+    assert text.startswith("⚑ ") and color == QColor(theme.SPLIT_FLAG)
+
+
+def test_sort_order_is_pending_then_done_then_blank():
+    pending = gui.cell_sort_value(_row(), "split_flag")
+    done = gui.cell_sort_value(
+        _row(pending_splits=[], applied_splits=[(_split_day(), 2.0)]), "split_flag"
+    )
+    blank = gui.cell_sort_value(_row(pending_splits=[]), "split_flag")
+    assert pending < done and blank is None  # 昇順で 旗 → 完了 → 空(末尾)
+
+
+def test_done_tooltip_explains_the_mark_and_when_it_fades():
+    stub = _Stub([_holding()], {"5334": _market()})
+    row = _row(pending_splits=[], applied_splits=[(_split_day(), 2.0)])
+    tip = gui.DividendWindow._split_flag_tooltip(stub, row, 0)
+    assert "反映済み" in tip and "2:1" in tip
+    assert str(splits.APPLIED_DISPLAY_DAYS) in tip
+    assert gui.DividendWindow._split_flag_tooltip(stub, _row(pending_splits=[]), 0) == ""
+
+
+def test_done_color_follows_the_theme():
+    try:
+        theme.set_theme("light")
+        light = gui._format_cell(
+            _row(pending_splits=[], applied_splits=[(_split_day(), 2.0)]), "split_flag"
+        )[1]
+        theme.set_theme("dark")
+        dark = gui._format_cell(
+            _row(pending_splits=[], applied_splits=[(_split_day(), 2.0)]), "split_flag"
+        )[1]
+    finally:
+        theme.set_theme(theme.DEFAULT_THEME)
+    assert light != dark
+
+
 def test_flag_color_follows_the_theme():
     """色は描画時に theme から読む（値で import すると切替後も旧テーマの色が残る）。"""
     try:

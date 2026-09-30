@@ -483,7 +483,9 @@ def _check_split_flags(w) -> None:
         ):
             cells = flag_cells(tab_key, model, columns)
             assert cells[0].text().startswith("⚑ 2:1("), (tab_key, cells[0].text())
-            assert cells[1].text() == "" and cells[2].text() == "", tab_key
+            # 反映済みの行は「完了」表示（✓）、投信は分割の対象外なので空。
+            assert cells[1].text().startswith("✓ "), (tab_key, cells[1].text())
+            assert cells[2].text() == "", tab_key
             assert "→" in cells[0].toolTip() and "分割を反映" in cells[0].toolTip(), tab_key
             assert cells[0].font().bold(), f"{tab_key}: 旗が強調されていない"
             assert cells[0].foreground().color().name() == theme.SPLIT_FLAG, tab_key
@@ -534,12 +536,32 @@ def _check_split_flags(w) -> None:
         ), row
         assert row.split_applied_through == split_day
         assert saved["rows"][1:] == [done, fund], "選択していない行を書き換えた"
-        assert flag_cells("price", w._price_model, gui.PRICE_COLUMNS)[0].text() == "", (
-            "補正後も旗が残っている"
-        )
+        # 旗は消さず、別の色の「完了」表示へ変わる（押したことが画面で読める）。
+        for tab_key, model, columns in (
+            ("price", w._price_model, gui.PRICE_COLUMNS),
+            ("income", w._income_model, gui.INCOME_COLUMNS),
+        ):
+            done_cell = flag_cells(tab_key, model, columns)[0]
+            assert done_cell.text().startswith("✓ 2:1("), (tab_key, done_cell.text())
+            assert done_cell.foreground().color().name() == theme.SPLIT_DONE, tab_key
+            assert theme.SPLIT_DONE != theme.SPLIT_FLAG
+            assert not done_cell.font().bold(), f"{tab_key}: 完了表示が旗と同じ強調のまま"
+            assert "反映済み" in done_cell.toolTip(), tab_key
         select_holding(0)
         assert not acts["split_apply"].isEnabled(), "補正後も補正ボタンが押せる"
         assert not acts["split_apply_all"].isEnabled()
+
+        # 「反映済みにする」も同じ完了表示になり、数値は変わらない。
+        w.holdings = [pending, done, fund]
+        w._refresh_view()
+        select_holding(0)
+        saved.clear()
+        w.action_dismiss_split()
+        row = saved["rows"][0]
+        assert (row.shares, row.avg_cost) == (300.0, 2503.0), "反映済みにしただけで数値が動いた"
+        assert flag_cells("price", w._price_model, gui.PRICE_COLUMNS)[0].text().startswith("✓ "), (
+            "反映済みにしても完了表示にならない"
+        )
 
         # 旗の色はテーマ切替で追随する（値 import していないこと）。
         w.holdings = [pending, done, fund]

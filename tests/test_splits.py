@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import replace
-from datetime import date
+from datetime import date, timedelta
 
 import pytest
 
@@ -229,3 +229,49 @@ def test_market_data_from_legacy_row_without_column_is_empty():
     row = _market().to_dict()
     del row["recent_splits"]
     assert MarketData.from_dict(row).recent_splits == []
+
+
+# ---- 反映済みの分割（「完了」表示で残す） ----
+
+def test_done_flag_text():
+    assert splits.done_flag_text([]) == ""
+    assert splits.done_flag_text([("2026-09-29", 2.0)]) == "✓ 2:1(9/29)"
+
+
+def test_applying_turns_the_flag_into_a_done_mark():
+    """補正した行は旗が消えるのではなく「反映済み」として残る。"""
+    h = _holding()
+    market = _market()
+    assert splits.pending_splits(h, market, TODAY) == [("2026-09-29", 2.0)]
+    assert splits.applied_splits(h, market, TODAY) == []
+
+    corrected = splits.apply_correction(h, [("2026-09-29", 2.0)])
+    assert splits.pending_splits(corrected, market, TODAY) == []
+    assert splits.applied_splits(corrected, market, TODAY) == [("2026-09-29", 2.0)]
+
+
+def test_marking_as_applied_also_shows_the_done_mark():
+    h = _holding()
+    out = splits.mark_applied(h, [("2026-09-29", 2.0)])
+    assert splits.applied_splits(out, _market(), TODAY) == [("2026-09-29", 2.0)]
+
+
+def test_done_mark_disappears_after_the_display_period():
+    h = _holding(split_applied_through="2026-09-29")
+    edge = date(2026, 9, 29) + timedelta(days=splits.APPLIED_DISPLAY_DAYS)
+    assert splits.applied_splits(h, _market(), edge) == [("2026-09-29", 2.0)]
+    assert splits.applied_splits(h, _market(), edge + timedelta(days=1)) == []
+
+
+def test_done_mark_only_for_the_split_that_was_applied():
+    # 新規登録の行（反映済み日＝登録日）に、登録前の分割まで「完了」として並べない。
+    h = _holding(split_applied_through="2026-09-30")
+    assert splits.applied_splits(h, _market(), TODAY) == []
+    # 反映済み日が無ければ完了表示も出さない。
+    assert splits.applied_splits(_holding(), _market(), TODAY) == []
+
+
+def test_done_mark_is_never_shown_for_funds_or_without_market():
+    h = _holding(asset_type="fund", split_applied_through="2026-09-29")
+    assert splits.applied_splits(h, _market(), TODAY) == []
+    assert splits.applied_splits(_holding(split_applied_through="2026-09-29"), None, TODAY) == []

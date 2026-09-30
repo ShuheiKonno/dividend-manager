@@ -288,7 +288,9 @@ def cell_sort_value(
     """
     if key == "split_flag":
         # 旗のある行だけ値を持たせる（値の無い行は昇順・降順どちらでも末尾へ沈む）。
-        return 1.0 if row.get("pending_splits") else None
+        if row.get("pending_splits"):
+            return 1.0
+        return 2.0 if row.get("applied_splits") else None
     value = safe_float(row.get(key))
     if key == "shares":
         return to_display_shares(value, row.get("asset_type"), fund_share_unit)
@@ -316,7 +318,13 @@ def _cell_text_and_color(
     val = row.get(key)
     if key == "split_flag":
         events = row.get("pending_splits") or []
-        return splits.flag_text(events), (QColor(theme.SPLIT_FLAG) if events else None)
+        if events:
+            return splits.flag_text(events), QColor(theme.SPLIT_FLAG)
+        # 反映済みにした直後は旗を消さず、色と印を変えて残す（押したことが画面で読める）。
+        done = row.get("applied_splits") or []
+        if done:
+            return splits.done_flag_text(done), QColor(theme.SPLIT_DONE)
+        return "", None
     if key == "shares":
         # 投信の口数は表示単位で見せる（保存値は常に万口単位）。
         return fmt_number(
@@ -2153,9 +2161,11 @@ class DividendWindow(QMainWindow):
                 if key == "split_flag" and text:
                     holding_idx = holding_indices[i] if holding_indices is not None else i
                     item.setToolTip(self._split_flag_tooltip(row, holding_idx))
-                    flag_font = item.font()
-                    flag_font.setBold(True)
-                    item.setFont(flag_font)
+                    # 太字は未反映の旗だけ。完了表示は目立たせない（対応が要るのは旗のほう）。
+                    if row.get("pending_splits"):
+                        flag_font = item.font()
+                        flag_font.setBold(True)
+                        item.setFont(flag_font)
                 if key in FREE_TEXT_COLUMNS and text:
                     # 列幅の上限で切れた分をツールチップで読めるようにする。
                     item.setToolTip(text)
@@ -2498,7 +2508,17 @@ class DividendWindow(QMainWindow):
     def _split_flag_tooltip(self, row: dict, holding_idx: int) -> str:
         """旗セルのツールチップ。補正前後を見せて、押す前に中身を確認できるようにする。"""
         events = row.get("pending_splits") or []
-        if not events or not (0 <= holding_idx < len(self.holdings)):
+        if not events:
+            done = row.get("applied_splits") or []
+            if not done:
+                return ""
+            return (
+                "株式分割は反映済みです（"
+                + "、".join(f"{d} {splits.format_ratio(r)}" for d, r in done)
+                + "）。\n株数・購入単価は分割後の値として扱っています。"
+                f"この表示は反映から{splits.APPLIED_DISPLAY_DAYS}日で消えます。"
+            )
+        if not (0 <= holding_idx < len(self.holdings)):
             return ""
         lines = splits.correction_lines(
             self.holdings[holding_idx], events, row.get("last_price")

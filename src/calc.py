@@ -4,7 +4,7 @@ from dataclasses import dataclass
 from typing import Iterable
 
 from .models import Holding, MarketData
-from .splits import pending_splits
+from .splits import applied_splits, pending_splits
 from .utils import safe_float
 
 
@@ -512,6 +512,9 @@ def compute_rows(
                 # 判定は splits.pending_splits の1箇所（表示側で計算し直さない）。
                 # 数値そのものは補正しない——補正は利用者が押したときだけ書き換える。
                 "pending_splits": pending_splits(holding, market),
+                # 直近に反映済みにした分割（一覧へ「完了」表示で残す）。未反映と同じく
+                # 判定は splits の1箇所。数値は変えない。
+                "applied_splits": applied_splits(holding, market),
             }
         )
 

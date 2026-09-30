@@ -107,6 +107,18 @@ def test_row_has_no_flag_after_baseline_or_without_market():
     assert rows[0]["pending_splits"] == []
 
 
+def test_row_carries_applied_splits_after_reflecting():
+    """反映済みにした行は pending が空になり、applied_splits に直近の分割が載る。"""
+    day = _recent_split_date()
+    market = _market(recent_splits=[(day, 2.0)])
+    done = _holding(split_applied_through=day)
+    rows, _ = compute_rows([done], {"5334": market}, None, "gross")
+    assert rows[0]["pending_splits"] == []
+    assert rows[0]["applied_splits"] == [(day, 2.0)]
+    # 数値は動かさない（完了表示は見た目だけ）。
+    assert rows[0]["shares"] == 300.0
+
+
 def test_pending_flag_does_not_change_the_summary():
     """旗の有無で集計は変わらない（補正しない限り数値は動かさない）。"""
     day = _recent_split_date()
