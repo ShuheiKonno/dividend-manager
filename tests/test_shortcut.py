@@ -57,6 +57,26 @@ def test_create_runs_powershell_and_returns_path(tmp_path, monkeypatch) -> None:
     assert cmd[cmd.index("-Destination") + 1] == str(tmp_path)
 
 
+def test_frozen_build_points_shortcut_at_the_exe(tmp_path, monkeypatch) -> None:
+    """exe 版は実行中の exe 自身を指す（インタプリタ探索へ落とさない）。"""
+    calls: list[list[str]] = []
+
+    def fake_run(cmd, **kwargs):
+        calls.append(cmd)
+        (tmp_path / shortcut.SHORTCUT_NAME).write_text("dummy", encoding="utf-8")
+        return _Result()
+
+    monkeypatch.setattr(shortcut, "is_supported", lambda: True)
+    monkeypatch.setattr(shortcut, "desktop_dir", lambda: tmp_path)
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    monkeypatch.setattr(sys, "frozen", True, raising=False)
+    monkeypatch.setattr(sys, "executable", r"C:\app\DividendManager.exe")
+
+    shortcut.create_desktop_shortcut()
+    cmd = calls[0]
+    assert cmd[cmd.index("-ExeTarget") + 1] == r"C:\app\DividendManager.exe"
+
+
 def test_create_reports_powershell_error(tmp_path, monkeypatch) -> None:
     """失敗時は PowerShell のメッセージを載せた RuntimeError にする。"""
     monkeypatch.setattr(shortcut, "is_supported", lambda: True)

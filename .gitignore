@@ -15,3 +15,5 @@ venv/
 
 # Local AI agent runtime state (absolute paths / session history — local only)
 .omc/
+build/
+dist/

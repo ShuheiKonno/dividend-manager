@@ -13,6 +13,23 @@ python -m venv .venv
 
 または `run.bat` をダブルクリックで起動。
 
+### exe 化（PyInstaller）
+
+```powershell
+.venv\Scripts\python.exe -m pip install pyinstaller
+powershell -NoProfile -ExecutionPolicy Bypass -File tools\build_exe.ps1
+```
+
+`dist\DividendManager\DividendManager.exe` ができます（onedir。**フォルダごと**移動・配布して
+ください。exe 単体では動きません）。設定は `DividendManager.spec`。
+
+- データフォルダの既定は **exe の隣の `data\`**。`%APPDATA%\dividend-manager-gui\config.json` の
+  `data_dir`（ファイル →「データフォルダの変更...」）があればそちらが優先されるため、
+  これまでの設定・データはそのまま引き継がれます。
+- exe の起動ではタスクバーに自前のアイコンが出ます（ショートカット作成メニューは exe 自身を指す
+  ショートカットを作ります）。
+- Defender が PyInstaller 製の exe を誤検知することがあります（UPX は使っていません）。
+
 ### デスクトップショートカット（タスクバーのアイコン）
 
 アプリの **ファイル → 「デスクトップにショートカットを作成」** から作れます。

@@ -21,7 +21,10 @@
 [CmdletBinding()]
 param(
     # 出力先。既定はデスクトップ。
-    [string]$Destination = [Environment]::GetFolderPath("Desktop")
+    [string]$Destination = [Environment]::GetFolderPath("Desktop"),
+    # exe 版（PyInstaller）から呼ぶときの実行ファイル。指定時はインタプリタ探索を
+    # 飛ばし、この exe 自身を起動するショートカットを作る（アイコンも exe の埋め込み）。
+    [string]$ExeTarget = ""
 )
 
 $ErrorActionPreference = "Stop"
@@ -29,6 +32,24 @@ $ErrorActionPreference = "Stop"
 $repo = Split-Path -Parent $PSScriptRoot
 $icon = Join-Path $repo "assets\app.ico"
 $entry = Join-Path $repo "app.py"
+
+if ($ExeTarget) {
+    if (-not (Test-Path $ExeTarget)) {
+        throw "実行ファイルが無い: $ExeTarget"
+    }
+    $path = Join-Path $Destination "配当優待管理.lnk"
+    $shell = New-Object -ComObject WScript.Shell
+    $lnk = $shell.CreateShortcut($path)
+    $lnk.TargetPath = $ExeTarget
+    $lnk.Arguments = ""
+    $lnk.WorkingDirectory = Split-Path -Parent $ExeTarget
+    $lnk.IconLocation = "$ExeTarget,0"
+    $lnk.Description = "配当優待管理"
+    $lnk.Save()
+    Write-Host "作成: $path"
+    Write-Host "  target : $ExeTarget"
+    return
+}
 
 if (-not (Test-Path $icon)) {
     throw "アイコンが無い: $icon（py -3 tools\make_app_icon.py で生成する）"

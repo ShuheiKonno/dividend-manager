@@ -17,6 +17,14 @@ def _use_tmp_config(monkeypatch, tmp_path) -> Path:
     return target
 
 
+def test_frozen_default_data_dir_is_next_to_the_exe(monkeypatch, tmp_path):
+    """exe 版の既定は exe の隣（`_internal` の奥や onefile の一時フォルダに埋もれない）。"""
+    exe = tmp_path / "DividendManager.exe"
+    monkeypatch.setattr(app_config.sys, "frozen", True, raising=False)
+    monkeypatch.setattr(app_config.sys, "executable", str(exe))
+    assert app_config._default_data_dir() == tmp_path.resolve() / "data"
+
+
 def test_load_data_dir_defaults_when_unset(monkeypatch, tmp_path):
     _use_tmp_config(monkeypatch, tmp_path)
     assert app_config.load_data_dir() == app_config.DEFAULT_DATA_DIR
