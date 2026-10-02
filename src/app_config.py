@@ -11,10 +11,23 @@ from __future__ import annotations
 
 import json
 import os
+import sys
 from pathlib import Path
 
-# リポジトリ同梱の既定フォルダ（未設定・設定が使えないときの落とし先）
-DEFAULT_DATA_DIR = Path(__file__).resolve().parents[1] / "data"
+
+def _default_data_dir() -> Path:
+    """未設定・設定が使えないときの落とし先（リポジトリ直下、exe 版は exe の隣）。
+
+    PyInstaller 版は `__file__` が展開先（`_internal/`）を指すため、そのまま
+    `parents[1] / "data"` にするとデータが `_internal` の奥へ埋もれる（onefile なら
+    終了時に消える一時フォルダ）。凍結時は実行ファイルの隣の `data/` を使う。
+    """
+    if getattr(sys, "frozen", False):
+        return Path(sys.executable).resolve().parent / "data"
+    return Path(__file__).resolve().parents[1] / "data"
+
+
+DEFAULT_DATA_DIR = _default_data_dir()
 
 _CONFIG_DIR_NAME = "dividend-manager-gui"
 _CONFIG_FILE_NAME = "config.json"

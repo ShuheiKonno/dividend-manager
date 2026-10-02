@@ -77,12 +77,17 @@ def create_desktop_shortcut() -> Path:
     if not destination.is_dir():
         raise RuntimeError(f"デスクトップが見つかりません: {destination}")
 
+    command = [
+        "powershell", "-NoProfile", "-ExecutionPolicy", "Bypass",
+        "-File", str(SCRIPT_PATH), "-Destination", str(destination),
+    ]
+    if getattr(sys, "frozen", False):
+        # exe 版: 実行中の exe 自身を指すショートカットにする（インタプリタ探索は不要）
+        command += ["-ExeTarget", sys.executable]
+
     try:
         result = subprocess.run(
-            [
-                "powershell", "-NoProfile", "-ExecutionPolicy", "Bypass",
-                "-File", str(SCRIPT_PATH), "-Destination", str(destination),
-            ],
+            command,
             capture_output=True,
             creationflags=_CREATE_NO_WINDOW,
         )
