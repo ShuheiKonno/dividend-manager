@@ -356,6 +356,29 @@ def _cell_text_and_color(
     return str(val or ""), None
 
 
+def _format_import_holdings_preview(
+    holdings: list[Holding], max_rows: int = 5
+) -> str:
+    """保有 CSV 取込の確認ダイアログに出す先頭数行のプレビュー文字列を組む。
+
+    投信の口数単位（fund_share_unit）の変換は掛けず CSV 保存値のまま表示する。
+    """
+    lines: list[str] = []
+    for h in holdings[:max_rows]:
+        name = h.name or "（名称なし）"
+        shares = f"{h.shares:,.4f}".rstrip("0").rstrip(".") or "0"
+        book = h.shares * h.avg_cost
+        if h.currency == "USD":
+            book_str = f"${fmt_number(book, 2)}"
+        else:
+            book_str = f"¥{fmt_number(book, 0)}"
+        lines.append(f"・{h.symbol} {name}: 株数 {shares} / 簿価 {book_str}")
+    rest = len(holdings) - len(lines)
+    if rest > 0:
+        lines.append(f"…ほか {rest} 件")
+    return "\n".join(lines)
+
+
 class NumericSortProxy(QSortFilterProxyModel):
     """数値列は Qt.UserRole の生値で比較（桁区切り文字列の誤ソート回避）。
 
@@ -510,6 +533,7 @@ class DividendWindow(QMainWindow):
         self._monthly_sorted_once: bool = False
         self._monthly_label: str = "年間配当"
         self._monthly_columns_sized: bool = False
+        self._monthly_benefit_detail_sized: bool = False
         self._initial_tab: int = _saved.get("last_tab", 0)
         # テーブル列幅: 保存値があれば初回描画で適用、無ければ内容に合わせて自動調整。
         self._saved_column_widths: dict[str, list[int]] = {
@@ -1398,6 +1422,7 @@ class DividendWindow(QMainWindow):
         self._save_or_notify(lambda: save_settings(income_benefit=key))
         # 内訳テーブルの列構成（優待・合計の表示/非表示）が変わるので幅を取り直す。
         self._monthly_columns_sized = False
+        self._monthly_benefit_detail_sized = False
         self._refresh_view()
         self._resize_yield_columns()
 
@@ -1456,7 +1481,14 @@ class DividendWindow(QMainWindow):
         for key in ("split_apply", "split_dismiss"):
             self._actions[key].setEnabled(idle and selected_pending)
         self._actions["split_apply_all"].setEnabled(
-            idle and bool(splits.pending_holdings(self.holdings, self.market_data_map))
+            idle
+            and bool(
+                splits.pending_holdings(
+                    self.holdings,
+                    self.market_data_map,
+                    include_inactive=self.show_inactive,
+                )
+            )
         )
         # データフォルダの切替も同様（走行中のワーカーが旧フォルダへ書き戻す）。
         for key in ("update_market", "update_fx", "reload", "new",
@@ -1496,10 +1528,13 @@ class DividendWindow(QMainWindow):
 
     # ---- データ読み込み / 再描画（legacy DividendApp から移植） ----
     def _reload_all(self) -> None:
-        self.holdings = load_holdings()
+        # 4種の CSV をすべて読み終えてから self の状態を更新する（途中失敗で新旧が混ざらない）。
+        holdings = load_holdings()
         market_data = load_market_data()
-        self.market_data_map = {row.symbol: row for row in market_data}
         fx = latest_fx(load_fx())
+        history = load_history()
+        self.holdings = holdings
+        self.market_data_map = {row.symbol: row for row in market_data}
         self.fx_rate = fx.rate if fx is not None else None
         self.fx_fetched_at = fx.timestamp if fx is not None else None
         if market_data:
@@ -1509,7 +1544,7 @@ class DividendWindow(QMainWindow):
         else:
             self.market_fetched_at = None
             self.market_source = None
-        self.history = load_history()
+        self.history = history
         self._refresh_view()
         # 当日のスナップショットを履歴へ upsert（タブ切替で呼ばれる _refresh_view では
         # 記録せず、再読込・取得完了時のみ記録して CSV の過剰書込を避ける）。
@@ -1954,11 +1989,14 @@ class DividendWindow(QMainWindow):
         if not imported:
             self._notify("取込対象のデータが見つかりませんでした", error=True)
             return
+        preview = _format_import_holdings_preview(imported)
         reply = QMessageBox.question(
             self,
             "保有銘柄の取込",
             f"現在の保有銘柄（{len(self.holdings)} 件）を取込内容（{len(imported)} 件）で"
-            "置き換えますか？\nこの操作は現在の保有を上書きします"
+            "置き換えますか？\n\n"
+            f"【取込プレビュー】\n{preview}\n\n"
+            "この操作は現在の保有を上書きします"
             "（CSV は自動バックアップされます）。",
             QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
             QMessageBox.StandardButton.No,
@@ -2059,15 +2097,42 @@ class DividendWindow(QMainWindow):
                 return
             copy = reply == QMessageBox.StandardButton.Yes
 
+        prev_state = (
+            list(getattr(self, "holdings", [])),
+            dict(getattr(self, "market_data_map", {})),
+            getattr(self, "fx_rate", None),
+            getattr(self, "fx_fetched_at", None),
+            getattr(self, "market_fetched_at", None),
+            getattr(self, "market_source", None),
+            list(getattr(self, "history", [])),
+        )
+        switched = False
         try:
             if copy:
                 copy_data_files(current, new_dir)
             set_data_dir(new_dir)
-        except OSError as exc:
+            switched = True
+            init_empty_files()
+            self._reload_all()
+        except Exception as exc:  # noqa: BLE001 — 旧フォルダ・旧設定・旧表示へ復元して通知
+            (
+                self.holdings,
+                self.market_data_map,
+                self.fx_rate,
+                self.fx_fetched_at,
+                self.market_fetched_at,
+                self.market_source,
+                self.history,
+            ) = prev_state
+            if switched:
+                io_csv.restore_data_dir(current)
+                # _reload_all が新フォルダの内容を描いた後で失敗した場合も、画面を旧データへ戻す。
+                try:
+                    self._refresh_view()
+                except Exception:  # noqa: BLE001 — 復元中の描画失敗で通知まで潰さない
+                    pass
             self._notify(f"データフォルダを変更できませんでした: {exc}", error=True)
             return
-        init_empty_files()
-        self._reload_all()
         self._notify(f"データフォルダを変更しました: {new_dir}")
 
     def action_open_data_dir(self) -> None:
@@ -2195,10 +2260,36 @@ class DividendWindow(QMainWindow):
         # 列幅は「中身が入った最初の1回」だけ調整する。毎回呼ぶと、バーをクリックする
         # たびユーザーが広げた列幅が元へ戻ってしまう（他テーブルの _size_columns_once
         # と同じ方針。ただし永続化はしないのでフラグだけで足りる）。
+        # 初回が配当のみの月だった場合、優待内容列は見出し幅で確定するため、非空の
+        # 優待内容を初めて描いたときにその列だけ片方向で広げる。
+        has_benefit_detail = with_benefit and any(item.benefit_detail for item in items)
         if items and not self._monthly_columns_sized:
             self._monthly_columns_sized = True
+            self._monthly_benefit_detail_sized = has_benefit_detail
             self._monthly_view.resizeColumnsToContents()
             clamp_free_text_columns(self._monthly_view, MONTHLY_COLUMNS)
+        elif has_benefit_detail and not getattr(
+            self, "_monthly_benefit_detail_sized", False
+        ):
+            self._monthly_benefit_detail_sized = True
+            self._resize_monthly_benefit_detail_column()
+
+    def _resize_monthly_benefit_detail_column(self) -> None:
+        """月別内訳の「優待内容」列を、非空の優待内容を初めて描画したときに片方向で広げる。
+
+        配当のみの月で初回描画（_monthly_columns_sized）が確定すると、優待内容列は
+        見出し幅のまま残る。後から優待のある月を選んだとき、resizeColumnToContents は
+        使わず（手で広げた幅を縮めない）、上限 FREE_TEXT_COLUMN_MAX_WIDTH の範囲で
+        足りない分だけ広げる。
+        """
+        col = MONTHLY_COL_BENEFIT_DETAIL
+        header = self._monthly_view.horizontalHeader()
+        needed = min(
+            FREE_TEXT_COLUMN_MAX_WIDTH,
+            max(header.sectionSizeHint(col), self._monthly_view.sizeHintForColumn(col)),
+        )
+        if header.sectionSize(col) < needed:
+            header.resizeSection(col, needed)
 
     def _with_shares_label(
         self, columns: list[tuple[str, str]]
@@ -2608,7 +2699,9 @@ class DividendWindow(QMainWindow):
 
     def _split_notice(self) -> str:
         """取得後にステータスバーへ添える、未反映の分割の件数メッセージ（無ければ ""）。"""
-        pending = splits.pending_holdings(self.holdings, self.market_data_map)
+        pending = splits.pending_holdings(
+            self.holdings, self.market_data_map, include_inactive=self.show_inactive
+        )
         if not pending:
             return ""
         symbols = ", ".join(dict.fromkeys(self.holdings[i].symbol for i, _ in pending))
@@ -2692,7 +2785,9 @@ class DividendWindow(QMainWindow):
         """未反映の分割を持つ全行へ、まとめて反映する（確認は1回）。"""
         if self._busy:
             return
-        pending = splits.pending_holdings(self.holdings, self.market_data_map)
+        pending = splits.pending_holdings(
+            self.holdings, self.market_data_map, include_inactive=self.show_inactive
+        )
         if not pending:
             return
         summary = []

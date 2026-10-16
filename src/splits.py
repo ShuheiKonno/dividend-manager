@@ -125,11 +125,18 @@ def pending_holdings(
     holdings: list[Holding],
     market_map: dict[str, MarketData],
     today: date | None = None,
+    include_inactive: bool = False,
 ) -> list[tuple[int, list[Split]]]:
-    """未反映の分割を持つ保有行の (holdings インデックス, 分割) を、行順で返す。"""
+    """未反映の分割を持つ保有行の (holdings インデックス, 分割) を、行順で返す。
+
+    既定では有効銘柄（active=True）のみを対象とし、include_inactive=True のときのみ
+    無効銘柄も含める（表の表示状態と通知・一括反映の対象を一致させるため）。
+    """
     today = today or _today()
     result: list[tuple[int, list[Split]]] = []
     for index, holding in enumerate(holdings):
+        if not holding.active and not include_inactive:
+            continue
         events = pending_splits(holding, market_map.get(holding.symbol), today)
         if events:
             result.append((index, events))

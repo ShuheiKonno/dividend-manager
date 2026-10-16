@@ -34,6 +34,9 @@ from .utils import (
     filter_by_period,
     axis_bounds,
     spread_labels,
+    date_x_positions,
+    nearest_x_index,
+    date_axis_ticks,
 )
 
 # 株価未取得時などチャートが空のときに中央表示する既定メッセージ
@@ -843,11 +846,16 @@ class LineChartWidget(QWidget):
             max(1.0, rect.height() - self._MARGIN_TOP - self._MARGIN_BOTTOM),
         )
 
+    def _x_positions(self, plot: QRectF) -> list[float]:
+        """表示対象の日付から X 座標配列を作る（描画とホバー判定で共有）。"""
+        dates = [str(rec.get("date", "")) for rec in self._visible]
+        return date_x_positions(dates, plot.left(), plot.width())
+
     def _x_for(self, idx: int, plot: QRectF) -> float:
-        n = len(self._visible)
-        if n <= 1:
+        xs = self._x_positions(plot)
+        if not xs:
             return plot.left() + plot.width() / 2.0
-        return plot.left() + plot.width() * idx / (n - 1)
+        return xs[max(0, min(len(xs) - 1, idx))]
 
     def _y_for(self, value: float, plot: QRectF) -> float:
         span = self._top - self._floor
@@ -886,18 +894,16 @@ class LineChartWidget(QWidget):
                 _fmt_compact(self._floor + (self._top - self._floor) * frac),
             )
 
-        # X 軸ラベル（最大 5 点の日付を等間隔に）
+        # X 軸ラベル（経過日数に比例した最大 5 点の日付目盛）
         n = len(self._visible)
+        xs = self._x_positions(plot)
+        dates = [str(rec.get("date", "")) for rec in self._visible]
         painter.setPen(QPen(QColor(theme.CHART_AXIS_TEXT)))
-        label_count = min(5, n)
-        for j in range(label_count):
-            idx = 0 if label_count == 1 else round(j * (n - 1) / (label_count - 1))
-            x = self._x_for(idx, plot)
-            date = str(self._visible[idx].get("date", ""))
+        for x, date_label in date_axis_ticks(dates, plot.left(), plot.width()):
             painter.drawText(
                 QRectF(x - 44, plot.bottom() + 4, 88, 16),
                 Qt.AlignmentFlag.AlignCenter,
-                date,
+                date_label,
             )
 
         # 各系列の折れ線（None 点で分断）。前後が None の孤立点はマーカーで可視化
@@ -910,7 +916,7 @@ class LineChartWidget(QWidget):
                 if v is None:
                     prev = None
                     continue
-                x = self._x_for(idx, plot)
+                x = xs[idx]
                 y = self._y_for(v, plot)
                 if prev is not None:
                     painter.drawLine(int(prev[0]), int(prev[1]), int(x), int(y))
@@ -923,7 +929,7 @@ class LineChartWidget(QWidget):
 
         # ホバー: 縦カーソル線 + 該当点マーカー
         if self._hover_idx is not None and 0 <= self._hover_idx < n:
-            hx = self._x_for(self._hover_idx, plot)
+            hx = xs[self._hover_idx]
             painter.setPen(QPen(QColor(theme.CHART_CURSOR), 1, Qt.PenStyle.DashLine))
             painter.drawLine(int(hx), int(plot.top()), int(hx), int(plot.bottom()))
             rec = self._visible[self._hover_idx]
@@ -984,14 +990,9 @@ class LineChartWidget(QWidget):
         if not self._visible:
             return None
         plot = self._plot_rect()
-        if px < plot.left() - 12 or px > plot.right() + 12:
-            return None
-        n = len(self._visible)
-        if n <= 1:
-            return 0
-        frac = (px - plot.left()) / plot.width()
-        idx = round(frac * (n - 1))
-        return max(0, min(n - 1, idx))
+        return nearest_x_index(
+            self._x_positions(plot), px, plot.left(), plot.right()
+        )
 
 
 class BarChartWidget(QWidget):

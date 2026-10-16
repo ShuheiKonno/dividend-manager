@@ -26,3 +26,7 @@ def _never_touch_real_data(monkeypatch, tmp_path_factory):
     # （足し忘れると、そのファイルだけ実データを指したままになる）。
     for name, child in io_csv._DERIVED_PATHS.items():
         monkeypatch.setattr(io_csv, name, isolated / child)
+    # データフォルダの設定（app_config.config_path() = %APPDATA% 配下の config.json）も
+    # 一時フォルダへ向ける。set_data_dir / restore_data_dir を persist=True で呼ぶ経路を
+    # テストしても、利用者の「どのフォルダを見るか」の設定を書き換えない。
+    monkeypatch.setenv("APPDATA", str(tmp_path_factory.mktemp("isolated_appdata")))

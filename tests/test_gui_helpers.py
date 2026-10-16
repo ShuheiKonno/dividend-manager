@@ -35,6 +35,7 @@ def _window_stub(holdings, market_map):
     class WindowStub:
         dividend_mode = "net"
         fx_rate = None
+        show_inactive = False
         history = []
 
         def _save_or_notify(self, action):
@@ -455,6 +456,75 @@ def test_import_holdings_declined_keeps_current(monkeypatch, tmp_path):
     assert stub.reloaded is False
 
 
+def test_import_holdings_shows_preview_without_fund_unit_conversion(
+    monkeypatch, tmp_path
+):
+    """確認ダイアログにコード・銘柄名・株数・簿価のプレビューが出て、投信口数を変換しないこと。"""
+    monkeypatch.setattr(io_csv, "DATA_DIR", tmp_path)
+    monkeypatch.setattr(io_csv, "BACKUP_DIR", tmp_path / "backup")
+    target = tmp_path / "holdings.csv"
+    io_csv.export_holdings_csv(
+        target,
+        [
+            _holding(symbol="7203", name="トヨタ", shares=100.0, avg_cost=2000.0),
+            _holding(
+                symbol="0331418A",
+                name="eMAXIS Slim",
+                asset_type="fund",
+                shares=206.7284,
+                avg_cost=10000.0,
+            ),
+        ],
+    )
+    stub = _io_stub([_holding(symbol="9999")], [])
+    stub.fund_share_unit = "kuchi"  # 1口表示中でもプレビューは CSV 生値（206.7284）のまま
+    monkeypatch.setattr(
+        gui.QFileDialog, "getOpenFileName", lambda *a, **k: (str(target), "")
+    )
+    captured_prompt: list[str] = []
+
+    def fake_question(_parent, _title, text, *_args):
+        captured_prompt.append(text)
+        return gui.QMessageBox.StandardButton.No
+
+    monkeypatch.setattr(gui.QMessageBox, "question", fake_question)
+    gui.DividendWindow.action_import_holdings(stub)
+    assert len(captured_prompt) == 1
+    prompt = captured_prompt[0]
+    assert "7203" in prompt and "トヨタ" in prompt
+    assert "株数 100" in prompt and "¥200,000" in prompt
+    assert "0331418A" in prompt and "株数 206.7284" in prompt
+    assert "株数 2,067,284" not in prompt  # 1万倍の口数変換をしない
+
+
+def test_import_holdings_rejects_market_csv_before_confirm(monkeypatch, tmp_path):
+    """市場データ CSV や不正数値 CSV を選んだら確認ダイアログを出さずエラー通知で中止すること。"""
+    market_csv = tmp_path / "market_data.csv"
+    market_csv.write_text(
+        "symbol,currency,last_price\n7203,JPY,3000\n", encoding="utf-8"
+    )
+    stub = _io_stub([_holding(symbol="9999")], [])
+    monkeypatch.setattr(
+        gui.QFileDialog, "getOpenFileName", lambda *a, **k: (str(market_csv), "")
+    )
+    asked = {"called": False}
+    monkeypatch.setattr(
+        gui.QMessageBox,
+        "question",
+        lambda *a, **k: asked.update(called=True) or gui.QMessageBox.StandardButton.Yes,
+    )
+    saved = {"called": False}
+    monkeypatch.setattr(gui, "save_holdings", lambda rows: saved.update(called=True))
+
+    gui.DividendWindow.action_import_holdings(stub)
+    assert asked["called"] is False
+    assert saved["called"] is False
+    assert stub.reloaded is False
+    assert stub.notes and stub.notes[-1][1] is True
+    assert "shares" in stub.notes[-1][0]
+
+
+
 # ---- データフォルダの変更（QFileDialog / QMessageBox をスタブ化して本体を実行） ----
 
 
@@ -704,4 +774,185 @@ def test_income_trend_label_marks_gross_history_in_net_mode():
     assert label(False, None) == "配当"
     assert label(True, "fixed", dividend_mode="net") == "定額取崩収入＋優待（税引前）"
     assert label(False, None, dividend_mode="gross") == "配当"
+
+
+def _real_switch_stub(monkeypatch, tmp_path):
+    """実 set_data_dir を使いつつ、app_config 保存先だけメモリへ隔離したスタブを作る。"""
+    current = tmp_path / "current"
+    target = tmp_path / "target"
+    current.mkdir()
+    target.mkdir()
+    io_csv.set_data_dir(current, persist=False)
+    persisted = {"dir": current}
+    monkeypatch.setattr(
+        io_csv.app_config,
+        "save_data_dir",
+        lambda p: persisted.update(dir=gui.Path(p)),
+    )
+    stub = _io_stub([_holding(symbol="7203")], [_history("2026-01-01")])
+    stub._busy = False
+    monkeypatch.setattr(
+        gui.QFileDialog, "getExistingDirectory", lambda *a, **k: str(target)
+    )
+    _answer(monkeypatch, gui.QMessageBox.StandardButton.No)
+    return stub, current, target, persisted
+
+
+def test_change_data_dir_rolls_back_when_init_empty_files_fails(monkeypatch, tmp_path):
+    """init_empty_files が OSError を投げたら、io_csv パス・app_config・表示すべて旧フォルダへ戻ること。"""
+    stub, current, _target, persisted = _real_switch_stub(monkeypatch, tmp_path)
+    monkeypatch.setattr(
+        gui,
+        "init_empty_files",
+        lambda: (_ for _ in ()).throw(OSError("backup フォルダを作成できません")),
+    )
+
+    gui.DividendWindow.action_change_data_dir(stub)
+    assert io_csv.DATA_DIR == current
+    for name in io_csv._DERIVED_PATHS:
+        assert getattr(io_csv, name).parent == current
+    assert persisted["dir"] == current
+    assert [h.symbol for h in stub.holdings] == ["7203"]
+    assert [r.record_date for r in stub.history] == ["2026-01-01"]
+    assert stub.reloaded is False
+    assert stub.notes and stub.notes[-1][1] is True
+
+
+def test_change_data_dir_rolls_back_when_reload_fails_midway(monkeypatch, tmp_path):
+    """_reload_all の途中で読込例外が出ても、self の状態・io_csv パス・app_config が旧フォルダで揃うこと。"""
+    stub, current, target, persisted = _real_switch_stub(monkeypatch, tmp_path)
+    # 新フォルダには別銘柄の holdings.csv があり、history.csv の読込だけ失敗させる。
+    io_csv.export_holdings_csv(target / "holdings.csv", [_holding(symbol="AAPL")])
+    _answer(monkeypatch, gui.QMessageBox.StandardButton.Yes)
+    stub._reload_all = lambda: gui.DividendWindow._reload_all(stub)
+    monkeypatch.setattr(
+        gui,
+        "load_history",
+        lambda: (_ for _ in ()).throw(OSError("history.csv が破損しています")),
+    )
+
+    gui.DividendWindow.action_change_data_dir(stub)
+    assert io_csv.DATA_DIR == current
+    for name in io_csv._DERIVED_PATHS:
+        assert getattr(io_csv, name).parent == current
+    assert persisted["dir"] == current
+    # 先に読めたはずの AAPL で self.holdings が半端に上書きされていないこと
+    assert [h.symbol for h in stub.holdings] == ["7203"]
+    assert [r.record_date for r in stub.history] == ["2026-01-01"]
+    assert stub.notes and stub.notes[-1][1] is True
+
+
+def test_change_data_dir_keeps_state_when_config_save_fails(monkeypatch, tmp_path):
+    """app_config.save_data_dir が失敗したら、パスも表示も旧フォルダのまま保たれること。"""
+    stub, current, _target, persisted = _real_switch_stub(monkeypatch, tmp_path)
+    monkeypatch.setattr(
+        io_csv.app_config,
+        "save_data_dir",
+        lambda _p: (_ for _ in ()).throw(OSError("config.json に書き込めません")),
+    )
+
+    gui.DividendWindow.action_change_data_dir(stub)
+    assert io_csv.DATA_DIR == current
+    for name in io_csv._DERIVED_PATHS:
+        assert getattr(io_csv, name).parent == current
+    assert persisted["dir"] == current
+    assert [h.symbol for h in stub.holdings] == ["7203"]
+    assert stub.reloaded is False
+    assert stub.notes and stub.notes[-1][1] is True
+
+
+# ---- 月別内訳テーブルの「優待内容」列幅（A5） ----
+
+
+def _monthly_stub(monthly):
+    gui.QApplication.instance() or gui.QApplication([])
+
+    class MonthlyStub:
+        income_benefit = "with"
+        monthly_month = 6
+        _monthly_label = "年間配当"
+        _monthly_sorted_once = False
+        _monthly_columns_sized = False
+        _monthly_benefit_detail_sized = False
+        _make_breakdown_table = gui.DividendWindow._make_breakdown_table
+        _apply_monthly_sort = gui.DividendWindow._apply_monthly_sort
+        _resize_monthly_benefit_detail_column = (
+            gui.DividendWindow._resize_monthly_benefit_detail_column
+        )
+
+    stub = MonthlyStub()
+    stub._monthly = monthly
+    stub._monthly_head = gui.QLabel("")
+    stub._monthly_view, stub._monthly_model, stub._monthly_proxy = (
+        stub._make_breakdown_table()
+    )
+    return stub
+
+
+def test_monthly_benefit_detail_column_expands_on_first_non_empty_render():
+    """配当のみの月で初回描画したあと、優待のある月を選んだら優待内容列だけ広がること。"""
+    from src.calc import monthly_breakdown
+
+    monthly = monthly_breakdown([
+        dict(
+            symbol="7203",
+            name="トヨタ",
+            account="特定",
+            active=True,
+            annual_dividend_jpy=1200.0,
+            annual_benefit_jpy=3000.0,
+            dividend_month_ratios={6: 1.0},
+            dividend_months_manual=False,
+            benefit_months=[3],
+            benefit_detail="株主優待お買物券10,000円分（長期保有特典含む・全国の店舗で利用可）",
+        ),
+    ])
+    stub = _monthly_stub(monthly)
+    col = gui.MONTHLY_COL_BENEFIT_DETAIL
+
+    # 6月（配当のみ・優待内容は空）で初回描画: 列幅は見出し幅で確定する。
+    stub.monthly_month = 6
+    gui.DividendWindow._render_monthly_breakdown(stub)
+    assert stub._monthly_columns_sized is True
+    assert stub._monthly_benefit_detail_sized is False
+    header_only_width = stub._monthly_view.columnWidth(col)
+
+    # 3月（優待内容あり）へ切替: 優待内容列が片方向で広がり、上限で頭打ちになる。
+    stub.monthly_month = 3
+    gui.DividendWindow._render_monthly_breakdown(stub)
+    assert stub._monthly_benefit_detail_sized is True
+    expanded_width = stub._monthly_view.columnWidth(col)
+    assert expanded_width > header_only_width
+    assert expanded_width <= gui.FREE_TEXT_COLUMN_MAX_WIDTH
+
+
+def test_monthly_benefit_detail_column_never_shrinks_user_widened_width():
+    """ユーザーが手動で広げた優待内容列の幅を、初回の優待月描画で縮めないこと。"""
+    from src.calc import monthly_breakdown
+
+    monthly = monthly_breakdown([
+        dict(
+            symbol="7203",
+            name="トヨタ",
+            account="特定",
+            active=True,
+            annual_dividend_jpy=1200.0,
+            annual_benefit_jpy=3000.0,
+            dividend_month_ratios={6: 1.0},
+            dividend_months_manual=False,
+            benefit_months=[3],
+            benefit_detail="クオカード1,000円分",
+        ),
+    ])
+    stub = _monthly_stub(monthly)
+    col = gui.MONTHLY_COL_BENEFIT_DETAIL
+
+    stub.monthly_month = 6
+    gui.DividendWindow._render_monthly_breakdown(stub)
+    # ユーザーが上限を超えて 360px に広げた状態を再現
+    stub._monthly_view.setColumnWidth(col, 360)
+
+    stub.monthly_month = 3
+    gui.DividendWindow._render_monthly_breakdown(stub)
+    assert stub._monthly_view.columnWidth(col) == 360
 

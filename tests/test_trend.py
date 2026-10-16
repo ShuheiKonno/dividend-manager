@@ -6,7 +6,14 @@ src/utils.py の filter_by_period / axis_bounds を対象にする。表示層
 
 from __future__ import annotations
 
-from src.utils import filter_by_period, axis_bounds, spread_labels
+from src.utils import (
+    filter_by_period,
+    axis_bounds,
+    spread_labels,
+    date_x_positions,
+    nearest_x_index,
+    date_axis_ticks,
+)
 
 
 def _recs(*dates: str) -> list[dict]:
@@ -134,3 +141,67 @@ def test_spread_overflow_distributes_within_range():
     assert len(out) == 6
     assert out[0] >= -1e-9 and out[-1] <= 100.0 + 1e-9
     assert out == sorted(out)
+
+
+# ---- 推移グラフ X 軸座標変換・最近傍・目盛（X5） ----
+
+
+def test_date_x_positions_empty_and_single():
+    assert date_x_positions([], 10.0, 200.0) == []
+    # 単一点はプロット領域の中央に配置
+    assert date_x_positions(["2026-01-01"], 10.0, 200.0) == [110.0]
+    # 全点同日もゼロ割せず中央に配置
+    assert date_x_positions(["2026-01-01", "2026-01-01"], 10.0, 200.0) == [110.0, 110.0]
+
+
+def test_date_x_positions_consecutive_days():
+    xs = date_x_positions(
+        ["2026-01-01", "2026-01-02", "2026-01-03"], left=0.0, width=100.0
+    )
+    assert xs == [0.0, 50.0, 100.0]
+
+
+def test_date_x_positions_uneven_intervals_proportional_to_days():
+    """不等間隔の日付で、件数等分ではなく経過日数に比例した X 座標になること。"""
+    # 2026-01-01 → 2026-01-11（+10日）→ 2026-04-11（+100日）
+    xs = date_x_positions(
+        ["2026-01-01", "2026-01-11", "2026-04-11"], left=50.0, width=400.0
+    )
+    assert xs[0] == 50.0
+    assert abs(xs[1] - (50.0 + 400.0 * 0.1)) < 1e-9  # 件数等分なら 250.0 になる箇所
+    assert xs[2] == 450.0
+
+
+def test_nearest_x_index_uses_same_coordinate_array():
+    """不等間隔の X 座標配列に対して、実際の最近傍インデックスを返すこと。"""
+    xs = date_x_positions(
+        ["2026-01-01", "2026-01-11", "2026-04-11"], left=0.0, width=1000.0
+    )
+    # xs == [0.0, 100.0, 1000.0]
+    assert nearest_x_index(xs, -20.0, 0.0, 1000.0) is None
+    assert nearest_x_index(xs, 1020.0, 0.0, 1000.0) is None
+    assert nearest_x_index(xs, -10.0, 0.0, 1000.0) == 0  # margin=12 の内側
+    assert nearest_x_index(xs, 40.0, 0.0, 1000.0) == 0
+    assert nearest_x_index(xs, 60.0, 0.0, 1000.0) == 1
+    # 中央 (500.0) は x=100 の点 (idx=1) の方が x=1000 (idx=2) より近い
+    assert nearest_x_index(xs, 500.0, 0.0, 1000.0) == 1
+    assert nearest_x_index(xs, 600.0, 0.0, 1000.0) == 2
+
+
+def test_date_axis_ticks_proportional_to_calendar_days():
+    """データ点が偏っていても、X 軸目盛は暦日基準で等間隔になること。"""
+    # 前半に点が密集し後半が空いている 100 日間（2026-01-01 〜 2026-04-11）
+    dates = ["2026-01-01", "2026-01-02", "2026-01-03", "2026-01-04", "2026-04-11"]
+    ticks = date_axis_ticks(dates, left=0.0, width=400.0, max_ticks=5)
+    assert len(ticks) == 5
+    assert ticks[0] == (0.0, "2026-01-01")
+    assert ticks[1] == (100.0, "2026-01-26")  # +25日
+    assert ticks[2] == (200.0, "2026-02-20")  # +50日
+    assert ticks[3] == (300.0, "2026-03-17")  # +75日
+    assert ticks[4] == (400.0, "2026-04-11")  # +100日
+
+    # 単一点・短期間（2日間）でも重複ラベルを出さない
+    assert date_axis_ticks(["2026-01-01"], 0.0, 400.0) == [(200.0, "2026-01-01")]
+    two_days = date_axis_ticks(["2026-01-01", "2026-01-02"], 0.0, 400.0, max_ticks=5)
+    assert two_days == [(0.0, "2026-01-01"), (400.0, "2026-01-02")]
+

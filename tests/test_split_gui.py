@@ -51,11 +51,12 @@ class _Stub:
     _commit_split_holdings = gui.DividendWindow._commit_split_holdings
     _split_notice = gui.DividendWindow._split_notice
 
-    def __init__(self, holdings, market_map, selected_index=None):
+    def __init__(self, holdings, market_map, selected_index=None, show_inactive=False):
         self.holdings = holdings
         self.market_data_map = market_map
         self._busy = False
         self._selected_index = selected_index
+        self.show_inactive = show_inactive
         self.reloaded = False
         self.notes: list[tuple[str, bool]] = []
 
@@ -212,6 +213,27 @@ def test_split_notice_lists_symbols_and_is_empty_when_none():
     assert gui.DividendWindow._split_notice(
         _Stub([_holding()], {"5334": _market(with_split=False)})
     ) == ""
+
+
+def test_inactive_rows_follow_show_inactive_for_notice_and_apply_all(monkeypatch, saved):
+    """非表示の無効銘柄は通知・一括反映から外れ、表示中のみ対象になること。"""
+    inactive = _holding("5334", account="旧NISA", active=False)
+    market_map = {"5334": _market()}
+
+    # 無効銘柄が非表示の既定状態では通知も一括反映も発火しない
+    hidden_stub = _Stub([inactive], market_map, show_inactive=False)
+    assert gui.DividendWindow._split_notice(hidden_stub) == ""
+    asked = _answer(monkeypatch, YES)
+    gui.DividendWindow.action_apply_all_splits(hidden_stub)
+    assert asked == {} and saved["rows"] is None
+
+    # 無効銘柄を表示しているときは通知にも一括反映にも含まれる
+    shown_stub = _Stub([inactive], market_map, show_inactive=True)
+    assert "1件" in gui.DividendWindow._split_notice(shown_stub)
+    asked = _answer(monkeypatch, YES)
+    gui.DividendWindow.action_apply_all_splits(shown_stub)
+    assert "1 行" in asked["text"]
+    assert saved["rows"][0].shares == 600.0
 
 
 # ---- 旗の表示（列・文字・色・並び替え） ----
