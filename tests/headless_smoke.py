@@ -842,9 +842,13 @@ def _check_withdrawal_trend_note(w) -> None:
     理由が画面に無いと「切り替えたらグラフが消えた」に見える。
     """
     original = w.withdrawal_mode
+    original_dividend = w.dividend_mode
     hist = w._history_as_dicts()
 
     try:
+        # 税引後では「税引前で記録」の注記が加わる（_check_net_trend_note が見る）。
+        # ここは取崩の注記だけを見たいので税引前に固定する。
+        w._set_dividend_mode("gross")
         w._set_withdrawal_mode(None)
         assert w._income_trend_note.text() == "", "取崩無しでも取崩の注記が出ている"
         assert w._income_line._series[0][0].startswith("配当"), w._income_line._series[0][0]
@@ -863,6 +867,44 @@ def _check_withdrawal_trend_note(w) -> None:
 
     finally:
         w._set_withdrawal_mode(original)  # 設定（withdrawal_mode）を元へ戻す
+        w._set_dividend_mode(original_dividend)
+
+
+def _check_net_trend_note(w) -> None:
+    """税引後モードでは、推移が税引前の記録である旨を凡例と注記に出すこと。
+
+    履歴は表示モードに依存させないため税引前で記録している。税引後を選んだまま
+    黙って税引前の線を描くと、KPI の年間配当とグラフの右端が食い違って見える。
+    """
+    original = w.withdrawal_mode
+    original_dividend = w.dividend_mode
+    try:
+        w._set_withdrawal_mode(None)
+        w._set_dividend_mode("net")
+        assert w._income_line._series[0][0].endswith("（税引前）"), (
+            w._income_line._series[0][0]
+        )
+        assert gui.NET_TREND_NOTE in w._income_trend_note.text(), (
+            f"税引後なのに税引前で記録の注記が無い: {w._income_trend_note.text()!r}"
+        )
+        # 取崩の記録開始日の注記とは併記する（片方で上書きしない）。
+        hist = w._history_as_dicts()
+        for mode in ("fixed", "rate"):
+            w._set_withdrawal_mode(mode)
+            note = w._income_trend_note.text()
+            assert gui.NET_TREND_NOTE in note, note
+            assert w._withdrawal_coverage_note(hist, mode) in note, note
+            assert w._income_line._series[0][0].endswith("（税引前）")
+
+        w._set_withdrawal_mode(None)
+        w._set_dividend_mode("gross")
+        assert gui.NET_TREND_NOTE not in w._income_trend_note.text(), (
+            "税引前モードでも税引前の注記が残っている"
+        )
+        assert not w._income_line._series[0][0].endswith("（税引前）")
+    finally:
+        w._set_withdrawal_mode(original)  # 設定を元へ戻す
+        w._set_dividend_mode(original_dividend)
 
 
 def _check_monthly_benefit_toggle(w) -> None:
@@ -1086,6 +1128,7 @@ def _run_checks(data: Path) -> None:
     _check_inactive_toggle(w)
     _check_monthly_tab(w)
     _check_withdrawal_trend_note(w)
+    _check_net_trend_note(w)
     _check_theme_toggle(w)
     _check_fund_share_unit(w)
     _check_yield_scope(w)

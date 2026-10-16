@@ -559,3 +559,12 @@ def test_store_fx_rejects_unusable_rate():
     stub = _finish_stub()
     assert gui.DividendWindow._store_fx(stub, _fx_rate(float("nan"))) is False
     assert stub.fx_rate == 100.0 and io_csv.load_fx() == []
+
+
+def test_income_trend_label_marks_gross_history_in_net_mode():
+    """履歴は税引前で記録しているので、税引後モードの凡例にだけ（税引前）を付ける。"""
+    label = gui.DividendWindow._income_trend_label
+    assert label(False, None) == "配当"
+    assert label(True, "fixed", dividend_mode="net") == "定額取崩収入＋優待（税引前）"
+    assert label(False, None, dividend_mode="gross") == "配当"
+

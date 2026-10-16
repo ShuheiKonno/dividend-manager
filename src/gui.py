@@ -175,6 +175,8 @@ ASSET_TYPE_LABELS = {"stock": "株式", "fund": "投信"}
 WITHDRAWAL_CHOICES = [("none", "配当"), ("fixed", "定額取崩"), ("rate", "定率取崩")]
 # 収入モード → 表示ラベル（情報バー・KPI タイトル用）
 WITHDRAWAL_LABELS = {None: "配当", "fixed": "定額取崩", "rate": "定率取崩"}
+# 税引後モードで配当推移グラフの操作行へ出す注記（履歴は税引前で記録している）
+NET_TREND_NOTE = "※推移は税引前で記録しています"
 # チャートの系列色はテーマで変わるため、モジュール定数に QColor を焼き込まず
 # 描画のたびに theme から作る（定数にすると切替後も旧テーマの色で描かれる）。
 
@@ -1664,14 +1666,20 @@ class DividendWindow(QMainWindow):
              "income_value": combine_income(rec, with_benefit, mode)}
             for rec in hist_dicts
         ]
-        label = self._income_trend_label(with_benefit, mode)
+        label = self._income_trend_label(
+            with_benefit, mode, dividend_mode=self.dividend_mode
+        )
         self._income_line.set_data(
             income_dicts, [(label, "income_value", income_trend_color())],
             empty_message="配当の履歴がありません（株価更新か『インポート』で記録されます）",
         )
-        self._income_trend_note.setText(
-            self._withdrawal_coverage_note(hist_dicts, mode)
-        )
+        notes = [self._withdrawal_coverage_note(hist_dicts, mode)]
+        # 履歴は表示モードに依存させないため税引前で記録している（変えない）。
+        # 税引後を選んでいるのに推移だけ税引前のままだと、KPI の年間配当と
+        # グラフ右端の値が食い違って見えるので、凡例と注記の両方で明示する。
+        if self.dividend_mode == "net":
+            notes.append(NET_TREND_NOTE)
+        self._income_trend_note.setText(" / ".join(n for n in notes if n))
 
     @staticmethod
     def _withdrawal_coverage_note(hist_dicts: list[dict], mode: str | None) -> str:
@@ -1694,10 +1702,17 @@ class DividendWindow(QMainWindow):
         return f"※{WITHDRAWAL_LABELS[mode]}収入は {first} 以降のみ記録"
 
     @staticmethod
-    def _income_trend_label(with_benefit: bool, mode: str | None) -> str:
-        """凡例の系列名。取崩は定額/定率のどちらを描いているか名前で区別する。"""
+    def _income_trend_label(
+        with_benefit: bool, mode: str | None, dividend_mode: str = "gross"
+    ) -> str:
+        """凡例の系列名。取崩は定額/定率のどちらを描いているか名前で区別する。
+
+        税引後モードでも履歴は税引前の値なので、そのときだけ「（税引前）」を付ける
+        （税引前モードで付けないのは、表示中の数え方と一致していて冗長なため）。
+        """
         base = "配当" if mode is None else f"{WITHDRAWAL_LABELS[mode]}収入"
-        return f"{base}＋優待" if with_benefit else base
+        label = f"{base}＋優待" if with_benefit else base
+        return f"{label}（税引前）" if dividend_mode == "net" else label
 
     def _history_as_dicts(self) -> list[dict]:
         """LineChartWidget.set_data 用に履歴を dict 列へ変換（record_date 昇順）。"""
