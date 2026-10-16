@@ -1418,7 +1418,14 @@ class DividendWindow(QMainWindow):
         for key in ("split_apply", "split_dismiss"):
             self._actions[key].setEnabled(idle and selected_pending)
         self._actions["split_apply_all"].setEnabled(
-            idle and bool(splits.pending_holdings(self.holdings, self.market_data_map))
+            idle
+            and bool(
+                splits.pending_holdings(
+                    self.holdings,
+                    self.market_data_map,
+                    include_inactive=self.show_inactive,
+                )
+            )
         )
         # データフォルダの切替も同様（走行中のワーカーが旧フォルダへ書き戻す）。
         for key in ("update_market", "update_fx", "reload", "new",
@@ -2537,7 +2544,9 @@ class DividendWindow(QMainWindow):
 
     def _split_notice(self) -> str:
         """取得後にステータスバーへ添える、未反映の分割の件数メッセージ（無ければ ""）。"""
-        pending = splits.pending_holdings(self.holdings, self.market_data_map)
+        pending = splits.pending_holdings(
+            self.holdings, self.market_data_map, include_inactive=self.show_inactive
+        )
         if not pending:
             return ""
         symbols = ", ".join(dict.fromkeys(self.holdings[i].symbol for i, _ in pending))
@@ -2621,7 +2630,9 @@ class DividendWindow(QMainWindow):
         """未反映の分割を持つ全行へ、まとめて反映する（確認は1回）。"""
         if self._busy:
             return
-        pending = splits.pending_holdings(self.holdings, self.market_data_map)
+        pending = splits.pending_holdings(
+            self.holdings, self.market_data_map, include_inactive=self.show_inactive
+        )
         if not pending:
             return
         summary = []
