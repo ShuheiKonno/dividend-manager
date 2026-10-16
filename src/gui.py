@@ -47,7 +47,6 @@ from PySide6.QtWidgets import (
     QComboBox,
     QMenu,
     QToolBar,
-    QSizePolicy,
 )
 
 # 検証ヘルパーはダイアログと共に dialogs.py へ移設した。tests/test_gui_helpers.py が
