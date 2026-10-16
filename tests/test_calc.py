@@ -15,6 +15,7 @@ from src.calc import (
     _pick_div_ps,
     compute_rows,
     default_tax_rate,
+    latest_fx,
     format_shares,
     from_display_shares,
     fund_share_factor,
@@ -668,4 +669,26 @@ def test_summary_yields_none_when_no_dividend_and_benefit_excluded():
     _, summary = compute_rows([h], {}, 150.0, "gross")
     assert summary_yields(summary, "all", True)[0] is not None
     assert summary_yields(summary, "all", False) == (None, None)
+
+
+def _fx(rate, timestamp="2026-10-01T09:00:00+09:00"):
+    from src.models import FXRate
+
+    return FXRate(timestamp=timestamp, pair="USDJPY", rate=rate, source="test")
+
+
+def test_latest_fx_takes_last_usable_row():
+    rows = [_fx(150.0, "a"), _fx(151.0, "b")]
+    assert latest_fx(rows).timestamp == "b"
+
+
+def test_latest_fx_skips_trailing_zero_nan_and_negative_rows():
+    """手編集の空欄（from_dict で 0.0）や nan の最終行で有効なレートを失わない。"""
+    rows = [_fx(150.0, "ok"), _fx(0.0, "zero"), _fx(float("nan"), "nan"), _fx(-1.0, "neg")]
+    assert latest_fx(rows).timestamp == "ok"
+
+
+def test_latest_fx_returns_none_without_usable_rows():
+    assert latest_fx([]) is None
+    assert latest_fx([_fx(0.0), _fx(float("inf"))]) is None
 

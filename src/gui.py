@@ -7,7 +7,7 @@
 from __future__ import annotations
 
 import sys
-from dataclasses import replace
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Optional
 
@@ -84,13 +84,14 @@ from .io_csv import (
     read_holdings_csv,
 )
 from .md_export import build_holdings_markdown
-from .models import Holding, HistoryRecord
+from .models import FXRate, Holding, HistoryRecord
 from .calc import (
     DEFAULT_FUND_SHARE_UNIT,
     FUND_SHARE_UNITS,
     FUND_SHARE_UNIT_COLUMN_LABELS,
     FUND_SHARE_UNIT_LABELS,
     compute_rows,
+    latest_fx,
     monthly_breakdown,
     to_display_shares,
     summary_yields,
@@ -397,18 +398,37 @@ class NumericSortProxy(QSortFilterProxyModel):
 
 # ---- バックグラウンド取得ワーカー ----
 
+@dataclass
+class MarketUpdate:
+    """F5 の取得結果。株価・配当に加え、USD 銘柄があれば同時に取った為替を載せる。
+
+    為替だけ Ctrl+U の別操作にしていた頃は、F5 で株価だけが新しくなり、円換算は
+    いつのものか分からない古いレートのまま（画面にも出ない）だった。為替の失敗は
+    株価の成功を止めず fx_error に積むだけにする。
+    """
+
+    market: object  # market_data.MarketFetchResult（遅延 import のため型は書かない）
+    fx: FXRate | None = None
+    fx_error: str | None = None
+
+
 class MarketWorker(QObject):
     progress = Signal(int, int, str)
     finished = Signal(object)
     error = Signal(str)
 
-    def __init__(self, holdings: list[Holding], market_map: dict) -> None:
+    def __init__(
+        self, holdings: list[Holding], market_map: dict, fetch_fx: bool = False
+    ) -> None:
         super().__init__()
         self._holdings = holdings
         self._market_map = market_map
+        # USD 銘柄の有無はメインスレッドで決めて渡す（ワーカーから window の
+        # 状態を読まない）。
+        self._fetch_fx = fetch_fx
 
     def run(self) -> None:
-        from .market_data import fetch_market_data
+        from .market_data import fetch_market_data, fetch_usdjpy
         try:
             result = fetch_market_data(
                 self._holdings,
@@ -419,7 +439,14 @@ class MarketWorker(QObject):
         except Exception as exc:  # noqa: BLE001 — UI に通知して継続
             self.error.emit(f"更新に失敗しました: {exc}")
             return
-        self.finished.emit(result)
+        update = MarketUpdate(market=result)
+        if self._fetch_fx:
+            self.progress.emit(0, 0, "USDJPYレートを取得中...")
+            try:
+                update.fx = fetch_usdjpy()
+            except Exception as exc:  # noqa: BLE001 — 株価の結果は捨てない
+                update.fx_error = f"USDJPY更新に失敗しました: {exc}"
+        self.finished.emit(update)
 
 
 class FxWorker(QObject):
@@ -492,6 +519,7 @@ class DividendWindow(QMainWindow):
         self.holdings: list[Holding] = []
         self.market_data_map: dict = {}
         self.fx_rate: float | None = None
+        self.fx_fetched_at: str | None = None
         self.market_source: str | None = None
         self.market_fetched_at: str | None = None
         self.history: list[HistoryRecord] = []
@@ -1470,8 +1498,9 @@ class DividendWindow(QMainWindow):
         self.holdings = load_holdings()
         market_data = load_market_data()
         self.market_data_map = {row.symbol: row for row in market_data}
-        fx_rows = load_fx()
-        self.fx_rate = fx_rows[-1].rate if fx_rows else None
+        fx = latest_fx(load_fx())
+        self.fx_rate = fx.rate if fx is not None else None
+        self.fx_fetched_at = fx.timestamp if fx is not None else None
         if market_data:
             latest = max((row.fetched_at or "") for row in market_data)
             self.market_fetched_at = latest or None
@@ -1576,9 +1605,12 @@ class DividendWindow(QMainWindow):
             f" | 未算出 {summary.missing_market_value_count}銘柄"
             if summary.missing_market_value_count else ""
         )
+        # 為替と株価は取得時刻が別（Ctrl+U だけ・手編集の fx.csv もある）なので
+        # それぞれの時刻を出す。円換算がいつのレートかは画面のどこにも無かった。
         self._info.setText(
-            f"USDJPY {fmt_number(self.fx_rate, 4)} | "
-            f"取得 {self._compact_timestamp(self.market_fetched_at)} "
+            f"USDJPY {fmt_number(self.fx_rate, 4)} "
+            f"({self._compact_timestamp(self.fx_fetched_at)}) | "
+            f"株価 {self._compact_timestamp(self.market_fetched_at)} "
             f"({self.market_source or 'N/A'}){missing_note}"
         )
         income_kpi_label = "年間収入" if self.withdrawal_mode is not None else "年間配当"
@@ -1801,6 +1833,7 @@ class DividendWindow(QMainWindow):
             yield_scope=self.yield_scope,
             with_benefit=self.income_benefit == "with",
             fx_rate=self.fx_rate,
+            fx_fetched_at=self.fx_fetched_at,
             market_fetched_at=self.market_fetched_at,
             market_source=self.market_source,
             generated_at=now_jst_iso(),
@@ -2737,16 +2770,21 @@ class DividendWindow(QMainWindow):
         self._progress.setRange(0, 100)
         self._progress.setValue(0)
         self.statusBar().showMessage("株価・配当データを取得中...")
-        worker = MarketWorker(self.holdings, self.market_data_map)
+        # 有効な USD 銘柄があるときだけ為替も取る（円換算に効くのはそこだけ）。
+        fetch_fx = any(h.active and h.currency == "USD" for h in self.holdings)
+        worker = MarketWorker(self.holdings, self.market_data_map, fetch_fx=fetch_fx)
         self._start_worker(worker, self._on_market_finished, self._on_market_progress)
 
     def _on_market_progress(self, done: int, total: int, label: str) -> None:
         if total > 0:
             self._progress.setRange(0, total)
             self._progress.setValue(done)
+        else:
+            self._progress.setRange(0, 0)  # 為替の取得中（件数の無い段階）
         self.statusBar().showMessage(label)
 
-    def _on_market_finished(self, result) -> None:
+    def _on_market_finished(self, update: MarketUpdate) -> None:
+        result = update.market
         if not self._save_or_notify(lambda: save_market_data(result.rows)):
             return
         self.market_data_map = {row.symbol: row for row in result.rows}
@@ -2763,13 +2801,20 @@ class DividendWindow(QMainWindow):
             if updated:
                 if self._save_or_notify(lambda: save_holdings(holdings)):
                     self.holdings = holdings
+        # 為替は再描画・スナップショットより前に反映する（記録する評価額が
+        # 新しい株価×古いレートにならないように）。失敗はエラーに積むだけ。
+        errors = list(result.errors)
+        if update.fx_error:
+            errors.append(update.fx_error)
+        elif update.fx is not None and not self._store_fx(update.fx):
+            errors.append("USDJPYレートを反映できませんでした")
         self._refresh_view()
         # 最新株価で評価額が確定した時点で当日スナップショットを記録。
         self._record_history_snapshot()
         split_notice = self._split_notice()
-        if result.errors:
+        if errors:
             self._notify(
-                f"一部の取得に失敗しました（{len(result.errors)}件）: {result.errors[0]}"
+                f"一部の取得に失敗しました（{len(errors)}件）: {errors[0]}"
                 + split_notice,
                 error=True,
             )
@@ -2785,13 +2830,27 @@ class DividendWindow(QMainWindow):
         self.statusBar().showMessage("USDJPYレートを取得中...")
         self._start_worker(FxWorker(), self._on_fx_finished)
 
+    def _store_fx(self, fx: FXRate) -> bool:
+        """取得した為替を fx.csv へ追記して現在値にする（F5 と Ctrl+U の共通経路）。
+
+        使えないレート（0・nan）は保存も反映もしない（latest_fx と同じ基準）。
+        失敗の通知はここで出す（保存失敗は _save_or_notify が理由付きで出す）。
+        """
+        if latest_fx([fx]) is None:
+            self._notify(f"USDJPYレートが不正な値です: {fx.rate}", error=True)
+            return False
+        rows = load_fx()
+        rows.append(fx)
+        if not self._save_or_notify(lambda: save_fx(rows)):
+            return False
+        self.fx_rate = fx.rate
+        self.fx_fetched_at = fx.timestamp
+        return True
+
     def _on_fx_finished(self, fx) -> None:
         if fx:
-            rows = load_fx()
-            rows.append(fx)
-            if not self._save_or_notify(lambda: save_fx(rows)):
+            if not self._store_fx(fx):
                 return
-            self.fx_rate = fx.rate
             self._refresh_view()
             self._record_history_snapshot()
             self._notify(f"USDJPY = {fx.rate:.4f} に更新しました")

@@ -158,6 +158,7 @@ def _io_stub(holdings, history):
         income_benefit = "without"
         show_inactive = False
         market_fetched_at = None
+        fx_fetched_at = None
         market_source = None
         fund_share_unit = gui.DEFAULT_FUND_SHARE_UNIT
 
@@ -440,3 +441,121 @@ def test_change_data_dir_reports_failure(monkeypatch, tmp_path):
     assert calls["init"] == 0
     assert stub.reloaded is False
     assert stub.notes and stub.notes[-1][1] is True
+
+
+# ---- F5 で為替も取る（MarketWorker / _on_market_finished） ----
+
+def _fx_rate(rate: float = 150.5, timestamp: str = "2026-10-17T09:00:00+09:00"):
+    from src.models import FXRate
+
+    return FXRate(timestamp=timestamp, pair="USDJPY", rate=rate, source="test")
+
+
+def _fetch_result(**kw):
+    from src.market_data import MarketFetchResult
+
+    base = dict(rows=[], fetched_at=None, source="yfinance", errors=[], name_updates={})
+    base.update(kw)
+    return MarketFetchResult(**base)
+
+
+def _run_worker(monkeypatch, fetch_fx: bool, fx_outcome):
+    """MarketWorker.run を同期実行し、finished / error で受けた値を返す。"""
+    import src.market_data as md
+
+    calls: list[str] = []
+    monkeypatch.setattr(md, "fetch_market_data", lambda *a, **k: _fetch_result())
+
+    def fake_fx():
+        calls.append("fx")
+        if isinstance(fx_outcome, Exception):
+            raise fx_outcome
+        return fx_outcome
+
+    monkeypatch.setattr(md, "fetch_usdjpy", fake_fx)
+    worker = gui.MarketWorker([], {}, fetch_fx=fetch_fx)
+    got: dict = {}
+    worker.finished.connect(lambda update: got.update(update=update))
+    worker.error.connect(lambda message: got.update(error=message))
+    worker.run()
+    return got, calls
+
+
+def test_market_worker_fetches_fx_when_requested(monkeypatch):
+    got, calls = _run_worker(monkeypatch, True, _fx_rate())
+    assert calls == ["fx"]
+    assert got["update"].fx.rate == 150.5 and got["update"].fx_error is None
+
+
+def test_market_worker_keeps_market_result_when_fx_fails(monkeypatch):
+    """為替の失敗で株価・配当の結果を捨てない（エラーに積むだけ）。"""
+    got, _ = _run_worker(monkeypatch, True, RuntimeError("timeout"))
+    assert "error" not in got, "為替の失敗で取得全体が失敗扱いになった"
+    assert got["update"].market is not None
+    assert got["update"].fx is None and "timeout" in got["update"].fx_error
+
+
+def test_market_worker_skips_fx_without_usd_holdings(monkeypatch):
+    got, calls = _run_worker(monkeypatch, False, _fx_rate())
+    assert calls == [], "USD 銘柄が無いのに為替を取りに行った"
+    assert got["update"].fx is None
+
+
+def _finish_stub():
+    """_on_market_finished の呼び出し順と、その時点の為替レートを記録するスタブ。"""
+
+    class WindowStub:
+        _store_fx = gui.DividendWindow._store_fx
+
+        def __init__(self):
+            self.holdings = []
+            self.market_data_map = {}
+            self.fx_rate = 100.0
+            self.fx_fetched_at = "old"
+            self.events: list[tuple] = []
+
+        def _save_or_notify(self, action):
+            action()
+            return True
+
+        def _refresh_view(self):
+            self.events.append(("refresh", self.fx_rate))
+
+        def _record_history_snapshot(self):
+            self.events.append(("snapshot", self.fx_rate))
+
+        def _split_notice(self):
+            return ""
+
+        def _notify(self, message, error=False):
+            self.events.append(("notify", message, error))
+
+    return WindowStub()
+
+
+def test_on_market_finished_applies_fx_before_snapshot():
+    """スナップショットは新しい株価×新しいレートで記録する（古いレートで記録しない）。"""
+    stub = _finish_stub()
+    update = gui.MarketUpdate(market=_fetch_result(), fx=_fx_rate(151.25, "new"))
+    gui.DividendWindow._on_market_finished(stub, update)
+    assert stub.events[:2] == [("refresh", 151.25), ("snapshot", 151.25)], stub.events
+    assert stub.fx_fetched_at == "new"
+    assert [r.rate for r in io_csv.load_fx()] == [151.25], "fx.csv へ追記されていない"
+    assert stub.events[-1][2] is False, stub.events[-1]
+
+
+def test_on_market_finished_reports_fx_error_but_keeps_market_update():
+    stub = _finish_stub()
+    update = gui.MarketUpdate(market=_fetch_result(), fx_error="USDJPY更新に失敗しました: x")
+    gui.DividendWindow._on_market_finished(stub, update)
+    assert ("snapshot", 100.0) in stub.events, "為替の失敗で株価の反映・記録が止まった"
+    message, error = stub.events[-1][1:]
+    assert error is True and "USDJPY" in message
+    assert io_csv.load_fx() == []
+
+
+def test_store_fx_rejects_unusable_rate():
+    """0・nan のレートは保存も反映もしない（latest_fx と同じ基準）。"""
+    stub = _finish_stub()
+    assert gui.DividendWindow._store_fx(stub, _fx_rate(float("nan"))) is False
+    assert stub.fx_rate == 100.0 and io_csv.load_fx() == []

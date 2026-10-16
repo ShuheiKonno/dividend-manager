@@ -293,6 +293,7 @@ def build_holdings_markdown(
     with_benefit: bool = True,
     fx_rate: float | None,
     market_fetched_at: str | None,
+    fx_fetched_at: str | None = None,
     market_source: str | None,
     generated_at: str,
     fund_share_unit: str = DEFAULT_FUND_SHARE_UNIT,
@@ -336,6 +337,8 @@ def build_holdings_markdown(
             ["利回りの対象", YIELD_SCOPE_LABELS.get(yield_scope, str(yield_scope))],
             ["利回りの優待", "含む" if with_benefit else "含まない"],
             ["USDJPY", _num(fx_rate, 4)],
+            # 株価と為替は取得時刻が別（為替だけ古いことがある）なので分けて書く。
+            ["USDJPYの取得日時", fx_fetched_at or ""],
             ["株価の取得日時", market_fetched_at or ""],
             ["株価の取得元", market_source or ""],
             # 優待スイッチと違い、この設定は表に出る数字そのものを変える。

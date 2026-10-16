@@ -3,7 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Iterable
 
-from .models import Holding, MarketData
+from .models import FXRate, Holding, MarketData
 from .splits import applied_splits, pending_splits
 from .utils import safe_float
 
@@ -714,11 +714,18 @@ def monthly_breakdown(rows: Iterable[dict]) -> MonthlyBreakdown:
     )
 
 
-def latest_fx_rate(rows: Iterable[dict[str, str]]) -> float | None:
+def latest_fx(rows: Iterable[FXRate]) -> FXRate | None:
+    """為替履歴（fx.csv の行、追記順）から、使えるレートを持つ最後の行を返す。
+
+    最終行をそのまま採ると、手編集で入った空欄・0・nan の行が現在のレートになる。
+    FXRate.from_dict は空欄を 0.0 にし、_to_jpy は 0 を「レート無し」と扱うので、
+    直前に有効なレートが残っていても USD 銘柄がすべて未算出になる（nan なら
+    時価・配当が nan で汚れる）。正の有限値の行まで遡り、1つも無ければ None。
+    取得日時（timestamp）も表示に使うので、値ではなく行を返す。
+    """
     latest = None
     for row in rows:
-        rate = safe_float(row.get("rate"))
-        if rate is None:
-            continue
-        latest = rate
+        rate = safe_float(row.rate)
+        if rate is not None and rate > 0:  # safe_float が nan/inf を None にする
+            latest = row
     return latest
