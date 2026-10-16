@@ -378,7 +378,7 @@ QToolBar QToolButton#primaryAction:disabled {{
 }}
 /* 既定の BORDER_FOCUS は青塗りの上では青on青でほぼ見えないため淡色を使う。 */
 QToolBar QToolButton#primaryAction:focus {{ border-color: {ACCENT_FOCUS}; outline: none; }}
-QToolBar QLabel {{ color: {TEXT_SECONDARY}; padding: 0px 2px; }}
+QToolBar QLabel, #filterBox QLabel {{ color: {TEXT_SECONDARY}; padding: 0px 2px; }}
 
 /* ---- ステータスバー・プログレスバー・ツールチップ ---- */
 QStatusBar {{ background: {BG_INPUT}; color: {TEXT_STATUS}; }}

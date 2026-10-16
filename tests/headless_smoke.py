@@ -29,7 +29,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 from PySide6.QtCore import Qt  # noqa: E402
-from PySide6.QtWidgets import QApplication  # noqa: E402
+from PySide6.QtWidgets import QApplication, QToolButton  # noqa: E402
 
 from src.dialogs import (  # noqa: E402
     ACCOUNT_CHOICES,
@@ -188,22 +188,48 @@ def _check_toolbar(w) -> None:
     primary_button = w._toolbar.widgetForAction(w._actions["update_market"])
     assert primary_button is not None and primary_button.objectName() == "primaryAction"
 
-    # 最小幅でも絞り込みが拡張メニューへ飛ばず画面に残ること
-    # （1段に詰め込むと狭い幅であふれ、右端の絞り込みが消える回帰があった）。
-    # isVisible() の判定には実際のレイアウトが要るのでここだけ show() する
-    # （QT_QPA_PLATFORM=offscreen なら画面には出ない）。最後に hide() で戻す。
+    # 絞り込みはツールバーではなくタブ見出しの右端（コーナー）に置く。2段目の
+    # ツールバーに置いていた頃は、利回りコンボを足した時点で最小幅 900px に
+    # 収まらなくなり（sizeHint 1131px）、絞り込みが拡張メニューへ消えていた。
+    corner = w._tabs.cornerWidget(Qt.Corner.TopRightCorner)
+    assert corner is not None and corner.isAncestorOf(w._filter), (
+        "絞り込みがタブのコーナーに無い"
+    )
+    for bar in (w._toolbar, w._view_toolbar):
+        assert not bar.isAncestorOf(w._filter), "絞り込みがツールバーへ戻っている"
+
+    # あふれの検知は拡張ボタン（»）の可視性で見る。個々のボタンの isVisible だと、
+    # 見ていない項目（1段目右端の「分割を反映」等）があふれても気付けない。
+    # 実レイアウトが要るのでここだけ show() する（offscreen なら画面には出ない）。
+    combos = (w._mode_combo, w._withdrawal_combo, w._benefit_combo, w._yield_scope_combo)
     original = w.size()
     w.show()
-    for width in (w.minimumWidth(), 1100, 1536):
-        w.resize(width, max(620, w.minimumHeight()))
+    try:
+        for width in (w.minimumWidth(), 1024, 1100, 1536):
+            w.resize(width, max(620, w.minimumHeight()))
+            QApplication.processEvents()
+            for bar in (w._toolbar, w._view_toolbar):
+                ext = bar.findChild(QToolButton, "qt_toolbar_ext_button")
+                assert ext is None or not ext.isVisible(), (
+                    f"幅 {width}px で {bar.objectName()} があふれている "
+                    f"(sizeHint {bar.sizeHint().width()}px > 幅 {bar.width()}px)"
+                )
+            assert all(c.isVisible() for c in combos), f"幅 {width}px でコンボが消えている"
+            assert w._filter.isVisible(), f"幅 {width}px で絞り込みが消えている"
+            # コーナーに幅を取られてタブ見出しが縮む（スクロール矢印が出てタブが
+            # 隠れる）のは、絞り込みを移したことで起こり得る別の回帰。
+            tab_bar = w._tabs.tabBar()
+            assert tab_bar.width() >= tab_bar.sizeHint().width(), (
+                f"幅 {width}px でタブ見出しが縮んでいる "
+                f"({tab_bar.width()}px < {tab_bar.sizeHint().width()}px)"
+            )
+            assert corner.x() > tab_bar.geometry().right(), (
+                f"幅 {width}px で絞り込みがタブ見出しに重なっている"
+            )
+    finally:
+        w.resize(original)
+        w.hide()
         QApplication.processEvents()
-        assert w._filter.isVisible(), f"幅 {width}px で絞り込みが消えている"
-        assert w._toolbar.widgetForAction(w._actions["new"]).isVisible(), (
-            f"幅 {width}px で新規登録ボタンが消えている"
-        )
-    w.resize(original)
-    w.hide()
-    QApplication.processEvents()
 
     # ドロップダウンが現在のモードを示していること
     assert w._mode_combo.currentData() == w.dividend_mode
@@ -217,10 +243,13 @@ def _check_toolbar(w) -> None:
     )
     # ショートカット経由で切り替えてもドロップダウンが追随すること
     before = w.dividend_mode
-    w.action_toggle_mode()
-    assert w._mode_combo.currentData() == w.dividend_mode != before
-    w.action_toggle_mode()  # 元へ戻す（設定を汚さない）
+    try:
+        w.action_toggle_mode()
+        assert w._mode_combo.currentData() == w.dividend_mode != before
+    finally:
+        w._set_dividend_mode(before)  # 元へ戻す（設定を汚さない）
     assert w.dividend_mode == before
+    assert w._mode_combo.currentData() == before
 
 
 def _check_kpi_cards(w) -> None:

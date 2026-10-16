@@ -619,6 +619,7 @@ class DividendWindow(QMainWindow):
         root.addWidget(kpi_bar)
 
         self._tabs = QTabWidget()
+        self._tabs.setCornerWidget(self._build_filter_box(), Qt.Corner.TopRightCorner)
         # 評価額タブ（左=構成グラフ[ヒートマップ⇔円グラフ] / 右=評価額推移）
         self._treemap = TreemapWidget()
         self._piechart = PieChartWidget()
@@ -982,9 +983,9 @@ class DividendWindow(QMainWindow):
         同列に並ぶのを避ける。ボタンの有効/無効は QAction 側の状態に追随する
         ため、_sync_action_states の1箇所で3者まとめて制御できる。
 
-        表示モードと絞り込みは2段目へ分ける。1段に詰めると最小ウィンドウ幅では
-        収まらず、あふれた項目（＝右端の絞り込みボックス）が Qt の拡張メニューへ
-        追いやられて画面から消えてしまう。
+        表示モードは2段目へ分ける。1段に詰めると最小ウィンドウ幅では収まらず、
+        あふれた項目が Qt の拡張メニューへ追いやられて画面から消えてしまう。
+        絞り込みはツールバーに置かない（_build_filter_box の docstring 参照）。
         """
         bar = QToolBar("操作")
         bar.setObjectName("mainToolBar")
@@ -1035,7 +1036,7 @@ class DividendWindow(QMainWindow):
         self._view_toolbar = view_bar
 
     def _build_mode_controls(self, bar: QToolBar) -> None:
-        """表示モードの切替と絞り込みを2段目のツールバーへ配置する。
+        """表示モードの切替を2段目のツールバーへ配置する。
 
         トグルをドロップダウンにして現在のモードを常時可視にする（従来は情報
         ラベルの1行テキストにしか出ず、今どちらのモードか分からなかった）。
@@ -1073,23 +1074,31 @@ class DividendWindow(QMainWindow):
         )
         bar.addWidget(self._yield_scope_combo)
 
-        spacer = QWidget()
-        spacer.setSizePolicy(
-            QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred
-        )
-        bar.addWidget(spacer)
+    def _build_filter_box(self) -> QWidget:
+        """絞り込み欄（ラベル＋入力）を作る。タブ見出しの右端（コーナー）に置く。
 
-        bar.addWidget(QLabel("絞り込み: "))
+        2段目のツールバーに置いていた頃は、利回りコンボを足した時点で最小幅 900px
+        に収まらなくなり（sizeHint 1131px）、右端の絞り込みが拡張メニューへ消えた。
+        絞り込みは表タブにだけ効く操作なので、タブ見出しの横が意味的にも合う。
+        ツールバーへ戻さないこと——コンボを1つ足すたびに同じあふれが再発する。
+        """
+        box = QWidget()
+        box.setObjectName("filterBox")
+        layout = QHBoxLayout(box)
+        layout.setContentsMargins(0, 0, 4, 0)
+        layout.setSpacing(4)
+        layout.addWidget(QLabel("絞り込み:"))
         self._filter = QLineEdit()
         self._filter.setPlaceholderText("コード / 銘柄名 / 口座")
         self._filter.setClearButtonEnabled(True)
-        # 固定幅にすると狭いウィンドウで収まらず拡張メニューへ飛んで消えるため、
-        # 下限を決めたうえで縮められるようにする。
-        self._filter.setMinimumWidth(150)
-        self._filter.setMaximumWidth(260)
+        # コーナーは sizeHint の幅で置かれ伸縮しない（QLineEdit の既定は狭く、
+        # 実フォントでは 150px まで痩せてプレースホルダが切れた）ので幅を決め打つ。
+        # 最小幅 900px でもタブ見出し（約440px）の右に 200px 以上の余白が残る。
+        self._filter.setFixedWidth(220)
         # proxy は後段で生成されるが、textChanged は実行時にしか発火しないため接続順は問題ない。
         self._filter.textChanged.connect(self._on_filter_changed)
-        bar.addWidget(self._filter)
+        layout.addWidget(self._filter)
+        return box
 
     def _sync_mode_controls(self) -> None:
         """ショートカット経由でモードを変えたとき、ドロップダウンの表示を揃える。
