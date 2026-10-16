@@ -4,17 +4,32 @@
 即時バリデーション・treemap ホバー状態の配線を検証する。
 
 実行: py -3 tests/headless_smoke.py
+
+build_window() は「現在のデータフォルダ」を読み、起動時に履歴の当日行を書き込む。
+スクリプト自身が一時フォルダのサンドボックス（実データのコピー＋差し替えた
+%APPDATA%）を作ってから走るので、実データのフォルダと config.json には
+コピー元として読む以外で触れない（_sandbox が実行前後で突合する）。
+空データで走らせるときは環境変数 SMOKE_EMPTY_DATA=1 を付ける（実データの
+設定＝税引後・優待あり等に依存せず、既定状態で全項目を通すため）。
 """
 
 from __future__ import annotations
 
+import os
+import shutil
 import sys
+import tempfile
+from contextlib import contextmanager
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
+# 座標系のチェックは show() する。PySide6 の import より前に決めないと効かない
+# （明示指定があればそちらを優先する）。
+os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+
 from PySide6.QtCore import Qt  # noqa: E402
-from PySide6.QtWidgets import QApplication  # noqa: E402
+from PySide6.QtWidgets import QApplication, QToolButton  # noqa: E402
 
 from src.dialogs import (  # noqa: E402
     ACCOUNT_CHOICES,
@@ -22,9 +37,71 @@ from src.dialogs import (  # noqa: E402
     MonthCheckboxGroup,
     NewHoldingDialog,
 )
-from src import gui  # noqa: E402
+from src import app_config, gui, io_csv  # noqa: E402
 from src.gui import build_window  # noqa: E402
 from src.models import Holding, MarketData  # noqa: E402
+
+# サンドボックスへ写すファイル（データ4本＋画面状態）。settings.json も写すのは、
+# 実際に使っている設定（税引後・優待あり・ライトテーマ等）でも各チェックが
+# 通ることを見るため。
+_SANDBOX_FILES = ("holdings.csv", "market_data.csv", "fx.csv", "history.csv", "settings.json")
+
+
+def _snapshot(folder: Path) -> dict[str, tuple[int, int]]:
+    """フォルダ配下の全ファイルの (サイズ, 更新時刻) を取る（無ければ空）。"""
+    if not folder.is_dir():
+        return {}
+    return {
+        path.relative_to(folder).as_posix(): (path.stat().st_size, path.stat().st_mtime_ns)
+        for path in folder.rglob("*")
+        if path.is_file()
+    }
+
+
+@contextmanager
+def _sandbox():
+    """実データのコピーを置いた一時フォルダへデータフォルダと %APPDATA% を向ける。
+
+    順序が肝: ①元の %APPDATA% のまま実データのフォルダを特定する（読むだけ）
+    ②コピー ③%APPDATA% を差し替えて、そちらの config.json をサンドボックスへ向ける
+    ④io_csv のパスを張り替える。io_csv の *_PATH は import 時に実データのフォルダで
+    確定しているので、④を飛ばすと DATA_DIR だけでなく全パスが実データを指したまま
+    になる。③は DividendWindow が設定を読み直したり既定フォルダへ落ちたりしても
+    サンドボックスの外へ出ないための二重の囲い。
+    """
+    real = app_config.load_data_dir()
+    before = _snapshot(real)
+    root = Path(tempfile.mkdtemp(prefix="dividend_smoke_"))
+    data = root / "data"
+    data.mkdir()
+    if os.environ.get("SMOKE_EMPTY_DATA") != "1":
+        for name in _SANDBOX_FILES:
+            if (real / name).is_file():
+                shutil.copy2(real / name, data / name)
+    original_appdata = os.environ.get("APPDATA")
+    os.environ["APPDATA"] = str(root / "appdata")
+    try:
+        app_config.save_data_dir(data)
+        io_csv.set_data_dir(data, persist=False)
+        # 実データのフォルダを指すパスが1つでも残っていれば走らせない。
+        for name in ("DATA_DIR", *io_csv._DERIVED_PATHS):
+            path = getattr(io_csv, name)
+            assert root in path.parents and real not in path.parents and path != real, (
+                f"io_csv.{name} がサンドボックスを指していない: {path}"
+            )
+        assert root in app_config.config_path().parents, app_config.config_path()
+        assert app_config.load_data_dir() == data
+        print(f"sandbox: {data}（コピー元: "
+              f"{'なし（空データ）' if os.environ.get('SMOKE_EMPTY_DATA') == '1' else real}）")
+        yield data
+    finally:
+        if original_appdata is None:
+            os.environ.pop("APPDATA", None)
+        else:
+            os.environ["APPDATA"] = original_appdata
+        shutil.rmtree(root, ignore_errors=True)
+        # 実データへ一切書いていないこと（実行中にアプリ本体が書いた場合も赤くなる）。
+        assert _snapshot(real) == before, f"実データのフォルダが変化した: {real}"
 
 
 def _holding(**overrides) -> Holding:
@@ -62,40 +139,44 @@ def _check_actions(w) -> None:
 
     original_tab = w._tabs.currentIndex()
 
-    # グラフタブ: 編集・削除・絞り込みは対象が無いので無効（無反応ボタンを作らない）
-    w._tabs.setCurrentIndex(0)
-    assert not actions["edit"].isEnabled(), "グラフタブで編集が有効のまま"
-    assert not actions["delete"].isEnabled(), "グラフタブで削除が有効のまま"
-    assert not w._filter.isEnabled(), "グラフタブで絞り込みが有効のまま"
+    try:
+        # グラフタブ: 編集・削除・絞り込みは対象が無いので無効（無反応ボタンを作らない）
+        w._tabs.setCurrentIndex(0)
+        assert not actions["edit"].isEnabled(), "グラフタブで編集が有効のまま"
+        assert not actions["delete"].isEnabled(), "グラフタブで削除が有効のまま"
+        assert not w._filter.isEnabled(), "グラフタブで絞り込みが有効のまま"
 
-    # 表タブ（株価詳細=3）: 行を選ぶと編集・削除が有効になる
-    w._tabs.setCurrentIndex(3)
-    assert w._filter.isEnabled(), "表タブで絞り込みが無効のまま"
-    if w._price_proxy.rowCount() > 0:
-        w._price_view.selectRow(0)
-        assert actions["edit"].isEnabled(), "行を選んでも編集が有効にならない"
-        assert actions["delete"].isEnabled(), "行を選んでも削除が有効にならない"
+        # 表タブ（株価詳細=3）: 行を選ぶと編集・削除が有効になる
+        w._tabs.setCurrentIndex(3)
+        assert w._filter.isEnabled(), "表タブで絞り込みが無効のまま"
+        if w._price_proxy.rowCount() > 0:
+            w._price_view.selectRow(0)
+            assert actions["edit"].isEnabled(), "行を選んでも編集が有効にならない"
+            assert actions["delete"].isEnabled(), "行を選んでも削除が有効にならない"
 
-    # 月別配当タブ（=2）: 内訳は読み取り専用なのでグラフタブと同じ扱い
-    w._tabs.setCurrentIndex(2)
-    assert not actions["edit"].isEnabled(), "月別配当タブで編集が有効のまま"
-    assert not actions["delete"].isEnabled(), "月別配当タブで削除が有効のまま"
-    assert not w._filter.isEnabled(), "月別配当タブで絞り込みが有効のまま"
+        # 月別配当タブ（=2）: 内訳は読み取り専用なのでグラフタブと同じ扱い
+        w._tabs.setCurrentIndex(2)
+        assert not actions["edit"].isEnabled(), "月別配当タブで編集が有効のまま"
+        assert not actions["delete"].isEnabled(), "月別配当タブで削除が有効のまま"
+        assert not w._filter.isEnabled(), "月別配当タブで絞り込みが有効のまま"
 
-    # 取得中は更新系を伏せる（_busy を直接立てて同期だけ確認する）
-    w._busy = True
-    w._sync_action_states()
-    assert not actions["update_market"].isEnabled(), "取得中も株価更新が押せる"
-    assert not actions["reload"].isEnabled(), "取得中も再読込が押せる"
-    # データフォルダの切替も伏せる（走行中のワーカーが旧フォルダへ書き戻す）。
-    # 「開く」は読むだけなので取得中も押せてよい。
-    assert not actions["change_data_dir"].isEnabled(), "取得中もデータフォルダを変更できる"
-    assert actions["open_data_dir"].isEnabled(), "データフォルダを開くが無効になっている"
-    w._busy = False
-    w._sync_action_states()
-    assert actions["update_market"].isEnabled(), "取得完了後に株価更新が戻らない"
+        # 取得中は更新系を伏せる（_busy を直接立てて同期だけ確認する）
+        w._busy = True
+        w._sync_action_states()
+        assert not actions["update_market"].isEnabled(), "取得中も株価更新が押せる"
+        assert not actions["reload"].isEnabled(), "取得中も再読込が押せる"
+        # データフォルダの切替も伏せる（走行中のワーカーが旧フォルダへ書き戻す）。
+        # 「開く」は読むだけなので取得中も押せてよい。
+        assert not actions["change_data_dir"].isEnabled(), "取得中もデータフォルダを変更できる"
+        assert actions["open_data_dir"].isEnabled(), "データフォルダを開くが無効になっている"
+        w._busy = False
+        w._sync_action_states()
+        assert actions["update_market"].isEnabled(), "取得完了後に株価更新が戻らない"
 
-    w._tabs.setCurrentIndex(original_tab)  # 設定（last_tab）を元へ戻す
+    finally:
+        w._busy = False
+        w._sync_action_states()
+        w._tabs.setCurrentIndex(original_tab)  # 設定（last_tab）を元へ戻す
 
 
 def _check_toolbar(w) -> None:
@@ -107,22 +188,48 @@ def _check_toolbar(w) -> None:
     primary_button = w._toolbar.widgetForAction(w._actions["update_market"])
     assert primary_button is not None and primary_button.objectName() == "primaryAction"
 
-    # 最小幅でも絞り込みが拡張メニューへ飛ばず画面に残ること
-    # （1段に詰め込むと狭い幅であふれ、右端の絞り込みが消える回帰があった）。
-    # isVisible() の判定には実際のレイアウトが要るのでここだけ show() する
-    # （QT_QPA_PLATFORM=offscreen なら画面には出ない）。最後に hide() で戻す。
+    # 絞り込みはツールバーではなくタブ見出しの右端（コーナー）に置く。2段目の
+    # ツールバーに置いていた頃は、利回りコンボを足した時点で最小幅 900px に
+    # 収まらなくなり（sizeHint 1131px）、絞り込みが拡張メニューへ消えていた。
+    corner = w._tabs.cornerWidget(Qt.Corner.TopRightCorner)
+    assert corner is not None and corner.isAncestorOf(w._filter), (
+        "絞り込みがタブのコーナーに無い"
+    )
+    for bar in (w._toolbar, w._view_toolbar):
+        assert not bar.isAncestorOf(w._filter), "絞り込みがツールバーへ戻っている"
+
+    # あふれの検知は拡張ボタン（»）の可視性で見る。個々のボタンの isVisible だと、
+    # 見ていない項目（1段目右端の「分割を反映」等）があふれても気付けない。
+    # 実レイアウトが要るのでここだけ show() する（offscreen なら画面には出ない）。
+    combos = (w._mode_combo, w._withdrawal_combo, w._benefit_combo, w._yield_scope_combo)
     original = w.size()
     w.show()
-    for width in (w.minimumWidth(), 1100, 1536):
-        w.resize(width, max(620, w.minimumHeight()))
+    try:
+        for width in (w.minimumWidth(), 1024, 1100, 1536):
+            w.resize(width, max(620, w.minimumHeight()))
+            QApplication.processEvents()
+            for bar in (w._toolbar, w._view_toolbar):
+                ext = bar.findChild(QToolButton, "qt_toolbar_ext_button")
+                assert ext is None or not ext.isVisible(), (
+                    f"幅 {width}px で {bar.objectName()} があふれている "
+                    f"(sizeHint {bar.sizeHint().width()}px > 幅 {bar.width()}px)"
+                )
+            assert all(c.isVisible() for c in combos), f"幅 {width}px でコンボが消えている"
+            assert w._filter.isVisible(), f"幅 {width}px で絞り込みが消えている"
+            # コーナーに幅を取られてタブ見出しが縮む（スクロール矢印が出てタブが
+            # 隠れる）のは、絞り込みを移したことで起こり得る別の回帰。
+            tab_bar = w._tabs.tabBar()
+            assert tab_bar.width() >= tab_bar.sizeHint().width(), (
+                f"幅 {width}px でタブ見出しが縮んでいる "
+                f"({tab_bar.width()}px < {tab_bar.sizeHint().width()}px)"
+            )
+            assert corner.x() > tab_bar.geometry().right(), (
+                f"幅 {width}px で絞り込みがタブ見出しに重なっている"
+            )
+    finally:
+        w.resize(original)
+        w.hide()
         QApplication.processEvents()
-        assert w._filter.isVisible(), f"幅 {width}px で絞り込みが消えている"
-        assert w._toolbar.widgetForAction(w._actions["new"]).isVisible(), (
-            f"幅 {width}px で新規登録ボタンが消えている"
-        )
-    w.resize(original)
-    w.hide()
-    QApplication.processEvents()
 
     # ドロップダウンが現在のモードを示していること
     assert w._mode_combo.currentData() == w.dividend_mode
@@ -136,10 +243,13 @@ def _check_toolbar(w) -> None:
     )
     # ショートカット経由で切り替えてもドロップダウンが追随すること
     before = w.dividend_mode
-    w.action_toggle_mode()
-    assert w._mode_combo.currentData() == w.dividend_mode != before
-    w.action_toggle_mode()  # 元へ戻す（設定を汚さない）
+    try:
+        w.action_toggle_mode()
+        assert w._mode_combo.currentData() == w.dividend_mode != before
+    finally:
+        w._set_dividend_mode(before)  # 元へ戻す（設定を汚さない）
     assert w.dividend_mode == before
+    assert w._mode_combo.currentData() == before
 
 
 def _check_kpi_cards(w) -> None:
@@ -155,39 +265,45 @@ def _check_kpi_cards(w) -> None:
     w.show()
     QApplication.processEvents()
 
-    row1_y = {title: w._cards[title].y() for title in expected_row1}
-    row2_y = {title: w._cards[title].y() for title in expected_row2}
-    assert len(set(row1_y.values())) == 1, (
-        f"1行目のカードが同じ行に並んでいない: {row1_y}"
-    )
-    assert len(set(row2_y.values())) == 1, (
-        f"2行目のカードが同じ行に並んでいない: {row2_y}"
-    )
-    y1 = next(iter(row1_y.values()))
-    y2 = next(iter(row2_y.values()))
-    assert y1 < y2, (
-        f"「損益率」(1行目, y={y1}) が「合計」(2行目, y={y2}) より下に来ている"
-    )
+    try:
+        row1_y = {title: w._cards[title].y() for title in expected_row1}
+        row2_y = {title: w._cards[title].y() for title in expected_row2}
+        assert len(set(row1_y.values())) == 1, (
+            f"1行目のカードが同じ行に並んでいない: {row1_y}"
+        )
+        assert len(set(row2_y.values())) == 1, (
+            f"2行目のカードが同じ行に並んでいない: {row2_y}"
+        )
+        y1 = next(iter(row1_y.values()))
+        y2 = next(iter(row2_y.values()))
+        assert y1 < y2, (
+            f"「損益率」(1行目, y={y1}) が「合計」(2行目, y={y2}) より下に来ている"
+        )
 
-    w.resize(original)
-    w.hide()
-    QApplication.processEvents()
+    finally:
+        w.resize(original)
+        w.hide()
+        QApplication.processEvents()
 
 
 def _check_inactive_toggle(w) -> None:
     """無効銘柄トグルが表示行数とチェック状態へ反映されること。"""
     before_state = w.show_inactive
     before_rows = w._price_proxy.rowCount()
-    w.action_toggle_inactive()
-    assert w.show_inactive is not before_state, "トグルで状態が変わらない"
-    assert w._actions["toggle_inactive"].isChecked() is w.show_inactive
-    after_rows = w._price_proxy.rowCount()
-    if w.show_inactive:
-        assert after_rows >= before_rows, "表示にしたのに行が減った"
-    else:
-        assert after_rows <= before_rows, "非表示にしたのに行が増えた"
-    w.action_toggle_inactive()  # 元へ戻す（設定を汚さない）
-    assert w.show_inactive is before_state
+    try:
+        w.action_toggle_inactive()
+        assert w.show_inactive is not before_state, "トグルで状態が変わらない"
+        assert w._actions["toggle_inactive"].isChecked() is w.show_inactive
+        after_rows = w._price_proxy.rowCount()
+        if w.show_inactive:
+            assert after_rows >= before_rows, "表示にしたのに行が減った"
+        else:
+            assert after_rows <= before_rows, "非表示にしたのに行が増えた"
+        w.action_toggle_inactive()  # 元へ戻す（設定を汚さない）
+        assert w.show_inactive is before_state
+    finally:
+        if w.show_inactive is not before_state:
+            w.action_toggle_inactive()  # 元へ戻す（設定を汚さない）
 
 
 def _check_theme_toggle(w) -> None:
@@ -202,20 +318,24 @@ def _check_theme_toggle(w) -> None:
     original = w.theme_name
     other = next(t for t in theme.THEMES if t != original)
 
-    w.action_set_theme(other)
-    assert w.theme_name == other and theme.CURRENT_THEME == other
-    assert w._actions[f"theme_{other}"].isChecked(), "切替後のテーマにチェックが付かない"
-    assert not w._actions[f"theme_{original}"].isChecked(), "旧テーマのチェックが残っている"
-    assert theme.PALETTES[other]["BG_WINDOW"] in w.styleSheet(), "QSS が切り替わっていない"
-    # 描画時に theme を読んでいるか（値 import していないか）の突合
-    assert widgets.profit_text_qcolor(1.0).name() == theme.PALETTES[other]["PROFIT_UP"]
-    assert gui.asset_trend_series()[0][2].name() == theme.PALETTES[other]["SERIES_VALUE"]
-    assert gui.monthly_series()[0][2].name() == theme.PALETTES[other]["SERIES_DIVIDEND"]
+    try:
+        w.action_set_theme(other)
+        assert w.theme_name == other and theme.CURRENT_THEME == other
+        assert w._actions[f"theme_{other}"].isChecked(), "切替後のテーマにチェックが付かない"
+        assert not w._actions[f"theme_{original}"].isChecked(), "旧テーマのチェックが残っている"
+        assert theme.PALETTES[other]["BG_WINDOW"] in w.styleSheet(), "QSS が切り替わっていない"
+        # 描画時に theme を読んでいるか（値 import していないか）の突合
+        assert widgets.profit_text_qcolor(1.0).name() == theme.PALETTES[other]["PROFIT_UP"]
+        assert gui.asset_trend_series()[0][2].name() == theme.PALETTES[other]["SERIES_VALUE"]
+        assert gui.monthly_series()[0][2].name() == theme.PALETTES[other]["SERIES_DIVIDEND"]
 
-    w.action_set_theme(original)  # 設定（theme）を元へ戻す
-    assert w.theme_name == original
-    assert theme.PALETTES[original]["BG_WINDOW"] in w.styleSheet()
-    assert widgets.profit_text_qcolor(-1.0).name() == theme.PALETTES[original]["PROFIT_DOWN"]
+        w.action_set_theme(original)  # 設定（theme）を元へ戻す
+        assert w.theme_name == original
+        assert theme.PALETTES[original]["BG_WINDOW"] in w.styleSheet()
+        assert widgets.profit_text_qcolor(-1.0).name() == theme.PALETTES[original]["PROFIT_DOWN"]
+    finally:
+        if w.theme_name != original:
+            w.action_set_theme(original)  # 設定（theme）を元へ戻す
 
 
 def _check_fund_share_unit(w) -> None:
@@ -236,54 +356,58 @@ def _check_fund_share_unit(w) -> None:
     )
     row = {"asset_type": "fund", "shares": 206.7284, "active": True}
 
-    w.action_set_fund_share_unit("per1")
-    assert w.fund_share_unit == "per1"
-    assert w._actions["fund_unit_per1"].isChecked()
-    assert not w._actions["fund_unit_per10k"].isChecked()
-    # 表示（セル・ヘッダ・並び替えの生値）が 1口単位になること
-    assert gui._format_cell(row, "shares", "per1")[0] == "2,067,284.00"
-    assert gui.cell_sort_value(row, "shares", "per1") == 2_067_284.0
-    label = FUND_SHARE_UNIT_COLUMN_LABELS["per1"]
-    assert (label, "shares") in w._with_shares_label(gui.PRICE_COLUMNS)
-    header = w._price_view.model().headerData(
-        [k for _, k in gui.PRICE_COLUMNS].index("shares"), Qt.Orientation.Horizontal
-    )
-    assert header == label, f"株数列のヘッダが単位に追随しない: {header!r}"
-    # 株式は単位設定の影響を受けない
-    stock_row = {"asset_type": "stock", "shares": 100.0, "active": True}
-    assert gui._format_cell(stock_row, "shares", "per1")[0] == "100.00"
+    try:
+        w.action_set_fund_share_unit("per1")
+        assert w.fund_share_unit == "per1"
+        assert w._actions["fund_unit_per1"].isChecked()
+        assert not w._actions["fund_unit_per10k"].isChecked()
+        # 表示（セル・ヘッダ・並び替えの生値）が 1口単位になること
+        assert gui._format_cell(row, "shares", "per1")[0] == "2,067,284.00"
+        assert gui.cell_sort_value(row, "shares", "per1") == 2_067_284.0
+        label = FUND_SHARE_UNIT_COLUMN_LABELS["per1"]
+        assert (label, "shares") in w._with_shares_label(gui.PRICE_COLUMNS)
+        header = w._price_view.model().headerData(
+            [k for _, k in gui.PRICE_COLUMNS].index("shares"), Qt.Orientation.Horizontal
+        )
+        assert header == label, f"株数列のヘッダが単位に追随しない: {header!r}"
+        # 株式は単位設定の影響を受けない
+        stock_row = {"asset_type": "stock", "shares": 100.0, "active": True}
+        assert gui._format_cell(stock_row, "shares", "per1")[0] == "100.00"
 
-    # 入力欄も 1口単位。開いて保存しただけで保存値が変わらないこと（往復が恒等）
-    dlg = EditHoldingDialog(fund, fund_share_unit="per1")
-    assert dlg._shares.text() == "2067284", dlg._shares.text()
-    dlg._on_save()
-    assert dlg.result_holding is not None
-    assert dlg.result_holding.shares == 206.7284, dlg.result_holding.shares
+        # 入力欄も 1口単位。開いて保存しただけで保存値が変わらないこと（往復が恒等）
+        dlg = EditHoldingDialog(fund, fund_share_unit="per1")
+        assert dlg._shares.text() == "2067284", dlg._shares.text()
+        dlg._on_save()
+        assert dlg.result_holding is not None
+        assert dlg.result_holding.shares == 206.7284, dlg.result_holding.shares
 
-    # 万口単位でも同様（既定モード）
-    w.action_set_fund_share_unit("per10k")
-    assert gui._format_cell(row, "shares", "per10k")[0] == "206.73"
-    dlg2 = EditHoldingDialog(
-        _holding(symbol="JP90C000H1T1", asset_type="fund", shares=206.7284),
-        fund_share_unit="per10k",
-    )
-    assert dlg2._shares.text() == "206.7284"
-    dlg2._on_save()
-    assert dlg2.result_holding is not None
-    assert dlg2.result_holding.shares == 206.7284
+        # 万口単位でも同様（既定モード）
+        w.action_set_fund_share_unit("per10k")
+        assert gui._format_cell(row, "shares", "per10k")[0] == "206.73"
+        dlg2 = EditHoldingDialog(
+            _holding(symbol="JP90C000H1T1", asset_type="fund", shares=206.7284),
+            fund_share_unit="per10k",
+        )
+        assert dlg2._shares.text() == "206.7284"
+        dlg2._on_save()
+        assert dlg2.result_holding is not None
+        assert dlg2.result_holding.shares == 206.7284
 
-    # 新規登録は「保存時点の資産種別」で単位を解釈する（株式→投信の切替に追随）
-    nd = NewHoldingDialog(_holding(symbol="JP90C000H1T1", name="投信"), fund_share_unit="per1")
-    nd._shares.setText("2,067,284")
-    nd._asset_type.setCurrentIndex(nd._asset_type.findData("fund"))
-    assert nd._shares.text() == "2,067,284", "種別を変えたら入力値が書き換えられた"
-    assert "口数" in nd._shares_label_widget.text(), nd._shares_label_widget.text()
-    nd._on_save()
-    assert nd.result_holding is not None
-    assert nd.result_holding.shares == 206.7284, nd.result_holding.shares
+        # 新規登録は「保存時点の資産種別」で単位を解釈する（株式→投信の切替に追随）
+        nd = NewHoldingDialog(_holding(symbol="JP90C000H1T1", name="投信"), fund_share_unit="per1")
+        nd._shares.setText("2,067,284")
+        nd._asset_type.setCurrentIndex(nd._asset_type.findData("fund"))
+        assert nd._shares.text() == "2,067,284", "種別を変えたら入力値が書き換えられた"
+        assert "口数" in nd._shares_label_widget.text(), nd._shares_label_widget.text()
+        nd._on_save()
+        assert nd.result_holding is not None
+        assert nd.result_holding.shares == 206.7284, nd.result_holding.shares
 
-    w.action_set_fund_share_unit(original)  # 設定（fund_share_unit）を元へ戻す
-    assert w.fund_share_unit == original
+        w.action_set_fund_share_unit(original)  # 設定（fund_share_unit）を元へ戻す
+        assert w.fund_share_unit == original
+    finally:
+        if w.fund_share_unit != original:
+            w.action_set_fund_share_unit(original)  # 設定（fund_share_unit）を元へ戻す
 
 
 def _check_yield_scope(w) -> None:
@@ -315,115 +439,120 @@ def _check_yield_scope(w) -> None:
         i for i, (label, _) in enumerate(gui.INCOME_COLUMNS) if label == "簿価利回り"
     )
 
-    for benefit in ("without", "with"):
-        w._on_income_benefit(benefit)
-        with_benefit = benefit == "with"
-        benefit_suffix = YIELD_BENEFIT_SUFFIX if with_benefit else ""
-        for scope in YIELD_SCOPES:
-            w._on_yield_scope(scope)
-            assert w.yield_scope == scope
-            w._sync_mode_controls()
-            assert w._yield_scope_combo.currentData() == scope, (
-                "ドロップダウンが現在の集計対象を示していない"
-            )
-            suffix = f"{benefit_suffix}{YIELD_SCOPE_SUFFIX[scope]}"
-            assert w._cards["簿価利回り"]._title.text() == f"簿価利回り{suffix}", (
-                f"カード名が定義を示していない: {w._cards['簿価利回り']._title.text()}"
-            )
-            assert w._cards["時価利回り"]._title.text() == f"時価利回り{suffix}"
-            yoc, yov = summary_yields(summary, scope, with_benefit)
-            assert w._cards["簿価利回り"]._value.text() == fmt_percent(yoc, 2), (
-                f"{scope}/{benefit} の簿価利回りが Summary と食い違う"
-            )
-            assert w._cards["時価利回り"]._value.text() == fmt_percent(yov, 2)
-            assert w._price_proxy.rowCount() == before_rows, (
-                "利回りの集計対象で表示行が増減している（効くのは集計だけのはず）"
-            )
+    try:
+        for benefit in ("without", "with"):
+            w._on_income_benefit(benefit)
+            with_benefit = benefit == "with"
+            benefit_suffix = YIELD_BENEFIT_SUFFIX if with_benefit else ""
+            for scope in YIELD_SCOPES:
+                w._on_yield_scope(scope)
+                assert w.yield_scope == scope
+                w._sync_mode_controls()
+                assert w._yield_scope_combo.currentData() == scope, (
+                    "ドロップダウンが現在の集計対象を示していない"
+                )
+                suffix = f"{benefit_suffix}{YIELD_SCOPE_SUFFIX[scope]}"
+                assert w._cards["簿価利回り"]._title.text() == f"簿価利回り{suffix}", (
+                    f"カード名が定義を示していない: {w._cards['簿価利回り']._title.text()}"
+                )
+                assert w._cards["時価利回り"]._title.text() == f"時価利回り{suffix}"
+                yoc, yov = summary_yields(summary, scope, with_benefit)
+                assert w._cards["簿価利回り"]._value.text() == fmt_percent(yoc, 2), (
+                    f"{scope}/{benefit} の簿価利回りが Summary と食い違う"
+                )
+                assert w._cards["時価利回り"]._value.text() == fmt_percent(yov, 2)
+                assert w._price_proxy.rowCount() == before_rows, (
+                    "利回りの集計対象で表示行が増減している（効くのは集計だけのはず）"
+                )
 
-        # 表の利回り列も同じ定義へ差し替わること（KPI だけ切り替えると、同じ名前の
-        # 「簿価利回り」がタブによって別の数字になる）。
-        assert (
-            header.headerData(yield_col, Qt.Orientation.Horizontal)
-            == f"簿価利回り{benefit_suffix}"
-        ), "表のヘッダが優待の有無を示していない"
-        if rows:
-            key = row_yield_keys(with_benefit)[0]
-            expected, _ = gui._format_cell(rows[0], key)
-            actual = w._income_model.item(0, yield_col).text()
-            assert actual == expected, (
-                f"表の簿価利回りが {key} と食い違う: {actual} != {expected}"
-            )
+            # 表の利回り列も同じ定義へ差し替わること（KPI だけ切り替えると、同じ名前の
+            # 「簿価利回り」がタブによって別の数字になる）。
+            assert (
+                header.headerData(yield_col, Qt.Orientation.Horizontal)
+                == f"簿価利回り{benefit_suffix}"
+            ), "表のヘッダが優待の有無を示していない"
+            if rows:
+                key = row_yield_keys(with_benefit)[0]
+                expected, _ = gui._format_cell(rows[0], key)
+                actual = w._income_model.item(0, yield_col).text()
+                assert actual == expected, (
+                    f"表の簿価利回りが {key} と食い違う: {actual} != {expected}"
+                )
 
-    # 「含まない」で列幅が確定した直後に「含む」へ切り替える起動時の並びを再現する。
-    # 保存済みの列幅（前回終了時が「含む」なら既に広い）に結果が左右されないよう、
-    # 短いヘッダに合わせた幅を明示的に当ててから切り替える。
-    w._on_income_benefit("without")
-    income_header = w._income_view.horizontalHeader()
-    income_header.resizeSection(yield_col, income_header.sectionSizeHint(yield_col))
-    narrow_width = income_header.sectionSize(yield_col)
-    w._on_income_benefit("with")
-    assert income_header.sectionSize(yield_col) > narrow_width, (
-        "「＋優待」でヘッダが伸びたのに利回り列の幅が確定時のまま "
-        f"({narrow_width}px)。接尾辞が切れて定義が読めない"
-    )
-    assert income_header.sectionSize(yield_col) >= income_header.sectionSizeHint(
-        yield_col
-    ), "広げたのにヘッダが収まっていない"
-
-    # 逆に、手で広げた幅を切替で縮めないこと（内容幅ちょうどに合わせる実装だと痩せる）。
-    widened = income_header.sectionSize(yield_col) + 80
-    income_header.resizeSection(yield_col, widened)
-    w._on_income_benefit("without")
-    assert income_header.sectionSize(yield_col) == widened, (
-        "優待を切り替えただけで手動調整した利回り列の幅が巻き戻っている"
-    )
-    w._on_income_benefit("with")
-    assert income_header.sectionSize(yield_col) == widened
-
-    # 接尾辞2つが付くとカード名は素の「簿価利回り」の3倍近い長さになる。KPI カードは
-    # 等分割（addWidget(card, 1)）なので幅次第で切れる——実測でウィンドウ最小幅
-    # 900px では収まらず 1024px 以上で収まる。ここでは通常使う幅で切れないこと、
-    # 2行目が折り返さないこと、切れる幅でも定義をツールチップで読めることを見る。
-    # 一番長くなる組（優待込み × 投信除く）で確かめる。
-    w._on_income_benefit("with")
-    w._on_yield_scope("ex_fund")
-    original_size = w.size()
-    w.show()
-    for width in (1100, 1536):
-        w.resize(width, max(620, w.minimumHeight()))
-        QApplication.processEvents()
-        row2 = ("年間配当", "優待", "合計", "簿価利回り", "時価利回り")
-        ys = {title: w._cards[title].y() for title in row2}
-        assert len(set(ys.values())) == 1, (
-            f"幅 {width}px・接尾辞付きの名前で2行目が折り返した: {ys}"
+        # 「含まない」で列幅が確定した直後に「含む」へ切り替える起動時の並びを再現する。
+        # 保存済みの列幅（前回終了時が「含む」なら既に広い）に結果が左右されないよう、
+        # 短いヘッダに合わせた幅を明示的に当ててから切り替える。
+        w._on_income_benefit("without")
+        income_header = w._income_view.horizontalHeader()
+        income_header.resizeSection(yield_col, income_header.sectionSizeHint(yield_col))
+        narrow_width = income_header.sectionSize(yield_col)
+        w._on_income_benefit("with")
+        assert income_header.sectionSize(yield_col) > narrow_width, (
+            "「＋優待」でヘッダが伸びたのに利回り列の幅が確定時のまま "
+            f"({narrow_width}px)。接尾辞が切れて定義が読めない"
         )
+        assert income_header.sectionSize(yield_col) >= income_header.sectionSizeHint(
+            yield_col
+        ), "広げたのにヘッダが収まっていない"
+
+        # 逆に、手で広げた幅を切替で縮めないこと（内容幅ちょうどに合わせる実装だと痩せる）。
+        widened = income_header.sectionSize(yield_col) + 80
+        income_header.resizeSection(yield_col, widened)
+        w._on_income_benefit("without")
+        assert income_header.sectionSize(yield_col) == widened, (
+            "優待を切り替えただけで手動調整した利回り列の幅が巻き戻っている"
+        )
+        w._on_income_benefit("with")
+        assert income_header.sectionSize(yield_col) == widened
+
+        # 接尾辞2つが付くとカード名は素の「簿価利回り」の3倍近い長さになる。KPI カードは
+        # 等分割（addWidget(card, 1)）なので幅次第で切れる——実測でウィンドウ最小幅
+        # 900px では収まらず 1024px 以上で収まる。ここでは通常使う幅で切れないこと、
+        # 2行目が折り返さないこと、切れる幅でも定義をツールチップで読めることを見る。
+        # 一番長くなる組（優待込み × 投信除く）で確かめる。
+        w._on_income_benefit("with")
+        w._on_yield_scope("ex_fund")
+        original_size = w.size()
+        w.show()
+        for width in (1100, 1536):
+            w.resize(width, max(620, w.minimumHeight()))
+            QApplication.processEvents()
+            row2 = ("年間配当", "優待", "合計", "簿価利回り", "時価利回り")
+            ys = {title: w._cards[title].y() for title in row2}
+            assert len(set(ys.values())) == 1, (
+                f"幅 {width}px・接尾辞付きの名前で2行目が折り返した: {ys}"
+            )
+            for title in ("簿価利回り", "時価利回り"):
+                card = w._cards[title]
+                assert card.isVisible(), f"幅 {width}px で {title} カードが消えている"
+                assert card._title.sizeHint().width() <= card._title.width(), (
+                    f"幅 {width}px で {card._title.text()} がラベル幅 "
+                    f"{card._title.width()}px に収まらない"
+                )
         for title in ("簿価利回り", "時価利回り"):
-            card = w._cards[title]
-            assert card.isVisible(), f"幅 {width}px で {title} カードが消えている"
-            assert card._title.sizeHint().width() <= card._title.width(), (
-                f"幅 {width}px で {card._title.text()} がラベル幅 "
-                f"{card._title.width()}px に収まらない"
+            tip = w._cards[title].toolTip()
+            assert "配当＋優待" in tip and "投資信託を除く" in tip, (
+                f"{title} のツールチップが定義を説明していない: {tip!r}"
             )
-    for title in ("簿価利回り", "時価利回り"):
-        tip = w._cards[title].toolTip()
-        assert "配当＋優待" in tip and "投資信託を除く" in tip, (
-            f"{title} のツールチップが定義を説明していない: {tip!r}"
+        # 表のヘッダにも定義を載せる。列幅はユーザーが手で狭められるので、
+        # 幅を取り直すだけでは読めなくなる場合が残る（カードと同じ逃げ道を用意する）。
+        header_tip = w._income_model.headerData(
+            yield_col, Qt.Orientation.Horizontal, Qt.ItemDataRole.ToolTipRole
         )
-    # 表のヘッダにも定義を載せる。列幅はユーザーが手で狭められるので、
-    # 幅を取り直すだけでは読めなくなる場合が残る（カードと同じ逃げ道を用意する）。
-    header_tip = w._income_model.headerData(
-        yield_col, Qt.Orientation.Horizontal, Qt.ItemDataRole.ToolTipRole
-    )
-    assert header_tip and "配当＋優待" in header_tip, (
-        f"表のヘッダに利回りの定義が無い: {header_tip!r}"
-    )
-    w.resize(original_size)
-    w.hide()
-    QApplication.processEvents()
+        assert header_tip and "配当＋優待" in header_tip, (
+            f"表のヘッダに利回りの定義が無い: {header_tip!r}"
+        )
+        w.resize(original_size)
+        w.hide()
+        QApplication.processEvents()
 
-    w._on_yield_scope(original)  # 設定（yield_scope / income_benefit）を元へ戻す
-    w._on_income_benefit(original_benefit)
-    assert w.yield_scope == original and w.income_benefit == original_benefit
+        w._on_yield_scope(original)  # 設定（yield_scope / income_benefit）を元へ戻す
+        w._on_income_benefit(original_benefit)
+        assert w.yield_scope == original and w.income_benefit == original_benefit
+    finally:
+        w.hide()
+        w._on_yield_scope(original)  # 設定（yield_scope / income_benefit）を元へ戻す
+        w._on_income_benefit(original_benefit)
 
 
 def _check_split_flags(w) -> None:
@@ -670,36 +799,39 @@ def _check_monthly_tab(w) -> None:
     assert "推定" in w._monthly_note.text(), "推定である旨の注記が無い"
 
     original_month = w.monthly_month
-    w._monthly_bar.month_clicked.emit(3)
-    assert w.monthly_month == 3, "バークリックで対象月が切り替わらない"
-    assert w._monthly_head.text().startswith("3月の"), w._monthly_head.text()
-
-    # 並び替えの導線はヘッダクリックのみ（専用ドロップダウンは持たない）
-    assert not hasattr(w, "_on_monthly_sort"), "並び替えドロップダウンが復活している"
-    header = w._monthly_view.horizontalHeader()
-    assert header.isSortIndicatorShown(), "ヘッダに並び替えの矢印が出ない"
-    # 既定は合計列の降順。ただし優待「含まない」では合計列が伏せてあるので配当列。
-    expected_default = (
-        gui.MONTHLY_COL_TOTAL if w.income_benefit == "with"
-        else gui.MONTHLY_COL_DIVIDEND
-    )
-    assert header.sortIndicatorSection() == expected_default, (
-        f"既定の並び替え列が違う: {header.sortIndicatorSection()}"
-    )
-    assert header.sortIndicatorOrder() == Qt.SortOrder.DescendingOrder
-
-    # ヘッダで選んだ並びは月を切り替えても保たれること（再描画で既定へ戻さない）
-    w._monthly_view.sortByColumn(gui.MONTHLY_COL_DIVIDEND, Qt.SortOrder.AscendingOrder)
-    w._on_monthly_month(5)
-    assert header.sortIndicatorSection() == gui.MONTHLY_COL_DIVIDEND, (
-        "月を切り替えると並び替えが既定へ戻る"
-    )
-    assert header.sortIndicatorOrder() == Qt.SortOrder.AscendingOrder
-
     original_benefit = w.income_benefit
-    w._on_monthly_month(original_month)
-    _check_monthly_benefit_toggle(w)
-    w._on_income_benefit(original_benefit)  # 設定（income_benefit）を元へ戻す
+    try:
+        w._monthly_bar.month_clicked.emit(3)
+        assert w.monthly_month == 3, "バークリックで対象月が切り替わらない"
+        assert w._monthly_head.text().startswith("3月の"), w._monthly_head.text()
+
+        # 並び替えの導線はヘッダクリックのみ（専用ドロップダウンは持たない）
+        assert not hasattr(w, "_on_monthly_sort"), "並び替えドロップダウンが復活している"
+        header = w._monthly_view.horizontalHeader()
+        assert header.isSortIndicatorShown(), "ヘッダに並び替えの矢印が出ない"
+        # 既定は合計列の降順。ただし優待「含まない」では合計列が伏せてあるので配当列。
+        expected_default = (
+            gui.MONTHLY_COL_TOTAL if w.income_benefit == "with"
+            else gui.MONTHLY_COL_DIVIDEND
+        )
+        assert header.sortIndicatorSection() == expected_default, (
+            f"既定の並び替え列が違う: {header.sortIndicatorSection()}"
+        )
+        assert header.sortIndicatorOrder() == Qt.SortOrder.DescendingOrder
+
+        # ヘッダで選んだ並びは月を切り替えても保たれること（再描画で既定へ戻さない）
+        w._monthly_view.sortByColumn(gui.MONTHLY_COL_DIVIDEND, Qt.SortOrder.AscendingOrder)
+        w._on_monthly_month(5)
+        assert header.sortIndicatorSection() == gui.MONTHLY_COL_DIVIDEND, (
+            "月を切り替えると並び替えが既定へ戻る"
+        )
+        assert header.sortIndicatorOrder() == Qt.SortOrder.AscendingOrder
+
+        w._on_monthly_month(original_month)
+        _check_monthly_benefit_toggle(w)
+    finally:
+        w._on_monthly_month(original_month)
+        w._on_income_benefit(original_benefit)  # 設定（income_benefit）を元へ戻す
 
 
 def _check_withdrawal_trend_note(w) -> None:
@@ -710,25 +842,69 @@ def _check_withdrawal_trend_note(w) -> None:
     理由が画面に無いと「切り替えたらグラフが消えた」に見える。
     """
     original = w.withdrawal_mode
+    original_dividend = w.dividend_mode
     hist = w._history_as_dicts()
 
-    w._set_withdrawal_mode(None)
-    assert w._income_trend_note.text() == "", "取崩無しでも取崩の注記が出ている"
-    assert w._income_line._series[0][0].startswith("配当"), w._income_line._series[0][0]
+    try:
+        # 税引後では「税引前で記録」の注記が加わる（_check_net_trend_note が見る）。
+        # ここは取崩の注記だけを見たいので税引前に固定する。
+        w._set_dividend_mode("gross")
+        w._set_withdrawal_mode(None)
+        assert w._income_trend_note.text() == "", "取崩無しでも取崩の注記が出ている"
+        assert w._income_line._series[0][0].startswith("配当"), w._income_line._series[0][0]
 
-    for mode, expected_label in (("fixed", "定額取崩収入"), ("rate", "定率取崩収入")):
-        w._set_withdrawal_mode(mode)
-        assert w._income_line._series[0][0].startswith(expected_label), (
+        for mode, expected_label in (("fixed", "定額取崩収入"), ("rate", "定率取崩収入")):
+            w._set_withdrawal_mode(mode)
+            assert w._income_line._series[0][0].startswith(expected_label), (
+                w._income_line._series[0][0]
+            )
+            key = gui.INCOME_BASE_KEYS[mode]
+            covered = [r for r in hist if r.get(key) is not None]
+            if hist and covered and covered[0]["date"] != hist[0]["date"]:
+                assert covered[0]["date"] in w._income_trend_note.text(), (
+                    f"{mode} の記録開始日が注記に出ない: {w._income_trend_note.text()!r}"
+                )
+
+    finally:
+        w._set_withdrawal_mode(original)  # 設定（withdrawal_mode）を元へ戻す
+        w._set_dividend_mode(original_dividend)
+
+
+def _check_net_trend_note(w) -> None:
+    """税引後モードでは、推移が税引前の記録である旨を凡例と注記に出すこと。
+
+    履歴は表示モードに依存させないため税引前で記録している。税引後を選んだまま
+    黙って税引前の線を描くと、KPI の年間配当とグラフの右端が食い違って見える。
+    """
+    original = w.withdrawal_mode
+    original_dividend = w.dividend_mode
+    try:
+        w._set_withdrawal_mode(None)
+        w._set_dividend_mode("net")
+        assert w._income_line._series[0][0].endswith("（税引前）"), (
             w._income_line._series[0][0]
         )
-        key = gui.INCOME_BASE_KEYS[mode]
-        covered = [r for r in hist if r.get(key) is not None]
-        if hist and covered and covered[0]["date"] != hist[0]["date"]:
-            assert covered[0]["date"] in w._income_trend_note.text(), (
-                f"{mode} の記録開始日が注記に出ない: {w._income_trend_note.text()!r}"
-            )
+        assert gui.NET_TREND_NOTE in w._income_trend_note.text(), (
+            f"税引後なのに税引前で記録の注記が無い: {w._income_trend_note.text()!r}"
+        )
+        # 取崩の記録開始日の注記とは併記する（片方で上書きしない）。
+        hist = w._history_as_dicts()
+        for mode in ("fixed", "rate"):
+            w._set_withdrawal_mode(mode)
+            note = w._income_trend_note.text()
+            assert gui.NET_TREND_NOTE in note, note
+            assert w._withdrawal_coverage_note(hist, mode) in note, note
+            assert w._income_line._series[0][0].endswith("（税引前）")
 
-    w._set_withdrawal_mode(original)  # 設定（withdrawal_mode）を元へ戻す
+        w._set_withdrawal_mode(None)
+        w._set_dividend_mode("gross")
+        assert gui.NET_TREND_NOTE not in w._income_trend_note.text(), (
+            "税引前モードでも税引前の注記が残っている"
+        )
+        assert not w._income_line._series[0][0].endswith("（税引前）")
+    finally:
+        w._set_withdrawal_mode(original)  # 設定を元へ戻す
+        w._set_dividend_mode(original_dividend)
 
 
 def _check_monthly_benefit_toggle(w) -> None:
@@ -878,7 +1054,16 @@ def _check_benefit_detail() -> None:
 
 
 def main() -> None:
+    with _sandbox() as data:
+        _run_checks(data)
+    print("headless smoke: OK")
+
+
+def _run_checks(data: Path) -> None:
     w = build_window()
+    # 既定フォルダへのフォールバック（DividendWindow.__init__）でサンドボックスの
+    # 外へ出ていないこと。
+    assert gui.io_csv.DATA_DIR == data, f"データフォルダが外れた: {gui.io_csv.DATA_DIR}"
 
     # タブ・メニュー構成
     assert w._tabs.count() == 5, "タブが5つ生成されていない"
@@ -943,6 +1128,7 @@ def main() -> None:
     _check_inactive_toggle(w)
     _check_monthly_tab(w)
     _check_withdrawal_trend_note(w)
+    _check_net_trend_note(w)
     _check_theme_toggle(w)
     _check_fund_share_unit(w)
     _check_yield_scope(w)
@@ -968,8 +1154,6 @@ def main() -> None:
     _check_auto_fields_are_untouched()
     _check_month_checkboxes()
     _check_benefit_detail()
-
-    print("headless smoke: OK")
 
 
 if __name__ == "__main__":
