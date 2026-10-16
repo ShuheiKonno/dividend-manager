@@ -290,3 +290,87 @@ def axis_bounds(
         return floor, top
     # zero 基準
     return 0.0, vmax * 1.08 if vmax > 0 else 1.0
+
+
+def _ordinals_or_none(dates: list[str]) -> list[int] | None:
+    """ISO 日付列を toordinal() のリストへ変換する。1件でも解釈不能なら None。"""
+    ords: list[int] = []
+    for raw in dates:
+        iso = normalize_iso_date(raw)
+        if iso is None:
+            return None
+        ords.append(date.fromisoformat(iso).toordinal())
+    return ords
+
+
+def date_x_positions(dates: list[str], left: float, width: float) -> list[float]:
+    """推移グラフの各レコード日付を、経過日数（ordinal）に比例した X 座標へ変換する。
+
+    レコード件数で等間隔に並べると、月1回しか更新しない期間と毎日更新した期間が
+    同じ横幅になり時間軸が歪むため、実日付の差分で按分する。単一点または全点同日は
+    中央に置く。日付が解釈不能な要素が含まれる場合のみインデックス等間隔へ退避する。
+    """
+    n = len(dates)
+    if n == 0:
+        return []
+    if n == 1 or width <= 0:
+        return [left + width / 2.0] * n
+    ords = _ordinals_or_none(dates)
+    if ords is None:
+        return [left + width * i / (n - 1) for i in range(n)]
+    min_ord = min(ords)
+    span = max(ords) - min_ord
+    if span <= 0:
+        return [left + width / 2.0] * n
+    return [left + width * (o - min_ord) / span for o in ords]
+
+
+def nearest_x_index(
+    xs: list[float],
+    px: float,
+    left: float,
+    right: float,
+    margin: float = 12.0,
+) -> int | None:
+    """描画と同じ X 座標配列 xs から、マウスの px に最も近い点のインデックスを返す。
+
+    プロット領域の左右 margin 外なら None。同距離なら先のインデックスを返す。
+    """
+    if not xs or px < left - margin or px > right + margin:
+        return None
+    return min(range(len(xs)), key=lambda i: abs(xs[i] - px))
+
+
+def date_axis_ticks(
+    dates: list[str], left: float, width: float, max_ticks: int = 5
+) -> list[tuple[float, str]]:
+    """推移グラフ X 軸の目盛 `(x座標, "YYYY-MM-DD")` を日数基準の等間隔で返す。
+
+    データ点が偏っていても目盛は期間の両端を基準に暦日で等分し、date_x_positions と
+    同じ比率で配置する。期間が max_ticks 未満の日数しか無い場合は日数を上限にして
+    同じ日付ラベルの重複を防ぐ。
+    """
+    n = len(dates)
+    if n == 0 or max_ticks <= 0:
+        return []
+    ords = _ordinals_or_none(dates)
+    if ords is None:
+        count = min(max_ticks, n)
+        xs = date_x_positions(dates, left, width)
+        if count == 1:
+            return [(xs[0], str(dates[0]))]
+        indices = [round(j * (n - 1) / (count - 1)) for j in range(count)]
+        return [(xs[idx], str(dates[idx])) for idx in indices]
+    min_ord = min(ords)
+    max_ord = max(ords)
+    span = max_ord - min_ord
+    if span <= 0 or max_ticks == 1 or width <= 0:
+        return [(left + width / 2.0, date.fromordinal(min_ord).isoformat())]
+    count = min(max_ticks, span + 1)
+    ticks: list[tuple[float, str]] = []
+    for j in range(count):
+        ord_j = round(min_ord + j * span / (count - 1))
+        x_j = left + width * (ord_j - min_ord) / span
+        ticks.append((x_j, date.fromordinal(ord_j).isoformat()))
+    return ticks
+
