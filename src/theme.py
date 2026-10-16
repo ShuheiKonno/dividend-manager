@@ -361,7 +361,7 @@ QToolBar QToolButton:focus {{ border-color: {BORDER_FOCUS}; outline: none; }}
 QToolBar QToolButton#dangerAction:hover {{
     border-color: {ERROR}; color: {TEXT_STATUS_ERROR};
 }}
-/* 最頻出の操作（株価・配当を取得）はアクセント塗りで見つけやすくする。 */
+/* 最頻出の操作（株価・配当・為替を取得）はアクセント塗りで見つけやすくする。 */
 QToolBar QToolButton#primaryAction {{
     background: {ACCENT}; color: {ACCENT_TEXT}; border: 1px solid {ACCENT};
 }}
@@ -378,7 +378,7 @@ QToolBar QToolButton#primaryAction:disabled {{
 }}
 /* 既定の BORDER_FOCUS は青塗りの上では青on青でほぼ見えないため淡色を使う。 */
 QToolBar QToolButton#primaryAction:focus {{ border-color: {ACCENT_FOCUS}; outline: none; }}
-QToolBar QLabel {{ color: {TEXT_SECONDARY}; padding: 0px 2px; }}
+QToolBar QLabel, #filterBox QLabel {{ color: {TEXT_SECONDARY}; padding: 0px 2px; }}
 
 /* ---- ステータスバー・プログレスバー・ツールチップ ---- */
 QStatusBar {{ background: {BG_INPUT}; color: {TEXT_STATUS}; }}

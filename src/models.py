@@ -55,6 +55,7 @@ MARKET_DATA_FIELDS = [
     "fetched_at",
     "div_ex_month_ratios",
     "recent_splits",
+    "price_fetched_at",
 ]
 
 FX_FIELDS = [
@@ -197,6 +198,8 @@ class MarketData:
     # 取得結果のキャッシュなので観測値をそのまま持ち、未反映かどうかの判定は保有行側
     # （Holding.split_applied_through）と突き合わせる splits.pending_splits が担う。
     recent_splits: list[tuple[str, float]] = field(default_factory=list)
+    # 株価の取得成功日時。配当等の部分失敗や、休日の終値日付とは独立して鮮度を判定する。
+    price_fetched_at: str | None = None
 
     @classmethod
     def from_dict(cls, row: dict[str, Any]) -> "MarketData":
@@ -212,6 +215,7 @@ class MarketData:
             fetched_at=safe_str(row.get("fetched_at")),
             div_ex_month_ratios=parse_month_ratios(row.get("div_ex_month_ratios")),
             recent_splits=parse_splits(row.get("recent_splits")),
+            price_fetched_at=safe_str(row.get("price_fetched_at")),
         )
 
     def to_dict(self) -> dict[str, Any]:
@@ -228,6 +232,7 @@ class MarketData:
             "fetched_at": self.fetched_at or "",
             "div_ex_month_ratios": format_month_ratios(self.div_ex_month_ratios),
             "recent_splits": format_splits(self.recent_splits),
+            "price_fetched_at": self.price_fetched_at or "",
         }
 
 

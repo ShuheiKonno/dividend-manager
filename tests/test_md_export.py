@@ -262,6 +262,17 @@ def test_yield_scope_appears_in_conditions():
     assert "投信除く" in conditions
 
 
+def test_fx_fetched_at_appears_in_conditions():
+    """為替の取得日時は株価と別に書く（為替だけ古いことがある）。"""
+    conditions = "\n".join(_table_lines(
+        _build([_row()], fx_fetched_at="2026-08-01T15:00:00+09:00"), "出力条件"
+    ))
+    assert "| USDJPYの取得日時 | 2026-08-01T15:00:00+09:00 |" in conditions
+    # 未取得は空欄（N/A を出さない方針に揃える）
+    unset = "\n".join(_table_lines(_build([_row()]), "出力条件"))
+    assert "| USDJPYの取得日時 |  |" in unset
+
+
 def test_yield_scope_switches_summary_values_and_labels():
     summary = "\n".join(_table_lines(_build([_row()]), "サマリー"))
     assert "| 簿価利回り＋優待(%) | 6.00 |" in summary

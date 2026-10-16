@@ -7,7 +7,7 @@
 from __future__ import annotations
 
 import sys
-from dataclasses import replace
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Optional
 
@@ -47,7 +47,6 @@ from PySide6.QtWidgets import (
     QComboBox,
     QMenu,
     QToolBar,
-    QSizePolicy,
 )
 
 # 検証ヘルパーはダイアログと共に dialogs.py へ移設した。tests/test_gui_helpers.py が
@@ -84,13 +83,14 @@ from .io_csv import (
     read_holdings_csv,
 )
 from .md_export import build_holdings_markdown
-from .models import Holding, HistoryRecord
+from .models import FXRate, Holding, HistoryRecord
 from .calc import (
     DEFAULT_FUND_SHARE_UNIT,
     FUND_SHARE_UNITS,
     FUND_SHARE_UNIT_COLUMN_LABELS,
     FUND_SHARE_UNIT_LABELS,
     compute_rows,
+    latest_fx,
     monthly_breakdown,
     to_display_shares,
     summary_yields,
@@ -174,6 +174,8 @@ ASSET_TYPE_LABELS = {"stock": "株式", "fund": "投信"}
 WITHDRAWAL_CHOICES = [("none", "配当"), ("fixed", "定額取崩"), ("rate", "定率取崩")]
 # 収入モード → 表示ラベル（情報バー・KPI タイトル用）
 WITHDRAWAL_LABELS = {None: "配当", "fixed": "定額取崩", "rate": "定率取崩"}
+# 税引後モードで配当推移グラフの操作行へ出す注記（履歴は税引前で記録している）
+NET_TREND_NOTE = "※推移は税引前で記録しています"
 # チャートの系列色はテーマで変わるため、モジュール定数に QColor を焼き込まず
 # 描画のたびに theme から作る（定数にすると切替後も旧テーマの色で描かれる）。
 
@@ -354,6 +356,29 @@ def _cell_text_and_color(
     return str(val or ""), None
 
 
+def _format_import_holdings_preview(
+    holdings: list[Holding], max_rows: int = 5
+) -> str:
+    """保有 CSV 取込の確認ダイアログに出す先頭数行のプレビュー文字列を組む。
+
+    投信の口数単位（fund_share_unit）の変換は掛けず CSV 保存値のまま表示する。
+    """
+    lines: list[str] = []
+    for h in holdings[:max_rows]:
+        name = h.name or "（名称なし）"
+        shares = f"{h.shares:,.4f}".rstrip("0").rstrip(".") or "0"
+        book = h.shares * h.avg_cost
+        if h.currency == "USD":
+            book_str = f"${fmt_number(book, 2)}"
+        else:
+            book_str = f"¥{fmt_number(book, 0)}"
+        lines.append(f"・{h.symbol} {name}: 株数 {shares} / 簿価 {book_str}")
+    rest = len(holdings) - len(lines)
+    if rest > 0:
+        lines.append(f"…ほか {rest} 件")
+    return "\n".join(lines)
+
+
 class NumericSortProxy(QSortFilterProxyModel):
     """数値列は Qt.UserRole の生値で比較（桁区切り文字列の誤ソート回避）。
 
@@ -397,18 +422,37 @@ class NumericSortProxy(QSortFilterProxyModel):
 
 # ---- バックグラウンド取得ワーカー ----
 
+@dataclass
+class MarketUpdate:
+    """F5 の取得結果。株価・配当に加え、USD 銘柄があれば同時に取った為替を載せる。
+
+    為替だけ Ctrl+U の別操作にしていた頃は、F5 で株価だけが新しくなり、円換算は
+    いつのものか分からない古いレートのまま（画面にも出ない）だった。為替の失敗は
+    株価の成功を止めず fx_error に積むだけにする。
+    """
+
+    market: object  # market_data.MarketFetchResult（遅延 import のため型は書かない）
+    fx: FXRate | None = None
+    fx_error: str | None = None
+
+
 class MarketWorker(QObject):
     progress = Signal(int, int, str)
     finished = Signal(object)
     error = Signal(str)
 
-    def __init__(self, holdings: list[Holding], market_map: dict) -> None:
+    def __init__(
+        self, holdings: list[Holding], market_map: dict, fetch_fx: bool = False
+    ) -> None:
         super().__init__()
         self._holdings = holdings
         self._market_map = market_map
+        # USD 銘柄の有無はメインスレッドで決めて渡す（ワーカーから window の
+        # 状態を読まない）。
+        self._fetch_fx = fetch_fx
 
     def run(self) -> None:
-        from .market_data import fetch_market_data
+        from .market_data import fetch_market_data, fetch_usdjpy
         try:
             result = fetch_market_data(
                 self._holdings,
@@ -419,7 +463,14 @@ class MarketWorker(QObject):
         except Exception as exc:  # noqa: BLE001 — UI に通知して継続
             self.error.emit(f"更新に失敗しました: {exc}")
             return
-        self.finished.emit(result)
+        update = MarketUpdate(market=result)
+        if self._fetch_fx:
+            self.progress.emit(0, 0, "USDJPYレートを取得中...")
+            try:
+                update.fx = fetch_usdjpy()
+            except Exception as exc:  # noqa: BLE001 — 株価の結果は捨てない
+                update.fx_error = f"USDJPY更新に失敗しました: {exc}"
+        self.finished.emit(update)
 
 
 class FxWorker(QObject):
@@ -482,6 +533,7 @@ class DividendWindow(QMainWindow):
         self._monthly_sorted_once: bool = False
         self._monthly_label: str = "年間配当"
         self._monthly_columns_sized: bool = False
+        self._monthly_benefit_detail_sized: bool = False
         self._initial_tab: int = _saved.get("last_tab", 0)
         # テーブル列幅: 保存値があれば初回描画で適用、無ければ内容に合わせて自動調整。
         self._saved_column_widths: dict[str, list[int]] = {
@@ -492,6 +544,7 @@ class DividendWindow(QMainWindow):
         self.holdings: list[Holding] = []
         self.market_data_map: dict = {}
         self.fx_rate: float | None = None
+        self.fx_fetched_at: str | None = None
         self.market_source: str | None = None
         self.market_fetched_at: str | None = None
         self.history: list[HistoryRecord] = []
@@ -619,6 +672,7 @@ class DividendWindow(QMainWindow):
         root.addWidget(kpi_bar)
 
         self._tabs = QTabWidget()
+        self._tabs.setCornerWidget(self._build_filter_box(), Qt.Corner.TopRightCorner)
         # 評価額タブ（左=構成グラフ[ヒートマップ⇔円グラフ] / 右=評価額推移）
         self._treemap = TreemapWidget()
         self._piechart = PieChartWidget()
@@ -675,8 +729,8 @@ class DividendWindow(QMainWindow):
     # ショートカットの唯一の定義元。ショートカットは QAction に持たせるため、
     # ラベルへ手書きでキーを書かない（メニューが自動表示する）。
     _ACTION_DEFS = [
-        ("update_market", "株価・配当を取得", "F5", "action_update_market"),
-        ("update_fx", "USDJPYを取得", "Ctrl+U", "action_update_fx"),
+        ("update_market", "株価・配当・為替を取得", "F5", "action_update_market"),
+        ("update_fx", "為替取得（USDJPY）", "Ctrl+U", "action_update_fx"),
         ("reload", "再読込", "Ctrl+R", "_reload_all"),
         ("new", "新規登録...", "Ctrl+N", "action_new_holding"),
         ("edit", "編集...", "Ctrl+E", "action_edit"),
@@ -848,8 +902,8 @@ class DividendWindow(QMainWindow):
         QMessageBox.information(
             self,
             "キーボードショートカット",
-            "F5: 株価・配当を取得\n"
-            "Ctrl+U: USDJPYレートを取得\n"
+            "F5: 株価・配当・為替を取得（為替は USD 銘柄があるとき）\n"
+            "Ctrl+U: 為替取得（USDJPY）\n"
             "Ctrl+R: 再読込（ローカルCSV）\n"
             "\n"
             "Ctrl+N: 新規登録\n"
@@ -982,9 +1036,9 @@ class DividendWindow(QMainWindow):
         同列に並ぶのを避ける。ボタンの有効/無効は QAction 側の状態に追随する
         ため、_sync_action_states の1箇所で3者まとめて制御できる。
 
-        表示モードと絞り込みは2段目へ分ける。1段に詰めると最小ウィンドウ幅では
-        収まらず、あふれた項目（＝右端の絞り込みボックス）が Qt の拡張メニューへ
-        追いやられて画面から消えてしまう。
+        表示モードは2段目へ分ける。1段に詰めると最小ウィンドウ幅では収まらず、
+        あふれた項目が Qt の拡張メニューへ追いやられて画面から消えてしまう。
+        絞り込みはツールバーに置かない（_build_filter_box の docstring 参照）。
         """
         bar = QToolBar("操作")
         bar.setObjectName("mainToolBar")
@@ -993,6 +1047,11 @@ class DividendWindow(QMainWindow):
         bar.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextOnly)
         act = self._actions
 
+        # ボタン面だけ短い名前にする（iconText。メニューは text の完全な名前のまま）。
+        # 完全な名前を並べると最小幅 900px で1段目があふれ、右端の操作が拡張メニューへ
+        # 消える（_check_toolbar が固定）。何をするかはツールチップで完全な名前を出す。
+        act["update_market"].setIconText("株価・為替を取得")
+        act["update_fx"].setIconText("為替取得")
         for key in ("update_market", "update_fx", "reload"):
             bar.addAction(act[key])
         bar.addSeparator()
@@ -1015,6 +1074,10 @@ class DividendWindow(QMainWindow):
             action.setToolTip(
                 f"{action.text().rstrip('.')} ({sequence})" if sequence else action.text()
             )
+        # F5 の為替は円換算に効く USD 銘柄があるときだけ取る（無ければ株価・配当のみ）。
+        act["update_market"].setToolTip(
+            act["update_market"].toolTip() + "\n為替（USDJPY）は USD 銘柄があるときだけ取得します"
+        )
         # ボタン面は短い名前にしてあるので、何をするボタンかはツールチップで補う。
         act["split_apply"].setToolTip(
             "選択行の株式分割を、株数・購入単価・配当の上書き値へ反映します "
@@ -1035,7 +1098,7 @@ class DividendWindow(QMainWindow):
         self._view_toolbar = view_bar
 
     def _build_mode_controls(self, bar: QToolBar) -> None:
-        """表示モードの切替と絞り込みを2段目のツールバーへ配置する。
+        """表示モードの切替を2段目のツールバーへ配置する。
 
         トグルをドロップダウンにして現在のモードを常時可視にする（従来は情報
         ラベルの1行テキストにしか出ず、今どちらのモードか分からなかった）。
@@ -1073,23 +1136,31 @@ class DividendWindow(QMainWindow):
         )
         bar.addWidget(self._yield_scope_combo)
 
-        spacer = QWidget()
-        spacer.setSizePolicy(
-            QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred
-        )
-        bar.addWidget(spacer)
+    def _build_filter_box(self) -> QWidget:
+        """絞り込み欄（ラベル＋入力）を作る。タブ見出しの右端（コーナー）に置く。
 
-        bar.addWidget(QLabel("絞り込み: "))
+        2段目のツールバーに置いていた頃は、利回りコンボを足した時点で最小幅 900px
+        に収まらなくなり（sizeHint 1131px）、右端の絞り込みが拡張メニューへ消えた。
+        絞り込みは表タブにだけ効く操作なので、タブ見出しの横が意味的にも合う。
+        ツールバーへ戻さないこと——コンボを1つ足すたびに同じあふれが再発する。
+        """
+        box = QWidget()
+        box.setObjectName("filterBox")
+        layout = QHBoxLayout(box)
+        layout.setContentsMargins(0, 0, 4, 0)
+        layout.setSpacing(4)
+        layout.addWidget(QLabel("絞り込み:"))
         self._filter = QLineEdit()
         self._filter.setPlaceholderText("コード / 銘柄名 / 口座")
         self._filter.setClearButtonEnabled(True)
-        # 固定幅にすると狭いウィンドウで収まらず拡張メニューへ飛んで消えるため、
-        # 下限を決めたうえで縮められるようにする。
-        self._filter.setMinimumWidth(150)
-        self._filter.setMaximumWidth(260)
+        # コーナーは sizeHint の幅で置かれ伸縮しない（QLineEdit の既定は狭く、
+        # 実フォントでは 150px まで痩せてプレースホルダが切れた）ので幅を決め打つ。
+        # 最小幅 900px でもタブ見出し（約440px）の右に 200px 以上の余白が残る。
+        self._filter.setFixedWidth(220)
         # proxy は後段で生成されるが、textChanged は実行時にしか発火しないため接続順は問題ない。
         self._filter.textChanged.connect(self._on_filter_changed)
-        bar.addWidget(self._filter)
+        layout.addWidget(self._filter)
+        return box
 
     def _sync_mode_controls(self) -> None:
         """ショートカット経由でモードを変えたとき、ドロップダウンの表示を揃える。
@@ -1360,6 +1431,7 @@ class DividendWindow(QMainWindow):
         self._save_or_notify(lambda: save_settings(income_benefit=key))
         # 内訳テーブルの列構成（優待・合計の表示/非表示）が変わるので幅を取り直す。
         self._monthly_columns_sized = False
+        self._monthly_benefit_detail_sized = False
         self._refresh_view()
         self._resize_yield_columns()
 
@@ -1418,7 +1490,14 @@ class DividendWindow(QMainWindow):
         for key in ("split_apply", "split_dismiss"):
             self._actions[key].setEnabled(idle and selected_pending)
         self._actions["split_apply_all"].setEnabled(
-            idle and bool(splits.pending_holdings(self.holdings, self.market_data_map))
+            idle
+            and bool(
+                splits.pending_holdings(
+                    self.holdings,
+                    self.market_data_map,
+                    include_inactive=self.show_inactive,
+                )
+            )
         )
         # データフォルダの切替も同様（走行中のワーカーが旧フォルダへ書き戻す）。
         for key in ("update_market", "update_fx", "reload", "new",
@@ -1458,11 +1537,15 @@ class DividendWindow(QMainWindow):
 
     # ---- データ読み込み / 再描画（legacy DividendApp から移植） ----
     def _reload_all(self) -> None:
-        self.holdings = load_holdings()
+        # 4種の CSV をすべて読み終えてから self の状態を更新する（途中失敗で新旧が混ざらない）。
+        holdings = load_holdings()
         market_data = load_market_data()
+        fx = latest_fx(load_fx())
+        history = load_history()
+        self.holdings = holdings
         self.market_data_map = {row.symbol: row for row in market_data}
-        fx_rows = load_fx()
-        self.fx_rate = fx_rows[-1].rate if fx_rows else None
+        self.fx_rate = fx.rate if fx is not None else None
+        self.fx_fetched_at = fx.timestamp if fx is not None else None
         if market_data:
             latest = max((row.fetched_at or "") for row in market_data)
             self.market_fetched_at = latest or None
@@ -1470,11 +1553,13 @@ class DividendWindow(QMainWindow):
         else:
             self.market_fetched_at = None
             self.market_source = None
-        self.history = load_history()
+        self.history = history
         self._refresh_view()
         # 当日のスナップショットを履歴へ upsert（タブ切替で呼ばれる _refresh_view では
         # 記録せず、再読込・取得完了時のみ記録して CSV の過剰書込を避ける）。
-        self._record_history_snapshot()
+        history_notice = self._record_history_snapshot()
+        if history_notice:
+            self._notify(history_notice)
 
     def _refresh_view(self) -> None:
         rows, summary = compute_rows(
@@ -1567,9 +1652,12 @@ class DividendWindow(QMainWindow):
             f" | 未算出 {summary.missing_market_value_count}銘柄"
             if summary.missing_market_value_count else ""
         )
+        # 為替と株価は取得時刻が別（Ctrl+U だけ・手編集の fx.csv もある）なので
+        # それぞれの時刻を出す。円換算がいつのレートかは画面のどこにも無かった。
         self._info.setText(
-            f"USDJPY {fmt_number(self.fx_rate, 4)} | "
-            f"取得 {self._compact_timestamp(self.market_fetched_at)} "
+            f"USDJPY {fmt_number(self.fx_rate, 4)} "
+            f"({self._compact_timestamp(self.fx_fetched_at)}) | "
+            f"株価 {self._compact_timestamp(self.market_fetched_at)} "
             f"({self.market_source or 'N/A'}){missing_note}"
         )
         income_kpi_label = "年間収入" if self.withdrawal_mode is not None else "年間配当"
@@ -1623,14 +1711,20 @@ class DividendWindow(QMainWindow):
              "income_value": combine_income(rec, with_benefit, mode)}
             for rec in hist_dicts
         ]
-        label = self._income_trend_label(with_benefit, mode)
+        label = self._income_trend_label(
+            with_benefit, mode, dividend_mode=self.dividend_mode
+        )
         self._income_line.set_data(
             income_dicts, [(label, "income_value", income_trend_color())],
             empty_message="配当の履歴がありません（株価更新か『インポート』で記録されます）",
         )
-        self._income_trend_note.setText(
-            self._withdrawal_coverage_note(hist_dicts, mode)
-        )
+        notes = [self._withdrawal_coverage_note(hist_dicts, mode)]
+        # 履歴は表示モードに依存させないため税引前で記録している（変えない）。
+        # 税引後を選んでいるのに推移だけ税引前のままだと、KPI の年間配当と
+        # グラフ右端の値が食い違って見えるので、凡例と注記の両方で明示する。
+        if self.dividend_mode == "net":
+            notes.append(NET_TREND_NOTE)
+        self._income_trend_note.setText(" / ".join(n for n in notes if n))
 
     @staticmethod
     def _withdrawal_coverage_note(hist_dicts: list[dict], mode: str | None) -> str:
@@ -1653,10 +1747,17 @@ class DividendWindow(QMainWindow):
         return f"※{WITHDRAWAL_LABELS[mode]}収入は {first} 以降のみ記録"
 
     @staticmethod
-    def _income_trend_label(with_benefit: bool, mode: str | None) -> str:
-        """凡例の系列名。取崩は定額/定率のどちらを描いているか名前で区別する。"""
+    def _income_trend_label(
+        with_benefit: bool, mode: str | None, dividend_mode: str = "gross"
+    ) -> str:
+        """凡例の系列名。取崩は定額/定率のどちらを描いているか名前で区別する。
+
+        税引後モードでも履歴は税引前の値なので、そのときだけ「（税引前）」を付ける
+        （税引前モードで付けないのは、表示中の数え方と一致していて冗長なため）。
+        """
         base = "配当" if mode is None else f"{WITHDRAWAL_LABELS[mode]}収入"
-        return f"{base}＋優待" if with_benefit else base
+        label = f"{base}＋優待" if with_benefit else base
+        return f"{label}（税引前）" if dividend_mode == "net" else label
 
     def _history_as_dicts(self) -> list[dict]:
         """LineChartWidget.set_data 用に履歴を dict 列へ変換（record_date 昇順）。"""
@@ -1678,7 +1779,7 @@ class DividendWindow(QMainWindow):
             )
         return result
 
-    def _record_history_snapshot(self) -> None:
+    def _record_history_snapshot(self) -> str | None:
         """当日のスナップショットを履歴へ upsert して保存する。
 
         表示モードに依存させないため、税引前・取崩無し（mode="gross",
@@ -1686,7 +1787,20 @@ class DividendWindow(QMainWindow):
         で再計算する。取崩収入は定額・定率それぞれで別途計算し、収入モードごとの
         系列の値とする（1 列で兼ねると、定額を選んでいるのに定率の線が出る）。
         評価額・配当・優待が全て None（起動直後で株価未取得）の場合は記録しない。
+        株価が当日未取得・分割が未反映の場合も記録せず、呼出側へ通知文を返す。
         """
+        if splits.pending_holdings(self.holdings, self.market_data_map):
+            return "分割を反映するまで推移を記録しません"
+        today = today_jst_str()
+        for holding in self.holdings:
+            if not holding.active:
+                continue
+            data = self.market_data_map.get(holding.symbol)
+            # 基準価額が無い投信は従来どおり簿価フォールバックを認める。
+            if holding.asset_type == "fund" and (data is None or data.last_price is None):
+                continue
+            if data is None or not (data.price_fetched_at or "").startswith(today):
+                return "本日取得した株価が揃うまで推移を記録しません"
         _, base = compute_rows(
             self.holdings, self.market_data_map, self.fx_rate,
             "gross", None,
@@ -1709,7 +1823,7 @@ class DividendWindow(QMainWindow):
             "gross", "fixed",
         )
         record = HistoryRecord(
-            record_date=today_jst_str(),
+            record_date=today,
             total_market_value_jpy=market,
             total_book_value_jpy=base.total_book_value_jpy,
             total_dividend_jpy=dividend,
@@ -1792,6 +1906,7 @@ class DividendWindow(QMainWindow):
             yield_scope=self.yield_scope,
             with_benefit=self.income_benefit == "with",
             fx_rate=self.fx_rate,
+            fx_fetched_at=self.fx_fetched_at,
             market_fetched_at=self.market_fetched_at,
             market_source=self.market_source,
             generated_at=now_jst_iso(),
@@ -1883,11 +1998,14 @@ class DividendWindow(QMainWindow):
         if not imported:
             self._notify("取込対象のデータが見つかりませんでした", error=True)
             return
+        preview = _format_import_holdings_preview(imported)
         reply = QMessageBox.question(
             self,
             "保有銘柄の取込",
             f"現在の保有銘柄（{len(self.holdings)} 件）を取込内容（{len(imported)} 件）で"
-            "置き換えますか？\nこの操作は現在の保有を上書きします"
+            "置き換えますか？\n\n"
+            f"【取込プレビュー】\n{preview}\n\n"
+            "この操作は現在の保有を上書きします"
             "（CSV は自動バックアップされます）。",
             QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
             QMessageBox.StandardButton.No,
@@ -1988,15 +2106,42 @@ class DividendWindow(QMainWindow):
                 return
             copy = reply == QMessageBox.StandardButton.Yes
 
+        prev_state = (
+            list(getattr(self, "holdings", [])),
+            dict(getattr(self, "market_data_map", {})),
+            getattr(self, "fx_rate", None),
+            getattr(self, "fx_fetched_at", None),
+            getattr(self, "market_fetched_at", None),
+            getattr(self, "market_source", None),
+            list(getattr(self, "history", [])),
+        )
+        switched = False
         try:
             if copy:
                 copy_data_files(current, new_dir)
             set_data_dir(new_dir)
-        except OSError as exc:
+            switched = True
+            init_empty_files()
+            self._reload_all()
+        except Exception as exc:  # noqa: BLE001 — 旧フォルダ・旧設定・旧表示へ復元して通知
+            (
+                self.holdings,
+                self.market_data_map,
+                self.fx_rate,
+                self.fx_fetched_at,
+                self.market_fetched_at,
+                self.market_source,
+                self.history,
+            ) = prev_state
+            if switched:
+                io_csv.restore_data_dir(current)
+                # _reload_all が新フォルダの内容を描いた後で失敗した場合も、画面を旧データへ戻す。
+                try:
+                    self._refresh_view()
+                except Exception:  # noqa: BLE001 — 復元中の描画失敗で通知まで潰さない
+                    pass
             self._notify(f"データフォルダを変更できませんでした: {exc}", error=True)
             return
-        init_empty_files()
-        self._reload_all()
         self._notify(f"データフォルダを変更しました: {new_dir}")
 
     def action_open_data_dir(self) -> None:
@@ -2124,10 +2269,36 @@ class DividendWindow(QMainWindow):
         # 列幅は「中身が入った最初の1回」だけ調整する。毎回呼ぶと、バーをクリックする
         # たびユーザーが広げた列幅が元へ戻ってしまう（他テーブルの _size_columns_once
         # と同じ方針。ただし永続化はしないのでフラグだけで足りる）。
+        # 初回が配当のみの月だった場合、優待内容列は見出し幅で確定するため、非空の
+        # 優待内容を初めて描いたときにその列だけ片方向で広げる。
+        has_benefit_detail = with_benefit and any(item.benefit_detail for item in items)
         if items and not self._monthly_columns_sized:
             self._monthly_columns_sized = True
+            self._monthly_benefit_detail_sized = has_benefit_detail
             self._monthly_view.resizeColumnsToContents()
             clamp_free_text_columns(self._monthly_view, MONTHLY_COLUMNS)
+        elif has_benefit_detail and not getattr(
+            self, "_monthly_benefit_detail_sized", False
+        ):
+            self._monthly_benefit_detail_sized = True
+            self._resize_monthly_benefit_detail_column()
+
+    def _resize_monthly_benefit_detail_column(self) -> None:
+        """月別内訳の「優待内容」列を、非空の優待内容を初めて描画したときに片方向で広げる。
+
+        配当のみの月で初回描画（_monthly_columns_sized）が確定すると、優待内容列は
+        見出し幅のまま残る。後から優待のある月を選んだとき、resizeColumnToContents は
+        使わず（手で広げた幅を縮めない）、上限 FREE_TEXT_COLUMN_MAX_WIDTH の範囲で
+        足りない分だけ広げる。
+        """
+        col = MONTHLY_COL_BENEFIT_DETAIL
+        header = self._monthly_view.horizontalHeader()
+        needed = min(
+            FREE_TEXT_COLUMN_MAX_WIDTH,
+            max(header.sectionSizeHint(col), self._monthly_view.sizeHintForColumn(col)),
+        )
+        if header.sectionSize(col) < needed:
+            header.resizeSection(col, needed)
 
     def _with_shares_label(
         self, columns: list[tuple[str, str]]
@@ -2537,7 +2708,9 @@ class DividendWindow(QMainWindow):
 
     def _split_notice(self) -> str:
         """取得後にステータスバーへ添える、未反映の分割の件数メッセージ（無ければ ""）。"""
-        pending = splits.pending_holdings(self.holdings, self.market_data_map)
+        pending = splits.pending_holdings(
+            self.holdings, self.market_data_map, include_inactive=self.show_inactive
+        )
         if not pending:
             return ""
         symbols = ", ".join(dict.fromkeys(self.holdings[i].symbol for i, _ in pending))
@@ -2621,7 +2794,9 @@ class DividendWindow(QMainWindow):
         """未反映の分割を持つ全行へ、まとめて反映する（確認は1回）。"""
         if self._busy:
             return
-        pending = splits.pending_holdings(self.holdings, self.market_data_map)
+        pending = splits.pending_holdings(
+            self.holdings, self.market_data_map, include_inactive=self.show_inactive
+        )
         if not pending:
             return
         summary = []
@@ -2727,17 +2902,24 @@ class DividendWindow(QMainWindow):
         self._progress.setVisible(True)
         self._progress.setRange(0, 100)
         self._progress.setValue(0)
-        self.statusBar().showMessage("株価・配当データを取得中...")
-        worker = MarketWorker(self.holdings, self.market_data_map)
+        # 有効な USD 銘柄があるときだけ為替も取る（円換算に効くのはそこだけ）。
+        fetch_fx = any(h.active and h.currency == "USD" for h in self.holdings)
+        self.statusBar().showMessage(
+            "株価・配当・為替を取得中..." if fetch_fx else "株価・配当データを取得中..."
+        )
+        worker = MarketWorker(self.holdings, self.market_data_map, fetch_fx=fetch_fx)
         self._start_worker(worker, self._on_market_finished, self._on_market_progress)
 
     def _on_market_progress(self, done: int, total: int, label: str) -> None:
         if total > 0:
             self._progress.setRange(0, total)
             self._progress.setValue(done)
+        else:
+            self._progress.setRange(0, 0)  # 為替の取得中（件数の無い段階）
         self.statusBar().showMessage(label)
 
-    def _on_market_finished(self, result) -> None:
+    def _on_market_finished(self, update: MarketUpdate) -> None:
+        result = update.market
         if not self._save_or_notify(lambda: save_market_data(result.rows)):
             return
         self.market_data_map = {row.symbol: row for row in result.rows}
@@ -2754,18 +2936,28 @@ class DividendWindow(QMainWindow):
             if updated:
                 if self._save_or_notify(lambda: save_holdings(holdings)):
                     self.holdings = holdings
+        # 為替は再描画・スナップショットより前に反映する（記録する評価額が
+        # 新しい株価×古いレートにならないように）。失敗はエラーに積むだけ。
+        errors = list(result.errors)
+        if update.fx_error:
+            errors.append(update.fx_error)
+        elif update.fx is not None and not self._store_fx(update.fx):
+            errors.append("USDJPYレートを反映できませんでした")
         self._refresh_view()
         # 最新株価で評価額が確定した時点で当日スナップショットを記録。
-        self._record_history_snapshot()
+        history_notice = self._record_history_snapshot()
         split_notice = self._split_notice()
-        if result.errors:
+        if history_notice:
+            split_notice += " / " + history_notice
+        if errors:
             self._notify(
-                f"一部の取得に失敗しました（{len(result.errors)}件）: {result.errors[0]}"
+                f"一部の取得に失敗しました（{len(errors)}件）: {errors[0]}"
                 + split_notice,
                 error=True,
             )
         else:
-            self._notify("株価・配当を更新しました" + split_notice)
+            updated = "株価・配当・為替" if update.fx is not None else "株価・配当"
+            self._notify(f"{updated}を更新しました" + split_notice)
 
     def action_update_fx(self) -> None:
         if self._busy:
@@ -2776,16 +2968,33 @@ class DividendWindow(QMainWindow):
         self.statusBar().showMessage("USDJPYレートを取得中...")
         self._start_worker(FxWorker(), self._on_fx_finished)
 
+    def _store_fx(self, fx: FXRate) -> bool:
+        """取得した為替を fx.csv へ追記して現在値にする（F5 と Ctrl+U の共通経路）。
+
+        使えないレート（0・nan）は保存も反映もしない（latest_fx と同じ基準）。
+        失敗の通知はここで出す（保存失敗は _save_or_notify が理由付きで出す）。
+        """
+        if latest_fx([fx]) is None:
+            self._notify(f"USDJPYレートが不正な値です: {fx.rate}", error=True)
+            return False
+        rows = load_fx()
+        rows.append(fx)
+        if not self._save_or_notify(lambda: save_fx(rows)):
+            return False
+        self.fx_rate = fx.rate
+        self.fx_fetched_at = fx.timestamp
+        return True
+
     def _on_fx_finished(self, fx) -> None:
         if fx:
-            rows = load_fx()
-            rows.append(fx)
-            if not self._save_or_notify(lambda: save_fx(rows)):
+            if not self._store_fx(fx):
                 return
-            self.fx_rate = fx.rate
             self._refresh_view()
-            self._record_history_snapshot()
-            self._notify(f"USDJPY = {fx.rate:.4f} に更新しました")
+            history_notice = self._record_history_snapshot()
+            self._notify(
+                f"USDJPY = {fx.rate:.4f} に更新しました"
+                + (" / " + history_notice if history_notice else "")
+            )
         else:
             self._notify("USDJPYレートを取得できませんでした", error=True)
 

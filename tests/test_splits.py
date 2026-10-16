@@ -122,6 +122,20 @@ def test_pending_is_per_row_not_per_symbol():
     assert [i for i, _ in found] == [1]
 
 
+def test_pending_holdings_excludes_inactive_unless_requested():
+    """無効銘柄（active=False）は既定で除外し、include_inactive=True のときのみ含める。"""
+    active_row = _holding(account="特定", active=True)
+    inactive_row = _holding(account="旧NISA", active=False)
+    market_map = {"5334": _market()}
+    assert [i for i, _ in splits.pending_holdings([active_row, inactive_row], market_map, TODAY)] == [0]
+    assert [
+        i
+        for i, _ in splits.pending_holdings(
+            [active_row, inactive_row], market_map, TODAY, include_inactive=True
+        )
+    ] == [0, 1]
+
+
 # ---- 補正 ----
 
 def test_apply_correction_scales_shares_cost_and_overrides():
