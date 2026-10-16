@@ -225,7 +225,7 @@ def test_read_holdings_csv_roundtrips(monkeypatch, tmp_path):
 
 
 def test_read_holdings_csv_skips_blank_symbol(monkeypatch, tmp_path):
-    """symbol 空の行は除外する（誤った履歴 CSV を選んでも空を返す）。"""
+    """symbol 空の行は除外する。"""
     _configure_tmp_dirs(monkeypatch, tmp_path)
     target = tmp_path / "holdings.csv"
     io_csv.export_holdings_csv(target, [_holding("7203"), _holding("")])
@@ -233,12 +233,72 @@ def test_read_holdings_csv_skips_blank_symbol(monkeypatch, tmp_path):
     assert [h.symbol for h in loaded] == ["7203"]
 
 
-def test_read_holdings_csv_wrong_file_yields_empty(monkeypatch, tmp_path):
-    """保有ではないファイル（履歴 CSV）を選んでも空を返し保有を壊さない。"""
+def test_read_holdings_csv_rejects_market_data_and_missing_required_columns(
+    monkeypatch, tmp_path
+):
+    """市場データ CSV や履歴 CSV など必須列 symbol/shares/avg_cost を欠くファイルを拒否する。"""
     _configure_tmp_dirs(monkeypatch, tmp_path)
-    target = tmp_path / "history.csv"
-    io_csv.export_history_csv(target, [_history("2024-01-01")])
-    assert io_csv.read_holdings_csv(target) == []
+    market_csv = tmp_path / "market_data.csv"
+    market_csv.write_text(
+        "symbol,currency,last_price\n7203,JPY,3000\n", encoding="utf-8"
+    )
+    with pytest.raises(ValueError, match="shares.*avg_cost"):
+        io_csv.read_holdings_csv(market_csv)
+
+    hist_csv = tmp_path / "history.csv"
+    io_csv.export_history_csv(hist_csv, [_history("2024-01-01")])
+    with pytest.raises(ValueError, match="symbol"):
+        io_csv.read_holdings_csv(hist_csv)
+
+
+@pytest.mark.parametrize(
+    ("csv_body", "expected_col", "expected_raw"),
+    [
+        ("symbol,shares,avg_cost\n7203,abc,1500\n", "shares", "abc"),
+        ("symbol,shares,avg_cost\n7203,,1500\n", "shares", ""),
+        ("symbol,shares,avg_cost\n7203,-10,1500\n", "shares", "-10"),
+        ("symbol,shares,avg_cost\n7203,nan,1500\n", "shares", "nan"),
+        ("symbol,shares,avg_cost\n7203,100,inf\n", "avg_cost", "inf"),
+        ("symbol,shares,avg_cost\n7203,100,-1\n", "avg_cost", "-1"),
+        ("symbol,shares,avg_cost\n7203,100,\"1,500\"\n", "avg_cost", "1,500"),
+    ],
+)
+def test_read_holdings_csv_rejects_invalid_numbers_with_line_col_value(
+    monkeypatch, tmp_path, csv_body, expected_col, expected_raw
+):
+    """非空行の shares/avg_cost が有限・非負でない場合、行番号・列名・元の値を示して拒否する。"""
+    _configure_tmp_dirs(monkeypatch, tmp_path)
+    target = tmp_path / "bad.csv"
+    target.write_text(csv_body, encoding="utf-8")
+    with pytest.raises(ValueError) as exc_info:
+        io_csv.read_holdings_csv(target)
+    msg = str(exc_info.value)
+    assert "2行目" in msg
+    assert expected_col in msg
+    assert repr(expected_raw) in msg
+
+
+def test_read_holdings_csv_accepts_legacy_csv_without_optional_columns(
+    monkeypatch, tmp_path
+):
+    """任意列（優待内容・分割反映日・支払月など）が無い旧 CSV は引き続き取り込めること。"""
+    _configure_tmp_dirs(monkeypatch, tmp_path)
+    legacy = tmp_path / "legacy.csv"
+    legacy.write_text(
+        "symbol,name,asset_type,currency,shares,avg_cost,account\n"
+        "7203,トヨタ,stock,JPY,100,1500,特定\n"
+        "0331418A,eMAXIS Slim,fund,JPY,206.7284,10000,NISA\n",
+        encoding="utf-8",
+    )
+    loaded = io_csv.read_holdings_csv(legacy)
+    assert len(loaded) == 2
+    assert loaded[0].symbol == "7203"
+    assert loaded[0].shares == 100.0
+    assert loaded[0].avg_cost == 1500.0
+    assert loaded[0].benefit_detail == ""
+    assert loaded[1].symbol == "0331418A"
+    assert loaded[1].shares == 206.7284
+    assert loaded[1].asset_type == "fund"
 
 
 # ---- settings.json（集合キー＝従来互換 / callable キー＝ウィンドウ状態） ----

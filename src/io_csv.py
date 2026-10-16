@@ -23,7 +23,7 @@ from .calc import (  # 設定 "fund_share_unit" / "yield_scope" の許容値
     YIELD_SCOPES as _YIELD_SCOPES,
 )
 from .theme import THEMES as _THEMES  # 設定 "theme" の許容値（Qt 非依存）
-from .utils import now_jst, normalize_iso_date
+from .utils import now_jst, normalize_iso_date, safe_float
 
 # データフォルダはユーザーが変更できる（set_data_dir）。以下は定数ではなく
 # 「現在値」で、set_data_dir が DATA_DIR ごとまとめて張り替える。個々の関数は
@@ -269,16 +269,47 @@ def read_history_csv(path: str | Path) -> list[HistoryRecord]:
     return records
 
 
+_REQUIRED_HOLDINGS_COLUMNS = ("symbol", "shares", "avg_cost")
+
+
 def read_holdings_csv(path: str | Path) -> list[Holding]:
     """外部 CSV を保有銘柄として読み込む（エクスポートした holdings CSV の取込用）。
 
-    symbol が空の行は除外する。これにより誤ったファイル（履歴 CSV 等）を選んでも
-    保有を壊さず「取込対象なし」として扱える。欠損列は from_dict が既定値で
-    吸収するため、列が一部欠けた CSV も読める。symbol は一意でない（複数口座・
-    取得単価）ため取込はマージせず全置換（呼び出し側が確認の上で保存する）。
+    通常の load_holdings（内部キャッシュ読込）や Holding.from_dict の寛容さは維持しつつ、
+    外部取込の境界では全置換によるデータ破損を防ぐため以下を検証する:
+    - 必須列 symbol / shares / avg_cost がヘッダーに存在すること（市場データ CSV や
+      履歴 CSV を誤選択した場合に株数・簿価 0 の保有で全置換されるのを防ぐ）
+    - symbol が非空の行について、shares と avg_cost が有限・非負の数値であること
+    問題があれば行番号・列名・元の値を含む ValueError を送出する。
+    任意列の欠損は Holding.from_dict が既定値で吸収するため、旧フォーマットの
+    holdings.csv もそのまま取り込める。
     """
-    holdings = [Holding.from_dict(row) for row in _read_csv(Path(path))]
-    return [h for h in holdings if h.symbol]
+    target = Path(path)
+    if not target.exists():
+        return []
+    with target.open("r", encoding="utf-8-sig", newline="") as f:
+        reader = csv.DictReader(f)
+        fieldnames = list(reader.fieldnames or [])
+        missing = [c for c in _REQUIRED_HOLDINGS_COLUMNS if c not in fieldnames]
+        if missing:
+            raise ValueError(
+                f"保有銘柄 CSV の必須列が見つかりません: {', '.join(missing)}"
+            )
+        holdings: list[Holding] = []
+        for line_no, row in enumerate(reader, start=2):
+            symbol = str(row.get("symbol") or "").strip()
+            if not symbol:
+                continue
+            for col in ("shares", "avg_cost"):
+                raw = row.get(col)
+                text = "" if raw is None else str(raw).strip()
+                num = safe_float(text)
+                if num is None or num < 0:
+                    raise ValueError(
+                        f"{line_no}行目の {col} が不正です（値: {text!r}）"
+                    )
+            holdings.append(Holding.from_dict(row))
+    return holdings
 
 
 def init_empty_files() -> None:

@@ -317,6 +317,75 @@ def test_import_holdings_declined_keeps_current(monkeypatch, tmp_path):
     assert stub.reloaded is False
 
 
+def test_import_holdings_shows_preview_without_fund_unit_conversion(
+    monkeypatch, tmp_path
+):
+    """確認ダイアログにコード・銘柄名・株数・簿価のプレビューが出て、投信口数を変換しないこと。"""
+    monkeypatch.setattr(io_csv, "DATA_DIR", tmp_path)
+    monkeypatch.setattr(io_csv, "BACKUP_DIR", tmp_path / "backup")
+    target = tmp_path / "holdings.csv"
+    io_csv.export_holdings_csv(
+        target,
+        [
+            _holding(symbol="7203", name="トヨタ", shares=100.0, avg_cost=2000.0),
+            _holding(
+                symbol="0331418A",
+                name="eMAXIS Slim",
+                asset_type="fund",
+                shares=206.7284,
+                avg_cost=10000.0,
+            ),
+        ],
+    )
+    stub = _io_stub([_holding(symbol="9999")], [])
+    stub.fund_share_unit = "kuchi"  # 1口表示中でもプレビューは CSV 生値（206.7284）のまま
+    monkeypatch.setattr(
+        gui.QFileDialog, "getOpenFileName", lambda *a, **k: (str(target), "")
+    )
+    captured_prompt: list[str] = []
+
+    def fake_question(_parent, _title, text, *_args):
+        captured_prompt.append(text)
+        return gui.QMessageBox.StandardButton.No
+
+    monkeypatch.setattr(gui.QMessageBox, "question", fake_question)
+    gui.DividendWindow.action_import_holdings(stub)
+    assert len(captured_prompt) == 1
+    prompt = captured_prompt[0]
+    assert "7203" in prompt and "トヨタ" in prompt
+    assert "株数 100" in prompt and "¥200,000" in prompt
+    assert "0331418A" in prompt and "株数 206.7284" in prompt
+    assert "株数 2,067,284" not in prompt  # 1万倍の口数変換をしない
+
+
+def test_import_holdings_rejects_market_csv_before_confirm(monkeypatch, tmp_path):
+    """市場データ CSV や不正数値 CSV を選んだら確認ダイアログを出さずエラー通知で中止すること。"""
+    market_csv = tmp_path / "market_data.csv"
+    market_csv.write_text(
+        "symbol,currency,last_price\n7203,JPY,3000\n", encoding="utf-8"
+    )
+    stub = _io_stub([_holding(symbol="9999")], [])
+    monkeypatch.setattr(
+        gui.QFileDialog, "getOpenFileName", lambda *a, **k: (str(market_csv), "")
+    )
+    asked = {"called": False}
+    monkeypatch.setattr(
+        gui.QMessageBox,
+        "question",
+        lambda *a, **k: asked.update(called=True) or gui.QMessageBox.StandardButton.Yes,
+    )
+    saved = {"called": False}
+    monkeypatch.setattr(gui, "save_holdings", lambda rows: saved.update(called=True))
+
+    gui.DividendWindow.action_import_holdings(stub)
+    assert asked["called"] is False
+    assert saved["called"] is False
+    assert stub.reloaded is False
+    assert stub.notes and stub.notes[-1][1] is True
+    assert "shares" in stub.notes[-1][0]
+
+
+
 # ---- データフォルダの変更（QFileDialog / QMessageBox をスタブ化して本体を実行） ----
 
 

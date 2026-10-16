@@ -354,6 +354,29 @@ def _cell_text_and_color(
     return str(val or ""), None
 
 
+def _format_import_holdings_preview(
+    holdings: list[Holding], max_rows: int = 5
+) -> str:
+    """保有 CSV 取込の確認ダイアログに出す先頭数行のプレビュー文字列を組む。
+
+    投信の口数単位（fund_share_unit）の変換は掛けず CSV 保存値のまま表示する。
+    """
+    lines: list[str] = []
+    for h in holdings[:max_rows]:
+        name = h.name or "（名称なし）"
+        shares = f"{h.shares:,.4f}".rstrip("0").rstrip(".") or "0"
+        book = h.shares * h.avg_cost
+        if h.currency == "USD":
+            book_str = f"${fmt_number(book, 2)}"
+        else:
+            book_str = f"¥{fmt_number(book, 0)}"
+        lines.append(f"・{h.symbol} {name}: 株数 {shares} / 簿価 {book_str}")
+    rest = len(holdings) - len(lines)
+    if rest > 0:
+        lines.append(f"…ほか {rest} 件")
+    return "\n".join(lines)
+
+
 class NumericSortProxy(QSortFilterProxyModel):
     """数値列は Qt.UserRole の生値で比較（桁区切り文字列の誤ソート回避）。
 
@@ -1892,11 +1915,14 @@ class DividendWindow(QMainWindow):
         if not imported:
             self._notify("取込対象のデータが見つかりませんでした", error=True)
             return
+        preview = _format_import_holdings_preview(imported)
         reply = QMessageBox.question(
             self,
             "保有銘柄の取込",
             f"現在の保有銘柄（{len(self.holdings)} 件）を取込内容（{len(imported)} 件）で"
-            "置き換えますか？\nこの操作は現在の保有を上書きします"
+            "置き換えますか？\n\n"
+            f"【取込プレビュー】\n{preview}\n\n"
+            "この操作は現在の保有を上書きします"
             "（CSV は自動バックアップされます）。",
             QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
             QMessageBox.StandardButton.No,
