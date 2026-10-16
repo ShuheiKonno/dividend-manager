@@ -440,3 +440,100 @@ def test_change_data_dir_reports_failure(monkeypatch, tmp_path):
     assert calls["init"] == 0
     assert stub.reloaded is False
     assert stub.notes and stub.notes[-1][1] is True
+
+
+# ---- 月別内訳テーブルの「優待内容」列幅（A5） ----
+
+
+def _monthly_stub(monthly):
+    gui.QApplication.instance() or gui.QApplication([])
+
+    class MonthlyStub:
+        income_benefit = "with"
+        monthly_month = 6
+        _monthly_label = "年間配当"
+        _monthly_sorted_once = False
+        _monthly_columns_sized = False
+        _monthly_benefit_detail_sized = False
+        _make_breakdown_table = gui.DividendWindow._make_breakdown_table
+        _apply_monthly_sort = gui.DividendWindow._apply_monthly_sort
+        _resize_monthly_benefit_detail_column = (
+            gui.DividendWindow._resize_monthly_benefit_detail_column
+        )
+
+    stub = MonthlyStub()
+    stub._monthly = monthly
+    stub._monthly_head = gui.QLabel("")
+    stub._monthly_view, stub._monthly_model, stub._monthly_proxy = (
+        stub._make_breakdown_table()
+    )
+    return stub
+
+
+def test_monthly_benefit_detail_column_expands_on_first_non_empty_render():
+    """配当のみの月で初回描画したあと、優待のある月を選んだら優待内容列だけ広がること。"""
+    from src.calc import monthly_breakdown
+
+    monthly = monthly_breakdown([
+        dict(
+            symbol="7203",
+            name="トヨタ",
+            account="特定",
+            active=True,
+            annual_dividend_jpy=1200.0,
+            annual_benefit_jpy=3000.0,
+            dividend_month_ratios={6: 1.0},
+            dividend_months_manual=False,
+            benefit_months=[3],
+            benefit_detail="株主優待お買物券10,000円分（長期保有特典含む・全国の店舗で利用可）",
+        ),
+    ])
+    stub = _monthly_stub(monthly)
+    col = gui.MONTHLY_COL_BENEFIT_DETAIL
+
+    # 6月（配当のみ・優待内容は空）で初回描画: 列幅は見出し幅で確定する。
+    stub.monthly_month = 6
+    gui.DividendWindow._render_monthly_breakdown(stub)
+    assert stub._monthly_columns_sized is True
+    assert stub._monthly_benefit_detail_sized is False
+    header_only_width = stub._monthly_view.columnWidth(col)
+
+    # 3月（優待内容あり）へ切替: 優待内容列が片方向で広がり、上限で頭打ちになる。
+    stub.monthly_month = 3
+    gui.DividendWindow._render_monthly_breakdown(stub)
+    assert stub._monthly_benefit_detail_sized is True
+    expanded_width = stub._monthly_view.columnWidth(col)
+    assert expanded_width > header_only_width
+    assert expanded_width <= gui.FREE_TEXT_COLUMN_MAX_WIDTH
+
+
+def test_monthly_benefit_detail_column_never_shrinks_user_widened_width():
+    """ユーザーが手動で広げた優待内容列の幅を、初回の優待月描画で縮めないこと。"""
+    from src.calc import monthly_breakdown
+
+    monthly = monthly_breakdown([
+        dict(
+            symbol="7203",
+            name="トヨタ",
+            account="特定",
+            active=True,
+            annual_dividend_jpy=1200.0,
+            annual_benefit_jpy=3000.0,
+            dividend_month_ratios={6: 1.0},
+            dividend_months_manual=False,
+            benefit_months=[3],
+            benefit_detail="クオカード1,000円分",
+        ),
+    ])
+    stub = _monthly_stub(monthly)
+    col = gui.MONTHLY_COL_BENEFIT_DETAIL
+
+    stub.monthly_month = 6
+    gui.DividendWindow._render_monthly_breakdown(stub)
+    # ユーザーが上限を超えて 360px に広げた状態を再現
+    stub._monthly_view.setColumnWidth(col, 360)
+
+    stub.monthly_month = 3
+    gui.DividendWindow._render_monthly_breakdown(stub)
+    assert stub._monthly_view.columnWidth(col) == 360
+

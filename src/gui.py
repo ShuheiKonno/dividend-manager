@@ -482,6 +482,7 @@ class DividendWindow(QMainWindow):
         self._monthly_sorted_once: bool = False
         self._monthly_label: str = "年間配当"
         self._monthly_columns_sized: bool = False
+        self._monthly_benefit_detail_sized: bool = False
         self._initial_tab: int = _saved.get("last_tab", 0)
         # テーブル列幅: 保存値があれば初回描画で適用、無ければ内容に合わせて自動調整。
         self._saved_column_widths: dict[str, list[int]] = {
@@ -1360,6 +1361,7 @@ class DividendWindow(QMainWindow):
         self._save_or_notify(lambda: save_settings(income_benefit=key))
         # 内訳テーブルの列構成（優待・合計の表示/非表示）が変わるので幅を取り直す。
         self._monthly_columns_sized = False
+        self._monthly_benefit_detail_sized = False
         self._refresh_view()
         self._resize_yield_columns()
 
@@ -2131,10 +2133,36 @@ class DividendWindow(QMainWindow):
         # 列幅は「中身が入った最初の1回」だけ調整する。毎回呼ぶと、バーをクリックする
         # たびユーザーが広げた列幅が元へ戻ってしまう（他テーブルの _size_columns_once
         # と同じ方針。ただし永続化はしないのでフラグだけで足りる）。
+        # 初回が配当のみの月だった場合、優待内容列は見出し幅で確定するため、非空の
+        # 優待内容を初めて描いたときにその列だけ片方向で広げる。
+        has_benefit_detail = with_benefit and any(item.benefit_detail for item in items)
         if items and not self._monthly_columns_sized:
             self._monthly_columns_sized = True
+            self._monthly_benefit_detail_sized = has_benefit_detail
             self._monthly_view.resizeColumnsToContents()
             clamp_free_text_columns(self._monthly_view, MONTHLY_COLUMNS)
+        elif has_benefit_detail and not getattr(
+            self, "_monthly_benefit_detail_sized", False
+        ):
+            self._monthly_benefit_detail_sized = True
+            self._resize_monthly_benefit_detail_column()
+
+    def _resize_monthly_benefit_detail_column(self) -> None:
+        """月別内訳の「優待内容」列を、非空の優待内容を初めて描画したときに片方向で広げる。
+
+        配当のみの月で初回描画（_monthly_columns_sized）が確定すると、優待内容列は
+        見出し幅のまま残る。後から優待のある月を選んだとき、resizeColumnToContents は
+        使わず（手で広げた幅を縮めない）、上限 FREE_TEXT_COLUMN_MAX_WIDTH の範囲で
+        足りない分だけ広げる。
+        """
+        col = MONTHLY_COL_BENEFIT_DETAIL
+        header = self._monthly_view.horizontalHeader()
+        needed = min(
+            FREE_TEXT_COLUMN_MAX_WIDTH,
+            max(header.sectionSizeHint(col), self._monthly_view.sizeHintForColumn(col)),
+        )
+        if header.sectionSize(col) < needed:
+            header.resizeSection(col, needed)
 
     def _with_shares_label(
         self, columns: list[tuple[str, str]]
