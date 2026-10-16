@@ -361,7 +361,7 @@ QToolBar QToolButton:focus {{ border-color: {BORDER_FOCUS}; outline: none; }}
 QToolBar QToolButton#dangerAction:hover {{
     border-color: {ERROR}; color: {TEXT_STATUS_ERROR};
 }}
-/* 最頻出の操作（株価・配当を取得）はアクセント塗りで見つけやすくする。 */
+/* 最頻出の操作（株価・配当・為替を取得）はアクセント塗りで見つけやすくする。 */
 QToolBar QToolButton#primaryAction {{
     background: {ACCENT}; color: {ACCENT_TEXT}; border: 1px solid {ACCENT};
 }}

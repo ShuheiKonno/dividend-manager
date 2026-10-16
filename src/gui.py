@@ -729,8 +729,8 @@ class DividendWindow(QMainWindow):
     # ショートカットの唯一の定義元。ショートカットは QAction に持たせるため、
     # ラベルへ手書きでキーを書かない（メニューが自動表示する）。
     _ACTION_DEFS = [
-        ("update_market", "株価・配当を取得", "F5", "action_update_market"),
-        ("update_fx", "USDJPYを取得", "Ctrl+U", "action_update_fx"),
+        ("update_market", "株価・配当・為替を取得", "F5", "action_update_market"),
+        ("update_fx", "USDJPYのみ取得", "Ctrl+U", "action_update_fx"),
         ("reload", "再読込", "Ctrl+R", "_reload_all"),
         ("new", "新規登録...", "Ctrl+N", "action_new_holding"),
         ("edit", "編集...", "Ctrl+E", "action_edit"),
@@ -902,8 +902,8 @@ class DividendWindow(QMainWindow):
         QMessageBox.information(
             self,
             "キーボードショートカット",
-            "F5: 株価・配当を取得\n"
-            "Ctrl+U: USDJPYレートを取得\n"
+            "F5: 株価・配当・為替を取得（為替は USD 銘柄があるとき）\n"
+            "Ctrl+U: USDJPYレートのみ取得\n"
             "Ctrl+R: 再読込（ローカルCSV）\n"
             "\n"
             "Ctrl+N: 新規登録\n"
@@ -1047,6 +1047,11 @@ class DividendWindow(QMainWindow):
         bar.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextOnly)
         act = self._actions
 
+        # ボタン面だけ短い名前にする（iconText。メニューは text の完全な名前のまま）。
+        # 完全な名前を並べると最小幅 900px で1段目があふれ、右端の操作が拡張メニューへ
+        # 消える（_check_toolbar が固定）。何をするかはツールチップで完全な名前を出す。
+        act["update_market"].setIconText("株価・為替を取得")
+        act["update_fx"].setIconText("USDJPYのみ")
         for key in ("update_market", "update_fx", "reload"):
             bar.addAction(act[key])
         bar.addSeparator()
@@ -1069,6 +1074,10 @@ class DividendWindow(QMainWindow):
             action.setToolTip(
                 f"{action.text().rstrip('.')} ({sequence})" if sequence else action.text()
             )
+        # F5 の為替は円換算に効く USD 銘柄があるときだけ取る（無ければ株価・配当のみ）。
+        act["update_market"].setToolTip(
+            act["update_market"].toolTip() + "\n為替（USDJPY）は USD 銘柄があるときだけ取得します"
+        )
         # ボタン面は短い名前にしてあるので、何をするボタンかはツールチップで補う。
         act["split_apply"].setToolTip(
             "選択行の株式分割を、株数・購入単価・配当の上書き値へ反映します "
@@ -2893,9 +2902,11 @@ class DividendWindow(QMainWindow):
         self._progress.setVisible(True)
         self._progress.setRange(0, 100)
         self._progress.setValue(0)
-        self.statusBar().showMessage("株価・配当データを取得中...")
         # 有効な USD 銘柄があるときだけ為替も取る（円換算に効くのはそこだけ）。
         fetch_fx = any(h.active and h.currency == "USD" for h in self.holdings)
+        self.statusBar().showMessage(
+            "株価・配当・為替を取得中..." if fetch_fx else "株価・配当データを取得中..."
+        )
         worker = MarketWorker(self.holdings, self.market_data_map, fetch_fx=fetch_fx)
         self._start_worker(worker, self._on_market_finished, self._on_market_progress)
 
@@ -2945,7 +2956,8 @@ class DividendWindow(QMainWindow):
                 error=True,
             )
         else:
-            self._notify("株価・配当を更新しました" + split_notice)
+            updated = "株価・配当・為替" if update.fx is not None else "株価・配当"
+            self._notify(f"{updated}を更新しました" + split_notice)
 
     def action_update_fx(self) -> None:
         if self._busy:

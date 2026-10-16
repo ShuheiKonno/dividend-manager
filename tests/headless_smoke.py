@@ -134,6 +134,10 @@ def _check_actions(w) -> None:
             text = sequence.toString()
             assert len(text) > 1, f"{key} に一文字キーが残っている: {text!r}"
     assert actions["update_market"].shortcut().toString() == "F5"
+    # F5 は為替も取るので、メニュー（text）とボタン面（iconText）の両方で分かること。
+    assert "為替" in actions["update_market"].text(), actions["update_market"].text()
+    assert "為替" in actions["update_market"].iconText(), actions["update_market"].iconText()
+    assert "のみ" in actions["update_fx"].text(), actions["update_fx"].text()
     assert actions["edit"].shortcut().toString() == "Ctrl+E"
     assert actions["tab4"].shortcut().toString() == "Ctrl+5", "配当優待詳細タブのキーが無い"
 
