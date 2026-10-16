@@ -3,7 +3,7 @@
 import math
 import re
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import date, timedelta
 from typing import Callable, Optional
 
@@ -259,12 +259,13 @@ def _yfinance_symbol(holding: Holding) -> str:
 
 def _fetch_one(
     holding: Holding, fetched_at: str | None, source: str
-) -> tuple[MarketData, list[str], tuple[str, str] | None]:
-    """1 銘柄分の取得を行う。(MarketData, エラー一覧, 銘柄名更新|None) を返す。
+) -> tuple[MarketData, list[str], tuple[str, str] | None, set[str]]:
+    """1 銘柄分の市場データ・エラー・銘柄名更新・取得成功項目を返す。
 
     純粋に取得のみを行い共有状態を変更しないため、スレッドプールから安全に呼べる。
     """
     errors: list[str] = []
+    succeeded: set[str] = set()
     name_update: tuple[str, str] | None = None
     price, price_date = None, None
     div_ps, div_date, div_ratios = None, None, None
@@ -275,6 +276,10 @@ def _fetch_one(
         price, price_date = _fetch_toushin(holding.symbol)
         if price is None:
             errors.append(f"基準価額取得失敗: {holding.symbol} (ToushinReader)")
+        else:
+            succeeded.add("price")
+        # 投信の配当・分割はこの取得元の対象外（既存どおり空の結果とする）。
+        succeeded.update(("dividend", "splits"))
     else:
         yf_symbol = _yfinance_symbol(holding)
         ticker = None
@@ -290,19 +295,21 @@ def _fetch_one(
             if not close.empty:
                 price = float(close.iloc[-1])
                 price_date = close.index[-1].date().isoformat()
+                succeeded.add("price")
             else:
                 errors.append(f"株価取得失敗: {holding.symbol} (終値データなし)")
         except Exception as exc:
             errors.append(f"株価取得失敗: {holding.symbol} ({exc})")
 
         if ticker is not None:
-            # 分割の取得失敗は株価・配当の取得を止めない（補正と旗が効かないだけ）。
+            # 分割の失敗は独立して扱い、集約時に既存の分割情報を保持する。
             # 配当と同じ履歴から取れるので、通常は追加の通信は発生しない。
             all_splits: list[tuple[str, float]] = []
             try:
                 all_splits = _parse_yfinance_splits(ticker.splits)
-            except Exception:
-                all_splits = []
+                succeeded.add("splits")
+            except Exception as exc:
+                errors.append(f"分割取得失敗: {holding.symbol} ({exc})")
             keep_since = (date.today() - timedelta(days=_SPLIT_KEEP_DAYS)).isoformat()
             recent_splits = [(d, r) for d, r in all_splits if d >= keep_since]
             try:
@@ -310,6 +317,7 @@ def _fetch_one(
                 div_ps, div_date, div_ratios = _parse_yfinance_dividends(
                     series, all_splits
                 )
+                succeeded.add("dividend")
             except Exception as exc:
                 errors.append(f"配当取得失敗: {holding.symbol} ({exc})")
 
@@ -330,8 +338,9 @@ def _fetch_one(
         fetched_at=fetched_at,
         div_ex_month_ratios=div_ratios,
         recent_splits=recent_splits,
+        price_fetched_at=fetched_at if "price" in succeeded else None,
     )
-    return md, errors, name_update
+    return md, errors, name_update, succeeded
 
 
 def fetch_market_data(
@@ -384,7 +393,7 @@ def fetch_market_data(
             for future in as_completed(future_map):
                 holding = future_map[future]
                 try:
-                    md, errs, name_update = future.result()
+                    md, errs, name_update, succeeded = future.result()
                 except Exception as exc:  # noqa: BLE001 — 1銘柄の失敗で全体を止めない
                     md = MarketData(
                         symbol=holding.symbol,
@@ -400,14 +409,28 @@ def fetch_market_data(
                     )
                     errs = [f"取得失敗: {holding.symbol} ({exc})"]
                     name_update = None
-                # 一時的な通信失敗で直前の正常キャッシュを消さない。
+                    succeeded = set()
+                # 失敗した項目だけキャッシュを引き継ぐ。取得成功で空の場合は更新する。
                 cached = existing.get(holding.symbol)
-                if errs and cached:
-                    result_by_symbol[holding.symbol] = cached
-                else:
-                    if errs:
-                        md.fetched_at = None  # force=False の次回更新で再取得できるようにする。
-                    result_by_symbol[holding.symbol] = md
+                if cached:
+                    fields_by_item = {
+                        "price": ("last_price", "price_as_of", "price_fetched_at"),
+                        "dividend": (
+                            "annual_div_ps_gross", "annual_div_ps_net",
+                            "div_forecast_as_of", "div_ex_month_ratios",
+                        ),
+                        "splits": ("recent_splits",),
+                    }
+                    md = replace(md, **{
+                        field: getattr(cached, field)
+                        for item, fields in fields_by_item.items()
+                        if item not in succeeded
+                        for field in fields
+                    })
+                if errs:
+                    # 全項目の取得完了日時とは分離し、次回は部分失敗を再取得する。
+                    md.fetched_at = None
+                result_by_symbol[holding.symbol] = md
                 errors.extend(errs)
                 if name_update:
                     name_updates[name_update[0]] = name_update[1]

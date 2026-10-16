@@ -31,7 +31,7 @@ def _fake_fetch_one(holding, fetched_at, source):
         price_as_of=None, annual_div_ps_gross=None, annual_div_ps_net=None,
         div_forecast_as_of=None, source=source, fetched_at=fetched_at,
     )
-    return m, errs, name_update
+    return m, errs, name_update, {"price", "dividend", "splits"}
 
 
 def test_parallel_fetch_aggregation(monkeypatch):
@@ -82,13 +82,15 @@ def test_failed_fetch_keeps_existing_cache(monkeypatch):
     )
 
     def failed(holding, fetched_at, source):
-        row, _, name_update = _fake_fetch_one(holding, fetched_at, source)
-        return row, ["temporary failure"], name_update
+        row, _, name_update, _ = _fake_fetch_one(holding, fetched_at, source)
+        return row, ["temporary failure"], name_update, set()
 
     monkeypatch.setattr(md, "_fetch_one", failed)
     monkeypatch.setattr(md, "_yf", lambda: object())
     res = md.fetch_market_data([_holding("AAA")], {"AAA": cached}, force=True)
-    assert res.rows == [cached]
+    assert res.rows[0].last_price == cached.last_price
+    assert res.rows[0].annual_div_ps_gross == cached.annual_div_ps_gross
+    assert res.rows[0].fetched_at is None
     assert res.errors == ["temporary failure"]
 
 
@@ -314,3 +316,114 @@ def test_only_future_dividends_keep_existing_fallback():
     assert total == pytest.approx(100.0)
     assert latest == last.isoformat()
     assert ratios == {first.month: 0.5, last.month: 0.5}
+
+
+class _Close(list):
+    empty = False
+
+    def __init__(self, day):
+        super().__init__([250.0])
+        self.index = [_FakeStamp(day)]
+        self.iloc = self
+
+    def dropna(self):
+        return self
+
+
+class _Ticker:
+    def __init__(self, day, failed):
+        self.day = day
+        self.failed = failed
+
+    def history(self, **kwargs):
+        assert kwargs == {"period": "10d", "auto_adjust": False}
+        if self.failed == "price":
+            raise OSError("株価エラー")
+        return {"Close": _Close(self.day)}
+
+    @property
+    def dividends(self):
+        if self.failed == "dividend":
+            raise OSError("配当エラー")
+        return _series([(_ymd(self.day), 12.0)])
+
+    @property
+    def splits(self):
+        if self.failed == "splits":
+            raise OSError("分割エラー")
+        return _series([])
+
+
+@pytest.mark.parametrize("failed", ["price", "dividend", "splits", None])
+@pytest.mark.parametrize("cached_splits", [None, [], [("2026-09-29", 2.0)]])
+def test_partial_fetch_merges_each_item(monkeypatch, failed, cached_splits):
+    """取得失敗と取得成功で空を区別し、成功項目だけをキャッシュへ反映する。"""
+    from datetime import date, timedelta
+    from types import SimpleNamespace
+    from src.utils import now_jst_iso
+
+    day = date.today() - timedelta(days=3)  # 休日でも取得成功日時は今日
+    ticker = _Ticker(day, failed)
+    monkeypatch.setattr(md, "_yf", lambda: SimpleNamespace(Ticker=lambda _: ticker))
+    stamp = now_jst_iso()
+    monkeypatch.setattr(md, "now_jst_iso", lambda: stamp)
+    old_stamp = "2025-01-01T09:00:00+09:00"
+    existing = {}
+    if cached_splits is not None:
+        existing["AAA"] = MarketData(
+            symbol="AAA", currency="JPY", last_price=100.0, price_as_of="2025-01-01",
+            annual_div_ps_gross=5.0, annual_div_ps_net=4.0,
+            div_forecast_as_of="2025-01-01", source="yfinance", fetched_at=old_stamp,
+            div_ex_month_ratios={1: 1.0}, recent_splits=cached_splits,
+            price_fetched_at=old_stamp,
+        )
+    result = md.fetch_market_data([_holding("AAA", name="銘柄")], existing, force=True)
+    row = result.rows[0]
+    cached = existing.get("AAA")
+    if failed == "price":
+        assert row.last_price == (100.0 if cached else None)
+        assert row.price_as_of == ("2025-01-01" if cached else None)
+        assert row.price_fetched_at == (old_stamp if cached else None)
+    else:
+        assert row.last_price == 250.0
+        assert row.price_as_of == day.isoformat()
+        assert row.price_fetched_at == stamp
+    if failed == "dividend":
+        assert row.annual_div_ps_gross == (5.0 if cached else None)
+        assert row.annual_div_ps_net == (4.0 if cached else None)
+        assert row.div_forecast_as_of == ("2025-01-01" if cached else None)
+        assert row.div_ex_month_ratios == ({1: 1.0} if cached else None)
+    else:
+        assert row.annual_div_ps_gross == 12.0
+        assert row.annual_div_ps_net is None
+        assert row.div_forecast_as_of == day.isoformat()
+        assert row.div_ex_month_ratios == {day.month: 1.0}
+    assert row.recent_splits == (cached_splits if failed == "splits" and cached else [])
+    assert row.fetched_at == (None if failed else stamp)
+    assert len(result.errors) == (1 if failed else 0)
+    if failed:
+        # 部分失敗を当日取得済みとしてスキップしない。
+        retried = md.fetch_market_data(
+            [_holding("AAA", name="銘柄")], {"AAA": row}, force=False,
+        )
+        assert len(retried.errors) == 1
+
+
+def test_unexpected_fetch_failure_preserves_all_cached_items(monkeypatch):
+    def crash(*_args):
+        raise OSError("予期しない失敗")
+
+    monkeypatch.setattr(md, "_fetch_one", crash)
+    monkeypatch.setattr(md, "_yf", lambda: object())
+    cached = MarketData(
+        "AAA", "JPY", 100.0, "2025-01-01", 5.0, None, "2025-01-01",
+        "yfinance", "2025-01-01", recent_splits=[("2025-01-01", 2.0)],
+        price_fetched_at="2025-01-01",
+    )
+    result = md.fetch_market_data([_holding("AAA")], {"AAA": cached}, force=True)
+    row = result.rows[0]
+    assert row.last_price == cached.last_price
+    assert row.price_fetched_at == cached.price_fetched_at
+    assert row.recent_splits == cached.recent_splits
+    assert row.fetched_at is None
+    assert "予期しない失敗" in result.errors[0]

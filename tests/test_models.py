@@ -8,6 +8,25 @@ from __future__ import annotations
 from src.models import HOLDINGS_FIELDS, MARKET_DATA_FIELDS, Holding, MarketData
 
 
+def test_market_price_freshness_roundtrip_and_old_csv_compatibility():
+    from src.io_csv import load_market_data, save_market_data
+
+    old_row = {
+        "symbol": "7203", "currency": "JPY", "last_price": "2500",
+        "fetched_at": "2026-10-16T09:00:00+09:00",
+    }
+    market = MarketData.from_dict(old_row)
+    # 旧 CSV の全項目取得日時を、株価の取得成功日時として推測しない。
+    assert market.price_fetched_at is None
+    market.price_fetched_at = "2026-10-17T09:00:00+09:00"
+    market.fetched_at = None  # 配当だけ失敗しても株価の取得成功は保存される。
+    save_market_data([market])
+    restored = load_market_data()[0]
+    assert restored.price_fetched_at == market.price_fetched_at
+    assert restored.fetched_at is None
+    assert restored.to_dict() == market.to_dict()
+
+
 def _full_holding(**overrides) -> Holding:
     base = dict(
         symbol="7203",
