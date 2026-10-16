@@ -1490,10 +1490,13 @@ class DividendWindow(QMainWindow):
 
     # ---- データ読み込み / 再描画（legacy DividendApp から移植） ----
     def _reload_all(self) -> None:
-        self.holdings = load_holdings()
+        # 4種の CSV をすべて読み終えてから self の状態を更新する（途中失敗で新旧が混ざらない）。
+        holdings = load_holdings()
         market_data = load_market_data()
-        self.market_data_map = {row.symbol: row for row in market_data}
         fx_rows = load_fx()
+        history = load_history()
+        self.holdings = holdings
+        self.market_data_map = {row.symbol: row for row in market_data}
         self.fx_rate = fx_rows[-1].rate if fx_rows else None
         if market_data:
             latest = max((row.fetched_at or "") for row in market_data)
@@ -1502,7 +1505,7 @@ class DividendWindow(QMainWindow):
         else:
             self.market_fetched_at = None
             self.market_source = None
-        self.history = load_history()
+        self.history = history
         self._refresh_view()
         # 当日のスナップショットを履歴へ upsert（タブ切替で呼ばれる _refresh_view では
         # 記録せず、再読込・取得完了時のみ記録して CSV の過剰書込を避ける）。
@@ -2023,15 +2026,36 @@ class DividendWindow(QMainWindow):
                 return
             copy = reply == QMessageBox.StandardButton.Yes
 
+        prev_state = (
+            list(getattr(self, "holdings", [])),
+            dict(getattr(self, "market_data_map", {})),
+            getattr(self, "fx_rate", None),
+            getattr(self, "market_fetched_at", None),
+            getattr(self, "market_source", None),
+            list(getattr(self, "history", [])),
+        )
+        persisted = set_data_dir is io_csv.set_data_dir
+        switched = False
         try:
             if copy:
                 copy_data_files(current, new_dir)
             set_data_dir(new_dir)
-        except OSError as exc:
+            switched = True
+            init_empty_files()
+            self._reload_all()
+        except Exception as exc:  # noqa: BLE001 — 旧フォルダ・旧設定・旧表示へ復元して通知
+            (
+                self.holdings,
+                self.market_data_map,
+                self.fx_rate,
+                self.market_fetched_at,
+                self.market_source,
+                self.history,
+            ) = prev_state
+            if switched:
+                io_csv.restore_data_dir(current, persist=persisted)
             self._notify(f"データフォルダを変更できませんでした: {exc}", error=True)
             return
-        init_empty_files()
-        self._reload_all()
         self._notify(f"データフォルダを変更しました: {new_dir}")
 
     def action_open_data_dir(self) -> None:

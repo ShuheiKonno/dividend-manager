@@ -549,3 +549,28 @@ def test_copy_data_files_skips_settings(tmp_path):
     copied = io_csv.copy_data_files(src, dst)
     assert copied == ["holdings.csv"]
     assert not (dst / "settings.json").exists()
+
+
+def test_restore_data_dir_restores_every_path_and_config(
+    monkeypatch, restore_data_dir, tmp_path
+):
+    """restore_data_dir が DATA_DIR・全 _DERIVED_PATHS・app_config を旧フォルダへ戻すこと。"""
+    old_dir = tmp_path / "old"
+    new_dir = tmp_path / "new"
+    old_dir.mkdir()
+    new_dir.mkdir()
+    saved: list[str] = []
+    monkeypatch.setattr(
+        io_csv.app_config, "save_data_dir", lambda p: saved.append(str(p))
+    )
+
+    io_csv.set_data_dir(new_dir, persist=True)
+    assert io_csv.DATA_DIR == new_dir
+    assert saved[-1] == str(new_dir)
+
+    io_csv.restore_data_dir(old_dir, persist=True)
+    assert io_csv.DATA_DIR == old_dir
+    for name, value in _path_globals().items():
+        assert value == old_dir or value.parent == old_dir, f"{name}: {value}"
+    assert saved[-1] == str(old_dir)
+

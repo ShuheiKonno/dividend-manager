@@ -511,6 +511,91 @@ def test_change_data_dir_reports_failure(monkeypatch, tmp_path):
     assert stub.notes and stub.notes[-1][1] is True
 
 
+def _real_switch_stub(monkeypatch, tmp_path):
+    """実 set_data_dir を使いつつ、app_config 保存先だけメモリへ隔離したスタブを作る。"""
+    current = tmp_path / "current"
+    target = tmp_path / "target"
+    current.mkdir()
+    target.mkdir()
+    io_csv.set_data_dir(current, persist=False)
+    persisted = {"dir": current}
+    monkeypatch.setattr(
+        io_csv.app_config,
+        "save_data_dir",
+        lambda p: persisted.update(dir=gui.Path(p)),
+    )
+    stub = _io_stub([_holding(symbol="7203")], [_history("2026-01-01")])
+    stub._busy = False
+    monkeypatch.setattr(
+        gui.QFileDialog, "getExistingDirectory", lambda *a, **k: str(target)
+    )
+    _answer(monkeypatch, gui.QMessageBox.StandardButton.No)
+    return stub, current, target, persisted
+
+
+def test_change_data_dir_rolls_back_when_init_empty_files_fails(monkeypatch, tmp_path):
+    """init_empty_files が OSError を投げたら、io_csv パス・app_config・表示すべて旧フォルダへ戻ること。"""
+    stub, current, _target, persisted = _real_switch_stub(monkeypatch, tmp_path)
+    monkeypatch.setattr(
+        gui,
+        "init_empty_files",
+        lambda: (_ for _ in ()).throw(OSError("backup フォルダを作成できません")),
+    )
+
+    gui.DividendWindow.action_change_data_dir(stub)
+    assert io_csv.DATA_DIR == current
+    for name in io_csv._DERIVED_PATHS:
+        assert getattr(io_csv, name).parent == current
+    assert persisted["dir"] == current
+    assert [h.symbol for h in stub.holdings] == ["7203"]
+    assert [r.record_date for r in stub.history] == ["2026-01-01"]
+    assert stub.reloaded is False
+    assert stub.notes and stub.notes[-1][1] is True
+
+
+def test_change_data_dir_rolls_back_when_reload_fails_midway(monkeypatch, tmp_path):
+    """_reload_all の途中で読込例外が出ても、self の状態・io_csv パス・app_config が旧フォルダで揃うこと。"""
+    stub, current, target, persisted = _real_switch_stub(monkeypatch, tmp_path)
+    # 新フォルダには別銘柄の holdings.csv があり、history.csv の読込だけ失敗させる。
+    io_csv.export_holdings_csv(target / "holdings.csv", [_holding(symbol="AAPL")])
+    _answer(monkeypatch, gui.QMessageBox.StandardButton.Yes)
+    stub._reload_all = lambda: gui.DividendWindow._reload_all(stub)
+    monkeypatch.setattr(
+        gui,
+        "load_history",
+        lambda: (_ for _ in ()).throw(OSError("history.csv が破損しています")),
+    )
+
+    gui.DividendWindow.action_change_data_dir(stub)
+    assert io_csv.DATA_DIR == current
+    for name in io_csv._DERIVED_PATHS:
+        assert getattr(io_csv, name).parent == current
+    assert persisted["dir"] == current
+    # 先に読めたはずの AAPL で self.holdings が半端に上書きされていないこと
+    assert [h.symbol for h in stub.holdings] == ["7203"]
+    assert [r.record_date for r in stub.history] == ["2026-01-01"]
+    assert stub.notes and stub.notes[-1][1] is True
+
+
+def test_change_data_dir_keeps_state_when_config_save_fails(monkeypatch, tmp_path):
+    """app_config.save_data_dir が失敗したら、パスも表示も旧フォルダのまま保たれること。"""
+    stub, current, _target, persisted = _real_switch_stub(monkeypatch, tmp_path)
+    monkeypatch.setattr(
+        io_csv.app_config,
+        "save_data_dir",
+        lambda _p: (_ for _ in ()).throw(OSError("config.json に書き込めません")),
+    )
+
+    gui.DividendWindow.action_change_data_dir(stub)
+    assert io_csv.DATA_DIR == current
+    for name in io_csv._DERIVED_PATHS:
+        assert getattr(io_csv, name).parent == current
+    assert persisted["dir"] == current
+    assert [h.symbol for h in stub.holdings] == ["7203"]
+    assert stub.reloaded is False
+    assert stub.notes and stub.notes[-1][1] is True
+
+
 # ---- 月別内訳テーブルの「優待内容」列幅（A5） ----
 
 

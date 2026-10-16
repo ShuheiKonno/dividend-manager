@@ -121,6 +121,13 @@ _DERIVED_PATHS = {
 _DATA_FILE_NAMES = ("holdings.csv", "market_data.csv", "fx.csv", "history.csv")
 
 
+def _set_data_dir_globals(target: Path) -> None:
+    """DATA_DIR と _DERIVED_PATHS のモジュールグローバルを一括で張り替える。"""
+    globals()["DATA_DIR"] = target
+    for name, child in _DERIVED_PATHS.items():
+        globals()[name] = target / child
+
+
 def set_data_dir(path: str | Path, persist: bool = True) -> Path:
     """データフォルダを切り替える（フォルダ作成 → 設定保存 → パス張替の順）。
 
@@ -132,10 +139,20 @@ def set_data_dir(path: str | Path, persist: bool = True) -> Path:
     new_dir.mkdir(parents=True, exist_ok=True)
     if persist:
         app_config.save_data_dir(new_dir)
-    globals()["DATA_DIR"] = new_dir
-    for name, child in _DERIVED_PATHS.items():
-        globals()[name] = new_dir / child
+    _set_data_dir_globals(new_dir)
     return new_dir
+
+
+def restore_data_dir(path: str | Path, persist: bool = True) -> Path:
+    """切替後の初期化・読込が失敗したときに旧フォルダへパスと永続設定を戻す。"""
+    old_dir = Path(path).expanduser()
+    _set_data_dir_globals(old_dir)
+    if persist:
+        try:
+            app_config.save_data_dir(old_dir)
+        except OSError:
+            pass
+    return old_dir
 
 
 def copy_data_files(src: str | Path, dst: str | Path) -> list[str]:
