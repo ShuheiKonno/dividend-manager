@@ -1474,7 +1474,9 @@ class DividendWindow(QMainWindow):
         self._refresh_view()
         # 当日のスナップショットを履歴へ upsert（タブ切替で呼ばれる _refresh_view では
         # 記録せず、再読込・取得完了時のみ記録して CSV の過剰書込を避ける）。
-        self._record_history_snapshot()
+        history_notice = self._record_history_snapshot()
+        if history_notice:
+            self._notify(history_notice)
 
     def _refresh_view(self) -> None:
         rows, summary = compute_rows(
@@ -1678,7 +1680,7 @@ class DividendWindow(QMainWindow):
             )
         return result
 
-    def _record_history_snapshot(self) -> None:
+    def _record_history_snapshot(self) -> str | None:
         """当日のスナップショットを履歴へ upsert して保存する。
 
         表示モードに依存させないため、税引前・取崩無し（mode="gross",
@@ -1686,7 +1688,20 @@ class DividendWindow(QMainWindow):
         で再計算する。取崩収入は定額・定率それぞれで別途計算し、収入モードごとの
         系列の値とする（1 列で兼ねると、定額を選んでいるのに定率の線が出る）。
         評価額・配当・優待が全て None（起動直後で株価未取得）の場合は記録しない。
+        株価が当日未取得・分割が未反映の場合も記録せず、呼出側へ通知文を返す。
         """
+        if splits.pending_holdings(self.holdings, self.market_data_map):
+            return "分割を反映するまで推移を記録しません"
+        today = today_jst_str()
+        for holding in self.holdings:
+            if not holding.active:
+                continue
+            data = self.market_data_map.get(holding.symbol)
+            # 基準価額が無い投信は従来どおり簿価フォールバックを認める。
+            if holding.asset_type == "fund" and (data is None or data.last_price is None):
+                continue
+            if data is None or not (data.price_fetched_at or "").startswith(today):
+                return "本日取得した株価が揃うまで推移を記録しません"
         _, base = compute_rows(
             self.holdings, self.market_data_map, self.fx_rate,
             "gross", None,
@@ -1709,7 +1724,7 @@ class DividendWindow(QMainWindow):
             "gross", "fixed",
         )
         record = HistoryRecord(
-            record_date=today_jst_str(),
+            record_date=today,
             total_market_value_jpy=market,
             total_book_value_jpy=base.total_book_value_jpy,
             total_dividend_jpy=dividend,
@@ -2756,8 +2771,10 @@ class DividendWindow(QMainWindow):
                     self.holdings = holdings
         self._refresh_view()
         # 最新株価で評価額が確定した時点で当日スナップショットを記録。
-        self._record_history_snapshot()
+        history_notice = self._record_history_snapshot()
         split_notice = self._split_notice()
+        if history_notice:
+            split_notice += " / " + history_notice
         if result.errors:
             self._notify(
                 f"一部の取得に失敗しました（{len(result.errors)}件）: {result.errors[0]}"
@@ -2784,8 +2801,11 @@ class DividendWindow(QMainWindow):
                 return
             self.fx_rate = fx.rate
             self._refresh_view()
-            self._record_history_snapshot()
-            self._notify(f"USDJPY = {fx.rate:.4f} に更新しました")
+            history_notice = self._record_history_snapshot()
+            self._notify(
+                f"USDJPY = {fx.rate:.4f} に更新しました"
+                + (" / " + history_notice if history_notice else "")
+            )
         else:
             self._notify("USDJPYレートを取得できませんでした", error=True)
 

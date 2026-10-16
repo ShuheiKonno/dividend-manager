@@ -286,8 +286,9 @@ def test_fetch_one_stores_recent_splits_and_corrects_dividend(monkeypatch):
         ]
     )
     splits = _series([((2009, 1, 4), 100.0), (_ymd(ex), 2.0)])
-    row, errors, _ = _fetch_with(monkeypatch, _FakeTicker(dividends, splits))
+    row, errors, _, succeeded = _fetch_with(monkeypatch, _FakeTicker(dividends, splits))
     assert errors == []
+    assert succeeded == {"price", "dividend", "splits"}
     assert row.annual_div_ps_gross == pytest.approx(108.5)
     # 何年も前の分割は保存しない（直近だけ）。
     assert row.recent_splits == [(ex.isoformat(), 2.0)]
@@ -296,12 +297,13 @@ def test_fetch_one_stores_recent_splits_and_corrects_dividend(monkeypatch):
 def test_fetch_one_survives_splits_failure(monkeypatch):
     ex = date.today() - timedelta(days=1)
     dividends = _series([(_ymd(ex - timedelta(days=183)), 56.0), (_ymd(ex), 105.0)])
-    row, errors, _ = _fetch_with(
+    row, errors, _, succeeded = _fetch_with(
         monkeypatch,
         _FakeTicker(dividends, None, splits_error=RuntimeError("boom")),
     )
-    # 分割が取れなくても株価・配当の取得は成立し、エラー扱いにもしない（補正は効かない）。
-    assert errors == []
+    # 株価・配当は取得を続け、分割だけ失敗として集約側へ通知する。
+    assert errors == ["分割取得失敗: 5334 (boom)"]
+    assert succeeded == {"price", "dividend"}
     assert row.last_price == 3737.0
     assert row.annual_div_ps_gross == pytest.approx(161.0)
     assert row.recent_splits == []
