@@ -44,10 +44,20 @@ def _window_stub(holdings, market_map):
         def _refresh_trend(self):
             pass
 
+        def _refresh_view(self):
+            pass
+
+        def _notify(self, message, error=False):
+            self.notes.append((message, error))
+
+        _record_history_snapshot = gui.DividendWindow._record_history_snapshot
+        _split_notice = gui.DividendWindow._split_notice
+
     stub = WindowStub()
     stub.holdings = holdings
     stub.market_data_map = market_map
     stub.history = []
+    stub.notes = []
     return stub
 
 
@@ -102,7 +112,8 @@ def test_history_snapshot_uses_gross_dividend(monkeypatch):
     market = MarketData(
         symbol="7203", currency="JPY", last_price=2500.0, price_as_of="2026-05-30",
         annual_div_ps_gross=100.0, annual_div_ps_net=None,
-        div_forecast_as_of="2026-05-30", source="test", fetched_at="x",
+        div_forecast_as_of="2026-05-30", source="test", fetched_at=None,
+        price_fetched_at=gui.today_jst_str() + "T09:00:00+09:00",
     )
     saved = []
     monkeypatch.setattr(gui, "save_history", lambda rows: saved.extend(rows))
@@ -123,6 +134,132 @@ def test_history_snapshot_skips_missing_market_value(monkeypatch):
     gui.DividendWindow._record_history_snapshot(stub)
     assert called is False
     assert stub.history == []
+
+
+def _snapshot_market(**overrides):
+    values = dict(
+        symbol="7203", currency="JPY", last_price=2500.0, price_as_of="2025-01-01",
+        annual_div_ps_gross=100.0, annual_div_ps_net=None,
+        div_forecast_as_of="2025-01-01", source="test", fetched_at=None,
+        price_fetched_at=gui.today_jst_str() + "T09:00:00+09:00",
+    )
+    values.update(overrides)
+    return MarketData(**values)
+
+
+@pytest.mark.parametrize("price_fetched_at", [None, "2025-01-01T09:00:00+09:00"])
+def test_history_snapshot_skips_stale_prices(monkeypatch, price_fetched_at):
+    saved = []
+    monkeypatch.setattr(gui, "save_history", lambda rows: saved.append(rows))
+    market = _snapshot_market(price_fetched_at=price_fetched_at)
+    # 全項目の日時が今日でも、株価の成功日時が不明・古ければ記録しない。
+    market.fetched_at = gui.today_jst_str() + "T09:00:00+09:00"
+    stub = _window_stub([_holding()], {"7203": market})
+    previous = _history(gui.today_jst_str(), total_market_value_jpy=123.0)
+    stub.history = [previous]
+    notice = gui.DividendWindow._record_history_snapshot(stub)
+    assert notice == "本日取得した株価が揃うまで推移を記録しません"
+    assert saved == []
+    assert stub.history == [previous]
+
+
+def test_history_snapshot_checks_every_active_price(monkeypatch):
+    saved = []
+    monkeypatch.setattr(gui, "save_history", lambda rows: saved.append(rows))
+    stub = _window_stub(
+        [_holding(), _holding(symbol="OLD")],
+        {"7203": _snapshot_market(), "OLD": _snapshot_market(
+            symbol="OLD", price_fetched_at="2025-01-01",
+        )},
+    )
+    assert gui.DividendWindow._record_history_snapshot(stub)
+    assert saved == []
+
+
+def test_history_snapshot_skips_pending_splits(monkeypatch):
+    saved = []
+    monkeypatch.setattr(gui, "save_history", lambda rows: saved.append(rows))
+    market = _snapshot_market(recent_splits=[(gui.today_jst_str(), 2.0)])
+    stub = _window_stub([_holding()], {"7203": market})
+    notice = gui.DividendWindow._record_history_snapshot(stub)
+    assert notice == "分割を反映するまで推移を記録しません"
+    assert saved == []
+    assert stub.history == []
+    # 数値を反映済みにすれば、同じ取得結果で履歴を記録できる。
+    stub.holdings[0].split_applied_through = gui.today_jst_str()
+    assert gui.DividendWindow._record_history_snapshot(stub) is None
+    assert len(saved) == 1
+
+
+@pytest.mark.parametrize("with_cached_fund", [False, True])
+def test_history_snapshot_allows_fund_book_fallback_and_inactive_prices(
+    monkeypatch, with_cached_fund,
+):
+    saved = []
+    monkeypatch.setattr(gui, "save_history", lambda rows: saved.append(rows))
+    fund = _holding(symbol="FUND", asset_type="fund")
+    stub = _window_stub([_holding(), fund, _holding(symbol="OLD", active=False)], {
+        "7203": _snapshot_market(),
+    })
+    if with_cached_fund:
+        stub.market_data_map["FUND"] = _snapshot_market(
+            symbol="FUND", last_price=None, price_fetched_at=None,
+        )
+    assert gui.DividendWindow._record_history_snapshot(stub) is None
+    assert saved[0][0].total_market_value_jpy == 450_000.0
+
+
+def test_history_snapshot_requires_fresh_fund_market_price(monkeypatch):
+    saved = []
+    monkeypatch.setattr(gui, "save_history", lambda rows: saved.append(rows))
+    stub = _window_stub([_holding(asset_type="fund")], {
+        "7203": _snapshot_market(price_fetched_at=None),
+    })
+    assert gui.DividendWindow._record_history_snapshot(stub)
+    assert saved == []
+
+
+@pytest.mark.parametrize("pending", [False, True])
+def test_market_finished_records_fresh_price_and_reports_pending_split(monkeypatch, pending):
+    from types import SimpleNamespace
+
+    saved = []
+    monkeypatch.setattr(gui, "save_history", lambda rows: saved.append(rows))
+    monkeypatch.setattr(gui, "save_market_data", lambda _rows: None)
+    stub = _window_stub([_holding()], {"7203": _snapshot_market(price_fetched_at=None)})
+    gui.DividendWindow._record_history_snapshot(stub)  # 起動時の古いキャッシュでは保存しない。
+    assert saved == []
+    # F5 の株価は成功、配当は失敗。終値日が古くても当日取得成功なら記録する。
+    market = _snapshot_market(
+        recent_splits=[(gui.today_jst_str(), 2.0)] if pending else [],
+    )
+    result = SimpleNamespace(
+        rows=[market], source="yfinance", name_updates={}, errors=["配当取得失敗"],
+    )
+    gui.DividendWindow._on_market_finished(stub, result)
+    assert len(saved) == (0 if pending else 1)
+    assert stub.market_data_map["7203"].price_fetched_at == market.price_fetched_at
+    if pending:
+        assert "分割を反映するまで推移を記録しません" in stub.notes[-1][0]
+    else:
+        assert saved[0][0].record_date == gui.today_jst_str()
+        assert saved[0][0].total_market_value_jpy == 250_000.0
+
+
+def test_market_finished_reports_stale_price_without_recording(monkeypatch):
+    from types import SimpleNamespace
+
+    saved = []
+    monkeypatch.setattr(gui, "save_history", lambda rows: saved.append(rows))
+    monkeypatch.setattr(gui, "save_market_data", lambda _rows: None)
+    market = _snapshot_market(price_fetched_at=None)
+    stub = _window_stub([_holding()], {})
+    result = SimpleNamespace(
+        rows=[market], source="yfinance", name_updates={}, errors=["株価取得失敗"],
+    )
+    gui.DividendWindow._on_market_finished(stub, result)
+    assert saved == []
+    assert "本日取得した株価が揃うまで推移を記録しません" in stub.notes[-1][0]
 
 
 # ---- エクスポート / 履歴取込アクション（QFileDialog をスタブ化して本体を実行） ----
