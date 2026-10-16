@@ -283,4 +283,34 @@ def test_future_dated_dividend_does_not_shift_the_window():
         (_ymd(today + timedelta(days=60)), 50.0),
     ])
     total, _, _ = md._parse_yfinance_dividends(series)
-    assert total == pytest.approx(250.0)
+    assert total == pytest.approx(200.0)
+
+
+def test_future_semiannual_dividend_is_excluded_from_all_outputs():
+    from datetime import date, timedelta
+
+    today = date.today()
+    older = today - timedelta(days=365)
+    recent = today - timedelta(days=183)
+    series = _series([
+        (_ymd(older), 50.0),
+        (_ymd(recent), 50.0),
+        (_ymd(today + timedelta(days=1)), 50.0),
+    ])
+    total, latest, ratios = md._parse_yfinance_dividends(series)
+    assert total == pytest.approx(100.0)
+    assert latest == recent.isoformat()
+    assert ratios == {older.month: 0.5, recent.month: 0.5}
+
+
+def test_only_future_dividends_keep_existing_fallback():
+    from datetime import date, timedelta
+
+    first = date.today() + timedelta(days=1)
+    last = first + timedelta(days=180)
+    total, latest, ratios = md._parse_yfinance_dividends(
+        _series([(_ymd(first), 50.0), (_ymd(last), 50.0)])
+    )
+    assert total == pytest.approx(100.0)
+    assert latest == last.isoformat()
+    assert ratios == {first.month: 0.5, last.month: 0.5}

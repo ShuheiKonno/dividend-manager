@@ -216,7 +216,7 @@ def _parse_yfinance_dividends(
     latest_date = None
     by_month: dict[int, float] = {}
     for d, val in entries:
-        if d <= window_start:
+        if d <= window_start or d > anchor:
             continue
         total += val
         by_month[d.month] = by_month.get(d.month, 0.0) + val
