@@ -137,7 +137,7 @@ def _check_actions(w) -> None:
     # F5 は為替も取るので、メニュー（text）とボタン面（iconText）の両方で分かること。
     assert "為替" in actions["update_market"].text(), actions["update_market"].text()
     assert "為替" in actions["update_market"].iconText(), actions["update_market"].iconText()
-    assert "のみ" in actions["update_fx"].text(), actions["update_fx"].text()
+    assert actions["update_fx"].text() == "為替取得（USDJPY）", actions["update_fx"].text()
     assert actions["edit"].shortcut().toString() == "Ctrl+E"
     assert actions["tab4"].shortcut().toString() == "Ctrl+5", "配当優待詳細タブのキーが無い"
 

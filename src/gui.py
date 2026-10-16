@@ -730,7 +730,7 @@ class DividendWindow(QMainWindow):
     # ラベルへ手書きでキーを書かない（メニューが自動表示する）。
     _ACTION_DEFS = [
         ("update_market", "株価・配当・為替を取得", "F5", "action_update_market"),
-        ("update_fx", "USDJPYのみ取得", "Ctrl+U", "action_update_fx"),
+        ("update_fx", "為替取得（USDJPY）", "Ctrl+U", "action_update_fx"),
         ("reload", "再読込", "Ctrl+R", "_reload_all"),
         ("new", "新規登録...", "Ctrl+N", "action_new_holding"),
         ("edit", "編集...", "Ctrl+E", "action_edit"),
@@ -903,7 +903,7 @@ class DividendWindow(QMainWindow):
             self,
             "キーボードショートカット",
             "F5: 株価・配当・為替を取得（為替は USD 銘柄があるとき）\n"
-            "Ctrl+U: USDJPYレートのみ取得\n"
+            "Ctrl+U: 為替取得（USDJPY）\n"
             "Ctrl+R: 再読込（ローカルCSV）\n"
             "\n"
             "Ctrl+N: 新規登録\n"
@@ -1051,7 +1051,7 @@ class DividendWindow(QMainWindow):
         # 完全な名前を並べると最小幅 900px で1段目があふれ、右端の操作が拡張メニューへ
         # 消える（_check_toolbar が固定）。何をするかはツールチップで完全な名前を出す。
         act["update_market"].setIconText("株価・為替を取得")
-        act["update_fx"].setIconText("USDJPYのみ")
+        act["update_fx"].setIconText("為替取得")
         for key in ("update_market", "update_fx", "reload"):
             bar.addAction(act[key])
         bar.addSeparator()
