@@ -46,7 +46,7 @@ from PySide6.QtWidgets import (
     QFileDialog,
     QComboBox,
     QMenu,
-    QToolButton,
+    QCheckBox,
     QToolBar,
 )
 
@@ -928,10 +928,10 @@ class DividendWindow(QMainWindow):
         help_menu.addAction(act["help_shortcuts"])
 
     def _build_asset_scope_menu(self) -> QMenu:
-        """表示対象の資産クラスのメニュー（表示メニューとツールバーで1つずつ作る）。
+        """表示メニューの「表示対象の資産」サブメニュー。
 
-        QMenu は1つの親にしか付けられないので器は都度作るが、中の QAction は
-        共有する（可否・チェック状態がどちらからでも同じに見える）。
+        ツールバー側はチェックボックスで、状態は _sync_asset_scope_controls が
+        QAction と同時に揃える。
         """
         menu = QMenu("表示対象の資産", self)
         for cls in ASSET_CLASSES:
@@ -1170,20 +1170,26 @@ class DividendWindow(QMainWindow):
             self._on_income_benefit,
         )
         bar.addWidget(self._benefit_combo)
-        # 表示対象の資産クラス。複数選択なのでコンボではなくチェック式メニューを
-        # 開くボタンにする。KPI がすべて変わるので、ボタン面に現在の対象を常に出す。
+        # 表示対象の資産クラス。複数選択なので3つのチェックボックスを常に並べる
+        # （KPI がすべて変わるので、何を選んでいるかが開かずに見える形にする）。
+        # 状態は表示メニューの QAction と同じく _sync_asset_scope_controls の
+        # 1箇所で揃える。clicked で受けるのは、同期時の setChecked で再発火させないため。
         bar.addWidget(QLabel("   対象: "))
-        self._asset_scope_button = QToolButton()
-        self._asset_scope_button.setObjectName("assetScopeButton")
-        self._asset_scope_button.setPopupMode(
-            QToolButton.ToolButtonPopupMode.InstantPopup
-        )
-        self._asset_scope_button.setMenu(self._build_asset_scope_menu())
-        self._asset_scope_button.setToolTip(
+        tip = (
             "表・KPI・グラフ・Markdown 出力の対象にする資産。"
-            "米国株＝USD 建ての株式・ETF、投信＝資産種別が投資信託"
+            "米国株＝USD 建ての株式・ETF、投信＝資産種別が投資信託。"
+            "最後の1つは外せません"
         )
-        bar.addWidget(self._asset_scope_button)
+        self._asset_scope_checks: dict[str, QCheckBox] = {}
+        for cls in ASSET_CLASSES:
+            check = QCheckBox(ASSET_CLASS_LABELS[cls])
+            check.setObjectName(f"assetScope_{cls}")
+            check.setToolTip(tip)
+            check.clicked.connect(
+                lambda checked=False, c=cls: self.action_toggle_asset_class(c, checked)
+            )
+            bar.addWidget(check)
+            self._asset_scope_checks[cls] = check
         self._sync_asset_scope_controls()
 
     def _build_filter_box(self) -> QWidget:
@@ -1227,10 +1233,10 @@ class DividendWindow(QMainWindow):
         self._sync_asset_scope_controls()
 
     def _sync_asset_scope_controls(self) -> None:
-        """資産クラスの QAction のチェック・可否と、ボタン面の文言を揃える。
+        """資産クラスの QAction とツールバーのチェックボックスのチェック・可否を揃える。
 
-        選ばれているのが1つだけなら、その QAction を押せなくする（空集合にすると
-        全画面が空になる）。
+        選ばれているのが1つだけなら、それを外せなくする（空集合にすると全画面が
+        空になる）。
         """
         only_one = len(self.asset_scope) == 1
         for cls in ASSET_CLASSES:
@@ -1243,9 +1249,10 @@ class DividendWindow(QMainWindow):
         show_all = self._actions.get("asset_all")
         if show_all is not None:
             show_all.setEnabled(not is_all_asset_scope(self.asset_scope))
-        button = getattr(self, "_asset_scope_button", None)
-        if button is not None:
-            button.setText(asset_scope_label(self.asset_scope))
+        for cls, check in getattr(self, "_asset_scope_checks", {}).items():
+            checked = cls in self.asset_scope
+            check.setChecked(checked)
+            check.setEnabled(not (only_one and checked))
 
     def _make_combo(
         self, defs: list[tuple[str, str]], current_key: str, on_select
@@ -1550,7 +1557,7 @@ class DividendWindow(QMainWindow):
             return ""
         return (
             f"（{ASSET_CLASS_LABELS[cls]}は表示対象外のため一覧に出ません。"
-            "ツールバーの「対象」で表示できます）"
+            "ツールバーの「対象」のチェックで表示できます）"
         )
 
     def _on_filter_changed(self, text: str) -> None:
@@ -1864,7 +1871,8 @@ class DividendWindow(QMainWindow):
         first = scoped_history_start(hist_dicts, self.asset_scope)
         if first is None or first == hist_dicts[0]["date"]:
             return ""  # 1点も無い（空メッセージ側の担当）か、全期間ぶんある
-        return f"※資産別の内訳は {first} 以降のみ記録"
+        # 最小幅 900px の操作行に収まる長さにする（「資産別の内訳は」だと末尾が切れた）。
+        return f"※資産別は {first} 以降のみ記録"
 
     @staticmethod
     def _withdrawal_coverage_note(hist_dicts: list[dict], mode: str | None) -> str:

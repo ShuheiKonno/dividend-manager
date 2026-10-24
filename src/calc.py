@@ -29,7 +29,7 @@ class Summary:
 # 資産種別に ETF が無いため、国内 ETF は日本株・米国 ETF は米国株に入る。
 ASSET_CLASS_LABELS = {"jp_stock": "日本株", "us_stock": "米国株", "fund": "投信"}
 DEFAULT_ASSET_SCOPE: tuple[str, ...] = ASSET_CLASSES
-# 全クラス選択時の表示名（「日本株・米国株・投信」と並べると長すぎてツールバーに収まらない）。
+# 全クラス選択時の表示名（ステータスバー・通知・注記で使う。3つ並べると長い）。
 ASSET_SCOPE_ALL_LABEL = "全て"
 
 

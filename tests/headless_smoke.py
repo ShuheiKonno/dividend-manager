@@ -215,36 +215,35 @@ def _check_toolbar(w) -> None:
     # あふれの検知は拡張ボタン（»）の可視性で見る。個々のボタンの isVisible だと、
     # 見ていない項目（1段目右端の「分割を反映」等）があふれても気付けない。
     # 実レイアウトが要るのでここだけ show() する（offscreen なら画面には出ない）。
-    combos = (w._mode_combo, w._withdrawal_combo, w._benefit_combo, w._asset_scope_button)
+    combos = (
+        w._mode_combo, w._withdrawal_combo, w._benefit_combo,
+        *w._asset_scope_checks.values(),
+    )
     original = w.size()
     original_scope = w.asset_scope
     w.show()
     try:
-        # 「対象」ボタンは選択で文言の長さが変わる。全て（最短）と2クラス選択
-        # （最長「日本株・米国株」）の両方で、あふれていないことを見る。
-        for scope in (("jp_stock", "us_stock", "fund"), ("jp_stock", "us_stock")):
-            w._set_asset_scope(scope)
-            for width in (w.minimumWidth(), 1024, 1100, 1536):
-                w.resize(width, max(620, w.minimumHeight()))
-                QApplication.processEvents()
-                for bar in (w._toolbar, w._view_toolbar):
-                    ext = bar.findChild(QToolButton, "qt_toolbar_ext_button")
-                    assert ext is None or not ext.isVisible(), (
-                        f"幅 {width}px で {bar.objectName()} があふれている "
-                        f"(sizeHint {bar.sizeHint().width()}px > 幅 {bar.width()}px)"
-                    )
-                assert all(c.isVisible() for c in combos), f"幅 {width}px でコンボが消えている"
-                assert w._filter.isVisible(), f"幅 {width}px で絞り込みが消えている"
-                # コーナーに幅を取られてタブ見出しが縮む（スクロール矢印が出てタブが
-                # 隠れる）のは、絞り込みを移したことで起こり得る別の回帰。
-                tab_bar = w._tabs.tabBar()
-                assert tab_bar.width() >= tab_bar.sizeHint().width(), (
-                    f"幅 {width}px でタブ見出しが縮んでいる "
-                    f"({tab_bar.width()}px < {tab_bar.sizeHint().width()}px)"
+        for width in (w.minimumWidth(), 1024, 1100, 1536):
+            w.resize(width, max(620, w.minimumHeight()))
+            QApplication.processEvents()
+            for bar in (w._toolbar, w._view_toolbar):
+                ext = bar.findChild(QToolButton, "qt_toolbar_ext_button")
+                assert ext is None or not ext.isVisible(), (
+                    f"幅 {width}px で {bar.objectName()} があふれている "
+                    f"(sizeHint {bar.sizeHint().width()}px > 幅 {bar.width()}px)"
                 )
-                assert corner.x() > tab_bar.geometry().right(), (
-                    f"幅 {width}px で絞り込みがタブ見出しに重なっている"
-                )
+            assert all(c.isVisible() for c in combos), f"幅 {width}px でコンボが消えている"
+            assert w._filter.isVisible(), f"幅 {width}px で絞り込みが消えている"
+            # コーナーに幅を取られてタブ見出しが縮む（スクロール矢印が出てタブが
+            # 隠れる）のは、絞り込みを移したことで起こり得る別の回帰。
+            tab_bar = w._tabs.tabBar()
+            assert tab_bar.width() >= tab_bar.sizeHint().width(), (
+                f"幅 {width}px でタブ見出しが縮んでいる "
+                f"({tab_bar.width()}px < {tab_bar.sizeHint().width()}px)"
+            )
+            assert corner.x() > tab_bar.geometry().right(), (
+                f"幅 {width}px で絞り込みがタブ見出しに重なっている"
+            )
     finally:
         w._set_asset_scope(original_scope)  # 設定（asset_scope）を元へ戻す
         w.resize(original)
@@ -256,10 +255,9 @@ def _check_toolbar(w) -> None:
     assert w._withdrawal_combo.currentData() == (w.withdrawal_mode or "none")
     # 優待は推移グラフの操作行ではなくツールバー（税引・収入と同じ行）にある
     assert w._benefit_combo.currentData() == w.income_benefit
-    # 表示対象の資産も同じ行に並び、ボタン面が現在の対象を示す
-    from src.calc import asset_scope_label
-
-    assert w._asset_scope_button.text() == asset_scope_label(w.asset_scope)
+    # 表示対象の資産も同じ行にチェックボックスで並び、現在の対象を示す
+    for cls, check in w._asset_scope_checks.items():
+        assert check.isChecked() is (cls in w.asset_scope), f"{cls} のチェックがずれた"
     assert not hasattr(w, "yield_scope"), (
         "利回りの「投信除く」が復活している（表示対象の資産に吸収した）"
     )
@@ -570,7 +568,6 @@ def _check_asset_scope(w) -> None:
     from src.calc import (
         ASSET_CLASSES,
         asset_class,
-        asset_scope_label,
         compute_rows,
         monthly_breakdown,
         scope_holdings,
@@ -590,9 +587,10 @@ def _check_asset_scope(w) -> None:
         if a.menu() is not None and a.text() == "表示対象の資産"
     )
     shared = [w._actions[f"asset_{c}"] for c in ASSET_CLASSES]
-    for menu in (scope_menu, w._asset_scope_button.menu()):
-        for action in shared:
-            assert action in menu.actions(), f"{action.text()} がメニューに無い"
+    for action in shared:
+        assert action in scope_menu.actions(), f"{action.text()} がメニューに無い"
+    checks = w._asset_scope_checks
+    assert list(checks) == list(ASSET_CLASSES), "ツールバーのチェックボックスが3つ並んでいない"
 
     try:
         w._filter.clear()  # 絞り込み欄の文字で行数が減らないようにする
@@ -607,12 +605,12 @@ def _check_asset_scope(w) -> None:
             assert io_csv.load_settings().get("asset_scope") == list(scope), (
                 "表示対象が設定へ保存されていない"
             )
-            assert w._asset_scope_button.text() == asset_scope_label(scope)
             for cls in ASSET_CLASSES:
-                action = w._actions[f"asset_{cls}"]
-                assert action.isChecked() is (cls in scope), f"{cls} のチェックがずれた"
-                if len(scope) == 1 and cls in scope:
-                    assert not action.isEnabled(), "最後の1つを外せる（全画面が空になる）"
+                # メニューの QAction とツールバーのチェックボックスが同じ状態を示す。
+                for control in (w._actions[f"asset_{cls}"], checks[cls]):
+                    assert control.isChecked() is (cls in scope), f"{cls} のチェックがずれた"
+                    if len(scope) == 1 and cls in scope:
+                        assert not control.isEnabled(), "最後の1つを外せる（全画面が空になる）"
             assert w._actions["asset_all"].isEnabled() is (len(scope) < len(ASSET_CLASSES))
 
             expected = scope_holdings(w.holdings, scope, include_inactive=w.show_inactive)
@@ -655,10 +653,16 @@ def _check_asset_scope(w) -> None:
         # 「すべて表示」で全クラスへ戻る。
         w._actions["asset_all"].trigger()
         assert w.asset_scope == ASSET_CLASSES
-        # チェックの付け外しは QAction から行える。
+        # チェックの付け外しは QAction からもチェックボックスからも行え、互いに追随する。
         w._actions["asset_fund"].trigger()
         assert w.asset_scope == ("jp_stock", "us_stock")
-        w._actions["asset_fund"].trigger()
+        assert not checks["fund"].isChecked(), "メニューで外したのにチェックボックスが残る"
+        checks["fund"].click()
+        assert w.asset_scope == ASSET_CLASSES
+        assert w._actions["asset_fund"].isChecked(), "チェックボックスで付けたのにメニューが追随しない"
+        checks["us_stock"].click()
+        assert w.asset_scope == ("jp_stock", "fund")
+        checks["us_stock"].click()
         assert w.asset_scope == ASSET_CLASSES
     finally:
         w._set_asset_scope(original)  # 設定（asset_scope）を元へ戻す
@@ -720,7 +724,7 @@ def _check_trend_scope(w) -> None:
         assert market == [None, 700.0, 700.0], (
             f"絞った推移が資産別の和になっていない／記録前を埋めている: {market}"
         )
-        note = "※資産別の内訳は 2026-10-24 以降のみ記録"
+        note = "※資産別は 2026-10-24 以降のみ記録"
         assert w._asset_trend_note.text() == note, w._asset_trend_note.text()
         assert note in w._income_trend_note.text(), w._income_trend_note.text()
         income = [r.get("income_value") for r in w._income_line._visible]
