@@ -112,6 +112,8 @@ from .history import (
     merge_records,
     combine_income,
     class_breakdown,
+    scope_history_record,
+    scoped_history_start,
 )
 # market_data は yfinance / ToushinReader / pandas を芋づる式に読み込み起動を数秒遅らせる。
 # 取得は p / u キーのワーカースレッドでしか走らないため、import を run() 内へ遅延させる。
@@ -1454,6 +1456,11 @@ class DividendWindow(QMainWindow):
         ))
 
         row.addStretch()
+        if kind == "asset":
+            # 資産を絞ったときの記録開始日を出す枠（配当側は下の注記と共用）。
+            self._asset_trend_note = QLabel("")
+            self._asset_trend_note.setObjectName("dialogNote")
+            row.addWidget(self._asset_trend_note)
         if kind == "income":
             # 取崩収入の記録開始日を出す枠。収入モードを取崩にすると、記録前の日は
             # combine_income が None を返して線が末尾だけになる——理由が画面に無いと
@@ -1800,11 +1807,23 @@ class DividendWindow(QMainWindow):
         評価額タブ＝評価額・簿価の2系列。配当タブ＝ツールバーの「優待」と「収入」
         に応じて combine_income で合成した単一系列。
         """
-        hist_dicts = self._history_as_dicts()
+        # 表示対象の資産で絞った値へ差し替える（全クラスなら合計列のまま）。
+        # 系列定義・combine_income・取崩の注記は同じキーを読むだけで済む。
+        raw_dicts = self._history_as_dicts()
+        hist_dicts = [scope_history_record(r, self.asset_scope) for r in raw_dicts]
+        scope_note = self._scope_coverage_note(raw_dicts)
+        partial = not is_all_asset_scope(self.asset_scope)
+        # 一部の資産だけの線は、資産別の記録を始めた日からしか引けない。
+        scoped_empty = (
+            f"{asset_scope_label(self.asset_scope)}の内訳はまだ記録がありません"
+            "（株価を取得した日から記録されます）"
+        )
         self._asset_line.set_data(
             hist_dicts, asset_trend_series(),
-            empty_message="評価額の履歴がありません（株価更新か『インポート』で記録されます）",
+            empty_message=scoped_empty if partial else
+            "評価額の履歴がありません（株価更新か『インポート』で記録されます）",
         )
+        self._asset_trend_note.setText(scope_note)
         with_benefit = self.income_benefit == "with"
         mode = self.withdrawal_mode
         income_dicts = [
@@ -1817,15 +1836,35 @@ class DividendWindow(QMainWindow):
         )
         self._income_line.set_data(
             income_dicts, [(label, "income_value", income_trend_color())],
-            empty_message="配当の履歴がありません（株価更新か『インポート』で記録されます）",
+            empty_message=scoped_empty if partial else
+            "配当の履歴がありません（株価更新か『インポート』で記録されます）",
         )
-        notes = [self._withdrawal_coverage_note(hist_dicts, mode)]
+        # 絞っているときは資産別の列が全モードぶん同じ日から始まるので、取崩の
+        # 記録開始日より後になる。注記は資産別の開始日の1つにまとめる。
+        notes = [
+            scope_note if partial
+            else self._withdrawal_coverage_note(hist_dicts, mode)
+        ]
         # 履歴は表示モードに依存させないため税引前で記録している（変えない）。
         # 税引後を選んでいるのに推移だけ税引前のままだと、KPI の年間配当と
         # グラフ右端の値が食い違って見えるので、凡例と注記の両方で明示する。
         if self.dividend_mode == "net":
             notes.append(NET_TREND_NOTE)
         self._income_trend_note.setText(" / ".join(n for n in notes if n))
+
+    def _scope_coverage_note(self, hist_dicts: list[dict]) -> str:
+        """資産を絞っているとき、推移の線を引ける最初の日を注記で返す。
+
+        資産別の列は後から足したので、それより前の日は合計しか無く線が切れる
+        （推定で埋めない）。注記が無いと「対象を絞ったらグラフが短くなった」
+        理由が画面に残らない。全クラスを選んでいる・履歴が空なら ""。
+        """
+        if is_all_asset_scope(self.asset_scope) or not hist_dicts:
+            return ""
+        first = scoped_history_start(hist_dicts, self.asset_scope)
+        if first is None or first == hist_dicts[0]["date"]:
+            return ""  # 1点も無い（空メッセージ側の担当）か、全期間ぶんある
+        return f"※資産別の内訳は {first} 以降のみ記録"
 
     @staticmethod
     def _withdrawal_coverage_note(hist_dicts: list[dict], mode: str | None) -> str:
@@ -1876,6 +1915,8 @@ class DividendWindow(QMainWindow):
                     "total_fixed_withdrawal_income_jpy": (
                         rec.total_fixed_withdrawal_income_jpy
                     ),
+                    # 資産別の内訳（表示対象を絞ったときに scope_history_record が使う）。
+                    **rec.by_class,
                 }
             )
         return result

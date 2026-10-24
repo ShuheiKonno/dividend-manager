@@ -268,3 +268,90 @@ def test_old_history_csv_without_class_columns(tmp_path):
     rec = io_csv.read_history_csv(old)[0]
     assert rec.total_market_value_jpy == 1000.0
     assert rec.by_class == {}
+
+
+# ---- 推移グラフの絞り込み ----
+
+from src.history import (  # noqa: E402
+    combine_income,
+    scope_history_record,
+    scoped_history_start,
+    scoped_history_value,
+)
+
+
+def _hist(date, **by_class):
+    rec = {
+        "date": date,
+        "total_market_value_jpy": 1000.0,
+        "total_book_value_jpy": 800.0,
+        "total_dividend_jpy": 50.0,
+        "total_benefit_jpy": 5.0,
+        "total_profit_jpy": 200.0,
+        "total_withdrawal_income_jpy": 70.0,
+        "total_fixed_withdrawal_income_jpy": 90.0,
+    }
+    rec.update(by_class)
+    return rec
+
+
+def _full_breakdown():
+    k = class_history_key
+    return {
+        k("jp_stock", "market_value"): 600.0, k("jp_stock", "book_value"): 500.0,
+        k("jp_stock", "dividend"): 30.0, k("jp_stock", "benefit"): 5.0,
+        k("us_stock", "market_value"): 300.0, k("us_stock", "book_value"): 200.0,
+        k("us_stock", "dividend"): 10.0, k("us_stock", "benefit"): 0.0,
+        k("fund", "market_value"): 100.0, k("fund", "book_value"): 100.0,
+        k("fund", "dividend"): 10.0, k("fund", "benefit"): 0.0,
+        k("fund", "withdrawal_income"): 30.0, k("fund", "fixed_withdrawal_income"): 50.0,
+    }
+
+
+def test_scope_history_record_all_classes_keeps_totals():
+    # 全選択は合計列のまま（クラス別の記録前の日も線が残る）。
+    old = _hist("2024-06-27")
+    assert scope_history_record(old, ASSET_CLASSES) is old
+
+
+def test_scope_history_record_sums_selected_classes():
+    rec = scope_history_record(_hist("2026-10-25", **_full_breakdown()), ("jp_stock", "fund"))
+    assert rec["total_market_value_jpy"] == 700.0
+    assert rec["total_book_value_jpy"] == 600.0
+    assert rec["total_profit_jpy"] == 100.0
+    assert rec["total_dividend_jpy"] == 40.0
+    assert rec["total_benefit_jpy"] == 5.0
+    # 取崩込み収入: 株式は配当のまま＋投信の取崩
+    assert rec["total_withdrawal_income_jpy"] == 30.0 + 30.0
+    assert rec["total_fixed_withdrawal_income_jpy"] == 30.0 + 50.0
+    assert combine_income(rec, True, "fixed") == 85.0
+
+
+def test_scope_history_record_without_fund_ignores_withdrawal():
+    rec = scope_history_record(_hist("2026-10-25", **_full_breakdown()), ("jp_stock", "us_stock"))
+    # 投信を外すと取崩込み収入は株式の配当と同値になる。
+    assert rec["total_withdrawal_income_jpy"] == rec["total_dividend_jpy"] == 40.0
+
+
+def test_scope_history_record_before_recording_breaks_the_line():
+    """クラス別の記録前の日は推定で埋めず None（合計から按分しない）。"""
+    rec = scope_history_record(_hist("2024-06-27"), ("jp_stock",))
+    for key in ("total_market_value_jpy", "total_dividend_jpy", "total_profit_jpy"):
+        assert rec[key] is None
+    assert combine_income(rec, True, None) is None
+
+
+def test_full_scope_sum_equals_totals_on_recorded_days():
+    """記録日には全クラスの和と合計列が一致する（部分選択と全選択の整合）。"""
+    rec = _hist("2026-10-25", **_full_breakdown())
+    for metric in ("market_value", "book_value", "dividend", "benefit",
+                   "withdrawal_income", "fixed_withdrawal_income"):
+        assert scoped_history_value(rec, metric, ASSET_CLASSES) == pytest.approx(
+            rec[f"total_{metric}_jpy"]
+        ), metric
+
+
+def test_scoped_history_start():
+    records = [_hist("2024-06-27"), _hist("2026-10-25", **_full_breakdown())]
+    assert scoped_history_start(records, ("us_stock",)) == "2026-10-25"
+    assert scoped_history_start(records[:1], ("us_stock",)) is None

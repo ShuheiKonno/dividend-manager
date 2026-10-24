@@ -652,6 +652,83 @@ def _check_asset_scope(w) -> None:
     assert w.asset_scope == original
 
 
+def _check_trend_scope(w) -> None:
+    """推移グラフが表示対象の資産に追随し、記録前の期間を推定で埋めないこと。
+
+    履歴はメモリ上の合成データへ差し替える（保存はしない）。1日目は合計列だけ
+    （資産別の列を足す前）、2・3日目は資産別の列もある。
+    """
+    from src.calc import ASSET_CLASSES
+    from src.models import HistoryRecord, class_history_key as key
+
+    def record(date, by_class):
+        return HistoryRecord(
+            record_date=date, total_market_value_jpy=1000.0,
+            total_book_value_jpy=800.0, total_dividend_jpy=50.0,
+            total_benefit_jpy=5.0, total_profit_jpy=200.0,
+            total_withdrawal_income_jpy=70.0,
+            total_fixed_withdrawal_income_jpy=90.0, source="app",
+            by_class=by_class,
+        )
+
+    breakdown = {
+        key("jp_stock", "market_value"): 600.0, key("jp_stock", "book_value"): 500.0,
+        key("jp_stock", "dividend"): 30.0, key("jp_stock", "benefit"): 5.0,
+        key("us_stock", "market_value"): 300.0, key("us_stock", "book_value"): 200.0,
+        key("us_stock", "dividend"): 10.0, key("us_stock", "benefit"): 0.0,
+        key("fund", "market_value"): 100.0, key("fund", "book_value"): 100.0,
+        key("fund", "dividend"): 10.0, key("fund", "benefit"): 0.0,
+        key("fund", "withdrawal_income"): 30.0,
+        key("fund", "fixed_withdrawal_income"): 50.0,
+    }
+    synthetic = [
+        record("2026-10-01", {}),
+        record("2026-10-24", breakdown),
+        record("2026-10-25", breakdown),
+    ]
+    original_history = w.history
+    original_scope = w.asset_scope
+    original_period = w._asset_line._period
+    try:
+        w.history = synthetic
+        w._asset_line.set_period("all")
+        w._income_line.set_period("all")
+
+        w._set_asset_scope(ASSET_CLASSES)
+        w._refresh_trend()  # 対象が元から全てだと _set_asset_scope は描き直さない
+        market = [r.get("total_market_value_jpy") for r in w._asset_line._visible]
+        assert market == [1000.0, 1000.0, 1000.0], f"全選択で合計列を使っていない: {market}"
+        assert w._asset_trend_note.text() == ""
+
+        w._set_asset_scope(("jp_stock", "fund"))
+        market = [r.get("total_market_value_jpy") for r in w._asset_line._visible]
+        assert market == [None, 700.0, 700.0], (
+            f"絞った推移が資産別の和になっていない／記録前を埋めている: {market}"
+        )
+        note = "※資産別の内訳は 2026-10-24 以降のみ記録"
+        assert w._asset_trend_note.text() == note, w._asset_trend_note.text()
+        assert note in w._income_trend_note.text(), w._income_trend_note.text()
+        income = [r.get("income_value") for r in w._income_line._visible]
+        expected = 40.0 + (5.0 if w.income_benefit == "with" else 0.0)
+        if w.withdrawal_mode == "fixed":
+            expected = 80.0 + (5.0 if w.income_benefit == "with" else 0.0)
+        elif w.withdrawal_mode == "rate":
+            expected = 60.0 + (5.0 if w.income_benefit == "with" else 0.0)
+        assert income == [None, expected, expected], f"配当推移が絞れていない: {income}"
+
+        # 資産別の記録が1日も無ければ、空メッセージで理由を出す。
+        w.history = synthetic[:1]
+        w._refresh_trend()
+        assert "内訳はまだ記録がありません" in w._asset_line._empty_message
+        assert w._asset_trend_note.text() == ""
+    finally:
+        w.history = original_history
+        w._set_asset_scope(original_scope)  # 設定（asset_scope）を元へ戻す
+        w._asset_line.set_period(original_period)
+        w._income_line.set_period(w.income_trend_period)
+        w._refresh_trend()
+
+
 def _check_split_flags(w) -> None:
     """株式分割の旗・補正ボタン・メニューが実ウィンドウで配線されていること。
 
@@ -1230,6 +1307,7 @@ def _run_checks(data: Path) -> None:
     _check_fund_share_unit(w)
     _check_yield_definitions(w)
     _check_asset_scope(w)
+    _check_trend_scope(w)
     _check_split_flags(w)
 
     # 編集ダイアログ: 即時バリデーション（赤枠プロパティ＋集約エラーラベル）

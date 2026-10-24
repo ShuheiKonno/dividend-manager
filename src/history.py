@@ -116,3 +116,62 @@ def class_breakdown(
         for metric in metrics:
             result[class_history_key(cls, metric)] = values[metric] or 0.0
     return result
+
+
+# 合計列 total_<指標>_jpy のうち、資産クラス別の列から組み直せる指標。
+_SCOPED_METRICS = (
+    "market_value",
+    "book_value",
+    "dividend",
+    "benefit",
+    "withdrawal_income",
+    "fixed_withdrawal_income",
+)
+
+
+def scoped_history_value(rec: dict, metric: str, scope) -> float | None:
+    """選んだ資産クラスの列の和。1つでも未記録（空欄）なら None（線を切る）。
+
+    取崩の列を持たない株式クラスは、取崩込み収入＝配当として足す（取崩は投信に
+    しか付かない）。
+    """
+    total = 0.0
+    for cls in ASSET_CLASSES:
+        if cls not in scope:
+            continue
+        own = metric if metric in CLASS_HISTORY_METRICS[cls] else "dividend"
+        value = safe_float(rec.get(class_history_key(cls, own)))
+        if value is None:
+            return None
+        total += value
+    return total
+
+
+def scope_history_record(rec: dict, scope) -> dict:
+    """推移グラフ用の1点を、表示対象の資産クラスで絞った値へ差し替えて返す。
+
+    全クラスを選んでいるときは合計列をそのまま使う（クラス別の列は途中から
+    足したので、和で描くと記録前の期間の線が消える）。一部だけのときは合計列の
+    キー（total_<指標>_jpy）をクラス別の和で上書きする——グラフ側（系列定義・
+    combine_income・取崩の記録開始日の注記）は同じキーを読むだけで済む。
+    過去分は合計しか残っていないので推定で埋めない（記録前は None で線が切れる）。
+    """
+    if set(scope) >= set(ASSET_CLASSES):
+        return rec
+    out = dict(rec)
+    for metric in _SCOPED_METRICS:
+        out[f"total_{metric}_jpy"] = scoped_history_value(rec, metric, scope)
+    market = out["total_market_value_jpy"]
+    book = out["total_book_value_jpy"]
+    out["total_profit_jpy"] = (
+        market - book if market is not None and book is not None else None
+    )
+    return out
+
+
+def scoped_history_start(records: Iterable[dict], scope) -> str | None:
+    """一部の資産クラスに絞ったとき、線を引ける最初の日（記録が無ければ None）。"""
+    for rec in records:
+        if scoped_history_value(rec, "market_value", scope) is not None:
+            return rec.get("date")
+    return None
