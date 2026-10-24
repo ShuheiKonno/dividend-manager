@@ -84,19 +84,23 @@ def class_breakdown(
     holdings: Iterable[Holding],
     market_map: dict[str, MarketData],
     fx_rate: float | None,
-) -> dict[str, float]:
+) -> dict[str, float | None]:
     """当日スナップショット用の資産クラス別内訳（キーは CLASS_HISTORY_FIELDS）。
 
     合計列と同じく表示モードに依存させない（税引前・有効銘柄のみ）。株式2クラスは
     取崩の影響を受けないので取崩なしの1回、投信は取崩なし・定率・定額の3回計算する。
 
-    値は 0.0 で埋める（そのクラスの銘柄が無い・配当が1件も無い＝寄与ゼロ）。None を
-    残すと「その日は記録していない」と区別できず、該当クラスを含む選択の線が
-    記録後も切れたままになる。呼び出し側は時価の欠損が無いことを確かめてから
-    呼ぶ（_record_history_snapshot が先に弾く）ので、0 埋めで合計と食い違わない。
+    「寄与ゼロ」と「不明」を区別して残す（同じ対象の KPI と食い違わせない）:
+    - そのクラスの銘柄が無い → 全指標 0.0
+    - 優待 → 0.0（Summary の None は「優待なし」の意味で、不明ではない）
+    - 配当・取崩収入が不明（未取得の配当だけ・取崩率未設定の投信だけ等）→ None
+      （KPI はこのとき N/A。0 で残すと推移にだけ誤ったゼロが描かれる）
+    評価額は呼び出し側が欠損なしを確かめてから呼ぶ（_record_history_snapshot が
+    先に弾く）ので、記録した日には必ず数値が入る——scoped_history_value はこれを
+    「その日は資産別を記録した」印に使う。
     """
     holdings = list(holdings)
-    result: dict[str, float] = {}
+    result: dict[str, float | None] = {}
     for cls in ASSET_CLASSES:
         subset = [h for _, h in scope_holdings(holdings, (cls,))]
         _, base = compute_rows(subset, market_map, fx_rate, "gross", None)
@@ -114,7 +118,10 @@ def class_breakdown(
             _, fixed = compute_rows(subset, market_map, fx_rate, "gross", "fixed")
             values["fixed_withdrawal_income"] = fixed.total_dividend_jpy
         for metric in metrics:
-            result[class_history_key(cls, metric)] = values[metric] or 0.0
+            value = values[metric]
+            if not subset or metric == "benefit":
+                value = value or 0.0
+            result[class_history_key(cls, metric)] = value
     return result
 
 
@@ -130,21 +137,27 @@ _SCOPED_METRICS = (
 
 
 def scoped_history_value(rec: dict, metric: str, scope) -> float | None:
-    """選んだ資産クラスの列の和。1つでも未記録（空欄）なら None（線を切る）。
+    """選んだ資産クラスの列の和（推移グラフの1点）。
 
+    - 選んだクラスのどれかが**未記録**（評価額の列が空＝資産別の列を足す前の日）
+      なら None（線を切る。合計から按分しない）。
+    - 記録済みの日は、**既知の値だけ**を足す。選んだクラスがすべて不明なら None。
+      Summary の配当（既知の銘柄だけの和・1件も無ければ None）と同じ数え方なので、
+      同じ対象の KPI と推移の右端が食い違わない。
     取崩の列を持たない株式クラスは、取崩込み収入＝配当として足す（取崩は投信に
     しか付かない）。
     """
-    total = 0.0
+    known: list[float] = []
     for cls in ASSET_CLASSES:
         if cls not in scope:
             continue
+        if safe_float(rec.get(class_history_key(cls, "market_value"))) is None:
+            return None
         own = metric if metric in CLASS_HISTORY_METRICS[cls] else "dividend"
         value = safe_float(rec.get(class_history_key(cls, own)))
-        if value is None:
-            return None
-        total += value
-    return total
+        if value is not None:
+            known.append(value)
+    return sum(known) if known else None
 
 
 def scope_history_record(rec: dict, scope) -> dict:

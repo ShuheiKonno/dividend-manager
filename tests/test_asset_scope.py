@@ -196,7 +196,7 @@ def test_class_breakdown_sums_to_totals():
                 class_history_key(
                     cls, metric if metric in CLASS_HISTORY_METRICS[cls] else "dividend"
                 )
-            ]
+            ] or 0.0  # 空欄（不明）は合計列でも足されていない
             for cls in ASSET_CLASSES
         )
         assert summed == pytest.approx(total or 0.0), metric
@@ -355,3 +355,61 @@ def test_scoped_history_start():
     records = [_hist("2024-06-27"), _hist("2026-10-25", **_full_breakdown())]
     assert scoped_history_start(records, ("us_stock",)) == "2026-10-25"
     assert scoped_history_start(records[:1], ("us_stock",)) is None
+
+
+# ---- 「寄与ゼロ」と「不明」の区別（Codex レビューの指摘） ----
+
+def _unknown_income_portfolio():
+    """配当未取得の米国株だけ・定率の取崩率が未設定の投信だけ、を持つ保有。"""
+    holdings = [
+        _holding("7203"),
+        _holding("NODIV", currency="USD", shares=10.0, avg_cost=100.0),
+        _holding("F", asset_type="fund", shares=10.0, avg_cost=10000.0,
+                 withdrawal_fixed_jpy=50000.0),
+    ]
+    market = {
+        "7203": _market("7203"),
+        "NODIV": _market("NODIV", "USD", 120.0, None),
+        "F": _market("F", last_price=11000.0, gross=0.0),
+    }
+    return holdings, market
+
+
+def _kpi(holdings, market, scope, mode=None):
+    picked = [h for _, h in scope_holdings(holdings, scope)]
+    return compute_rows(picked, market, 150.0, "gross", mode)[1]
+
+
+def test_class_breakdown_keeps_unknown_income_blank():
+    """不明な配当・取崩を 0 で残さない（同じ対象の KPI は N/A）。"""
+    holdings, market = _unknown_income_portfolio()
+    breakdown = class_breakdown(holdings, market, 150.0)
+    assert _kpi(holdings, market, ("us_stock",)).total_dividend_jpy is None
+    assert breakdown[class_history_key("us_stock", "dividend")] is None
+    assert _kpi(holdings, market, ("fund",), "rate").total_dividend_jpy is None
+    assert breakdown[class_history_key("fund", "withdrawal_income")] is None
+    # 不明なのは収入だけ。評価額・簿価・優待・定額取崩は数値で残る。
+    assert breakdown[class_history_key("us_stock", "market_value")] == 180000.0
+    assert breakdown[class_history_key("us_stock", "benefit")] == 0.0
+    assert breakdown[class_history_key("fund", "fixed_withdrawal_income")] == 50000.0
+
+
+def test_scoped_trend_matches_kpi_when_income_is_unknown():
+    """推移の右端（記録日の値）が、同じ対象の KPI と同じ数え方になる。"""
+    holdings, market = _unknown_income_portfolio()
+    rec = {"date": "2026-10-25", **class_breakdown(holdings, market, 150.0)}
+    io_rec = HistoryRecord.from_dict({"record_date": "2026-10-25", **{
+        k: ("" if v is None else v) for k, v in rec.items() if k != "date"
+    }})
+    rec = {"date": "2026-10-25", **io_rec.by_class}  # CSV を往復した形で確かめる
+    for scope, mode, metric in (
+        (("us_stock",), None, "dividend"),  # 不明だけ → None（KPI も N/A）
+        (("jp_stock", "us_stock"), None, "dividend"),  # 既知だけ足す
+        (("fund",), "rate", "withdrawal_income"),
+        (("jp_stock", "fund"), "rate", "withdrawal_income"),
+        (("fund",), "fixed", "fixed_withdrawal_income"),
+    ):
+        expected = _kpi(holdings, market, scope, mode).total_dividend_jpy
+        assert scoped_history_value(rec, metric, scope) == expected, (scope, metric)
+    # 記録日の評価額は必ず数値（「記録した日」の印）。
+    assert scoped_history_value(rec, "market_value", ("us_stock",)) == 180000.0

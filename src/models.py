@@ -285,7 +285,8 @@ class HistoryRecord:
     total_fixed_withdrawal_income_jpy: float | None  # 定額取崩
     source: str | None
     # 資産クラス別の内訳（キーは CLASS_HISTORY_FIELDS）。表示対象を絞ったときの
-    # 推移グラフ用。記録前の日は空（None）で、過去分は合計しか無いので復元しない。
+    # 推移グラフ用。評価額の列が空＝記録前の日（過去分は合計しか無いので復元しない）。
+    # 記録した日の配当・取崩の空欄は「不明」（history.class_breakdown 参照）。
     by_class: dict[str, float | None] = field(default_factory=dict)
 
     @classmethod
