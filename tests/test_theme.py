@@ -107,3 +107,15 @@ def test_light_theme_inverts_surface_and_text():
     for key in ("TEXT_PRIMARY", "TEXT_HEADER"):
         assert luminance(theme.PALETTES["light"][key]) < 0.5, key
         assert luminance(theme.PALETTES["dark"][key]) > 0.5, key
+
+
+@pytest.mark.parametrize("name", theme.THEMES)
+def test_disabled_checkbox_is_greyed_out(name):
+    """無効のチェックボックス（外せない最後の1つ等）が ACCENT 塗りのまま残らないこと。"""
+    theme.set_theme(name)
+    qss = build_app_qss()
+    rule = re.search(r"QCheckBox::indicator:checked:disabled\s*\{([^}]*)\}", qss)
+    assert rule, "チェック済み・無効の indicator の定義が無い"
+    assert theme.TEXT_DISABLED in rule.group(1)
+    assert theme.ACCENT not in rule.group(1)
+    assert re.search(r"QCheckBox:disabled\s*\{[^}]*" + re.escape(theme.TEXT_DISABLED), qss)

@@ -321,6 +321,13 @@ QCheckBox::indicator {{
 }}
 QCheckBox::indicator:hover {{ border-color: {BORDER_FOCUS}; }}
 QCheckBox::indicator:checked {{ background: {ACCENT}; border-color: {ACCENT}; }}
+/* 無効（外せない最後の1つ・自動判定中の月など）。定義が無いと ACCENT 塗りのまま
+   有効と見分けが付かない。hover より後ろに置いて枠色の上書きに勝たせる。 */
+QCheckBox:disabled {{ color: {TEXT_DISABLED}; }}
+QCheckBox::indicator:disabled {{ background: {BG_DISABLED}; border-color: {BORDER}; }}
+QCheckBox::indicator:checked:disabled {{
+    background: {TEXT_DISABLED}; border-color: {TEXT_DISABLED};
+}}
 
 /* ---- スクロールバー（ボタンレス） ---- */
 QScrollBar:vertical {{ background: {BG_WINDOW}; width: 12px; margin: 0px; }}
