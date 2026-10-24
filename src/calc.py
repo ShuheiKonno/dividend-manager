@@ -20,17 +20,6 @@ class Summary:
     total_profit_jpy: float | None
     profit_rate: float | None
     missing_market_value_count: int
-    # ---- 投信を除いた集計（利回りの対象切替 yield_scope 用） ----
-    # 既存フィールドの意味を設定で変えず、並列に持つ。除外は分子（配当＋優待）と
-    # 分母（簿価／時価）の両方へ掛かる。既定値付きなのは Summary(**base) で組む
-    # 呼び出し（tests/test_md_export.py）を壊さないため。
-    total_book_value_ex_fund_jpy: float | None = None
-    total_market_value_ex_fund_jpy: float | None = None
-    total_dividend_ex_fund_jpy: float | None = None
-    total_benefit_ex_fund_jpy: float | None = None
-    total_numerator_ex_fund_jpy: float | None = None
-    yield_on_cost_ex_fund: float | None = None
-    yield_on_value_ex_fund: float | None = None
 
 
 # ---- 資産クラス（表示対象の切替） ----
@@ -101,18 +90,8 @@ def scope_holdings(
     ]
 
 
-# ---- 利回りの集計対象（表示・出力の切替のみ） ----
+# ---- 利回り ----
 #
-# 無分配ファンドは _pick_div_ps の最終 fallback で 0.0 になるため、全体の利回りを
-# 分母だけ膨らませて押し下げる。取崩モードでは逆に分配金でない取崩額が分子へ乗る。
-# そこで「株式・ETF だけの利回り」を並べて選べるようにする。効くのは **集計値**
-# （KPI カード2枚と Markdown のサマリー）だけで、行ごとの yield_on_cost /
-# yield_on_value・構成グラフ・月別・推移・history.csv には一切効かない。
-YIELD_SCOPES = ("all", "ex_fund")
-DEFAULT_YIELD_SCOPE = "all"
-YIELD_SCOPE_LABELS = {"all": "投信込み", "ex_fund": "投信除く"}
-# KPI カード名・Markdown のラベルへ足す接尾辞（どちらを見ているか画面から分かるように）。
-YIELD_SCOPE_SUFFIX = {"all": "", "ex_fund": "(投信除く)"}
 # 優待を分子に含めているときの接尾辞。優待スイッチは KPI カード・両テーブル・
 # Markdown の利回りに効くので、付けないと同じ「簿価利回り」が別定義のまま変わる
 # （月別タブが「＋優待」を足すのと同じ言い回し）。gui と md_export の双方が
@@ -132,7 +111,7 @@ def _yield_pair(
 ) -> tuple[float | None, float | None]:
     """(簿価利回り, 時価利回り)。分母が未知か 0 なら None（0% にしない）。
 
-    行・全体・投信除外・優待あり/なしの全通りがこの1式を通る。式を書き写すと、
+    行・全体・優待あり/なしの全通りがこの1式を通る。式を書き写すと、
     どれか1つだけ古い定義のまま残ってもエラーが出ない。
     """
     return (
@@ -142,25 +121,22 @@ def _yield_pair(
 
 
 def summary_yields(
-    summary: Summary, scope: str | None, with_benefit: bool = True
+    summary: Summary, with_benefit: bool = True
 ) -> tuple[float | None, float | None]:
-    """(簿価利回り, 時価利回り) を集計対象と優待の有無に応じて返す。
+    """(簿価利回り, 時価利回り) を優待の有無に応じて返す。
 
-    未知の scope は "all" 扱い。Summary が持つ合計から組み直すので、4通り
-    （投信込み/除く × 優待込み/なし）ぶんのフィールドを増やさずに済む。
-    表示側（gui / md_export）が同じ分岐を二重に書かないための唯一の入口。
+    Summary が持つ合計から組み直すので、優待込み/なしのフィールドを増やさずに
+    済む。表示側（gui / md_export）が同じ分岐を二重に書かないための唯一の入口。
+    集計対象（資産クラス）は compute_rows へ渡す保有の側で絞る（scope_holdings）。
     """
-    if scope == "ex_fund":
-        dividend = summary.total_dividend_ex_fund_jpy
-        benefit = summary.total_benefit_ex_fund_jpy
-        book = summary.total_book_value_ex_fund_jpy
-        market = summary.total_market_value_ex_fund_jpy
-    else:
-        dividend = summary.total_dividend_jpy
-        benefit = summary.total_benefit_jpy
-        book = summary.total_book_value_jpy
-        market = summary.total_market_value_jpy
-    return _yield_pair(_numerator(dividend, benefit if with_benefit else None), book, market)
+    return _yield_pair(
+        _numerator(
+            summary.total_dividend_jpy,
+            summary.total_benefit_jpy if with_benefit else None,
+        ),
+        summary.total_book_value_jpy,
+        summary.total_market_value_jpy,
+    )
 
 
 def row_yield_keys(with_benefit: bool) -> tuple[str, str]:
@@ -176,11 +152,9 @@ def row_yield_keys(with_benefit: bool) -> tuple[str, str]:
 
 @dataclass
 class _Totals:
-    """集計の途中経過。全銘柄版と投信除外版で **同じ導出式** を使い回すための器。
+    """集計の途中経過（all-or-nothing の判定を含む導出式の置き場）。
 
-    式をコピーして2箇所に置くと、片方だけ直したときに画面のどちらが古いのか
-    分からなくなる（しかもエラーは出ない）ので、必ずここを通す。
-    損益（profit）は投信除外版を持たないので compute_rows 側のローカル変数のまま。
+    損益（profit）は compute_rows 側のローカル変数のまま。
     """
 
     active_count: int = 0
@@ -213,7 +187,7 @@ class _Totals:
 
     @property
     def book(self) -> float | None:
-        # 1件でも欠けたら None（all-or-nothing）。投信除外版では母数も除外後の件数。
+        # 1件でも欠けたら None（all-or-nothing）。母数は渡された有効銘柄の件数。
         if self.active_count > 0 and self.known_book == self.active_count:
             return self.sum_book
         return None
@@ -475,8 +449,6 @@ def compute_rows(
     """
     rows: list[dict[str, float | str | None]] = []
     totals = _Totals()
-    # 投信を除いた並行集計。行データは投信を含めたまま返し、絞るのは集計だけ。
-    totals_ex_fund = _Totals()
     sum_profit = 0.0
     known_profit_count = 0
 
@@ -590,17 +562,12 @@ def compute_rows(
         if not is_active:
             continue
         totals.add(book_value_jpy, market_value_jpy, annual_dividend_jpy, benefit_jpy)
-        if not is_fund:
-            totals_ex_fund.add(
-                book_value_jpy, market_value_jpy, annual_dividend_jpy, benefit_jpy
-            )
         if profit_jpy is not None:
             sum_profit += profit_jpy
             known_profit_count += 1
 
     total_book = totals.book
     yield_on_cost, yield_on_value = totals.yields()
-    yoc_ex_fund, yov_ex_fund = totals_ex_fund.yields()
     total_profit = (
         sum_profit
         if totals.active_count > 0 and known_profit_count == totals.active_count
@@ -621,13 +588,6 @@ def compute_rows(
         total_profit_jpy=total_profit,
         profit_rate=profit_rate,
         missing_market_value_count=totals.active_count - totals.known_market,
-        total_book_value_ex_fund_jpy=totals_ex_fund.book,
-        total_market_value_ex_fund_jpy=totals_ex_fund.market,
-        total_dividend_ex_fund_jpy=totals_ex_fund.dividend,
-        total_benefit_ex_fund_jpy=totals_ex_fund.benefit,
-        total_numerator_ex_fund_jpy=totals_ex_fund.numerator,
-        yield_on_cost_ex_fund=yoc_ex_fund,
-        yield_on_value_ex_fund=yov_ex_fund,
     )
     return rows, summary
 

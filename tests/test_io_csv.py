@@ -443,17 +443,26 @@ def test_settings_load_drops_invalid_values(monkeypatch, tmp_path):
     assert loaded == {"dividend_mode": "net", "window_geometry": [0, 0, 1180, 760]}
 
 
-def test_settings_yield_scope_roundtrip(monkeypatch, tmp_path):
-    """利回りの集計対象が往復し、未知の値は拒否されること（許容値は calc.YIELD_SCOPES）。"""
+def test_settings_asset_scope_roundtrip(monkeypatch, tmp_path):
+    """表示対象の資産が往復し、空・未知・未正規化の値は拒否されること。"""
     from src import calc
 
     _configure_tmp_dirs(monkeypatch, tmp_path)
-    for scope in calc.YIELD_SCOPES:
-        io_csv.save_settings(yield_scope=scope)
-        assert io_csv.load_settings()["yield_scope"] == scope
-    io_csv.save_settings(yield_scope="only_funds")  # 未知の値は拒否
-    assert io_csv.load_settings()["yield_scope"] == calc.YIELD_SCOPES[-1]
+    for scope in (["jp_stock"], ["jp_stock", "fund"], list(calc.ASSET_CLASSES)):
+        io_csv.save_settings(asset_scope=scope)
+        assert io_csv.load_settings()["asset_scope"] == scope
+    for bad in ([], ["bond"], ["fund", "jp_stock"], ["fund", "fund"], "fund"):
+        io_csv.save_settings(asset_scope=bad)  # 拒否されて前の値が残る
+        assert io_csv.load_settings()["asset_scope"] == list(calc.ASSET_CLASSES)
 
+
+def test_settings_drop_retired_yield_scope(monkeypatch, tmp_path):
+    """廃止した yield_scope は読んでも捨てる（古い settings.json でも起動できる）。"""
+    _configure_tmp_dirs(monkeypatch, tmp_path)
+    io_csv.SETTINGS_PATH.write_text(
+        '{"yield_scope": "ex_fund", "theme": "light"}', encoding="utf-8"
+    )
+    assert io_csv.load_settings() == {"theme": "light"}
 
 def test_settings_unknown_key_not_saved(monkeypatch, tmp_path):
     _configure_tmp_dirs(monkeypatch, tmp_path)

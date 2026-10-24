@@ -20,9 +20,11 @@ from .calc import (
     to_display_shares,
     summary_yields,
     row_yield_keys,
-    DEFAULT_YIELD_SCOPE,
-    YIELD_SCOPE_LABELS,
-    YIELD_SCOPE_SUFFIX,
+    ASSET_CLASSES,
+    ASSET_CLASS_LABELS,
+    DEFAULT_ASSET_SCOPE,
+    asset_scope_label,
+    is_all_asset_scope,
     YIELD_BENEFIT_SUFFIX,
 )
 from .utils import safe_float
@@ -183,7 +185,7 @@ def _columns(
 def _notes(
     dividend_mode: str,
     withdrawal_mode: str | None,
-    yield_scope: str,
+    asset_scope: tuple[str, ...],
     with_benefit: bool,
     has_inactive: bool,
     fund_share_unit: str = DEFAULT_FUND_SHARE_UNIT,
@@ -218,25 +220,19 @@ def _notes(
         "ときだけ**数字が出る（1件でも欠けると空欄）。一方 `年間配当` は1件でも既知なら"
         "出るため、集計の母数が異なる。",
     ]
-    numerator_text = "配当＋優待" if with_benefit else "配当のみ"
-    label_suffix = YIELD_BENEFIT_SUFFIX if with_benefit else ""
-    if yield_scope == "ex_fund":
-        # 分子は優待スイッチで変わる。ここを「配当＋優待」で固定すると、
-        # 優待を外した出力の中で注記だけが別の計算条件を説明することになる。
-        notes.append(
-            f"- サマリーの簿価利回り・時価利回りは**投資信託を除いた値**。分子（{numerator_text}）と"
-            "分母（簿価／時価）の**両方**から投信を外している"
-            "（無分配ファンドが「利回り 0%」として分母だけを膨らませるのを避けるため）。"
+    if not is_all_asset_scope(asset_scope):
+        excluded = "・".join(
+            ASSET_CLASS_LABELS[cls] for cls in ASSET_CLASSES if cls not in asset_scope
         )
+        # 一覧から抜けた銘柄はサマリーにも入っていない。書かないと、出力された
+        # 合計をポートフォリオ全体の数字として読まれる。
         notes.append(
-            f"  - 銘柄一覧の `簿価利回り{label_suffix}(%)` / `時価利回り{label_suffix}(%)` 列は"
-            "**投信除外の影響を受けない**（1銘柄それぞれの利回り）。投信の行にも利回りが入っている。"
-            f"分子が{numerator_text}である点はサマリーと同じ。"
+            f"- この出力は対象を**{asset_scope_label(asset_scope)}**に絞っている。"
+            f"{excluded}の銘柄は銘柄一覧にもサマリーの合計・利回りにも含まれない"
+            "（ポートフォリオ全体の数字ではない）。"
+            "分類: 投信＝資産種別が投資信託、米国株＝USD 建ての株式・ETF、"
+            "日本株＝それ以外の株式・ETF（国内 ETF を含む）。"
         )
-        if withdrawal_mode is not None:
-            notes.append(
-                "  - 取崩による現金収入は投資信託にしか付かないため、この利回りは**取崩収入をゼロとした値**。サマリーの `年間収入(円)` とは対応しない。"
-            )
     if dividend_mode == "net":
         notes.append(
             "- 税引後（net）モードの税率は、銘柄ごとの明示指定がなければ"
@@ -289,7 +285,7 @@ def build_holdings_markdown(
     *,
     dividend_mode: str,
     withdrawal_mode: str | None,
-    yield_scope: str = DEFAULT_YIELD_SCOPE,
+    asset_scope: tuple[str, ...] = DEFAULT_ASSET_SCOPE,
     with_benefit: bool = True,
     fx_rate: float | None,
     market_fetched_at: str | None,
@@ -304,20 +300,19 @@ def build_holdings_markdown(
     generated_at を引数で受けるのは、テストが出力全体を固定値で比較できるように
     するため（now_jst_iso を呼ぶのは呼び出し側）。
 
-    yield_scope（投信込み/除く）と with_benefit（優待スイッチ）はどちらも
-    **利回りの数値そのものを変える**ので、「出力条件」に載せたうえで
-    「前提・注意」で分子・分母の意味を説明する。with_benefit は画面の
-    income_benefit と同じ値を渡すこと——ここだけ据え置くと、同じ「簿価利回り」が
-    画面と出力で別の定義になる。
+    asset_scope（表示対象の資産クラス）は rows / summary を絞った条件そのもの
+    （呼び出し側が scope_holdings で絞ってから compute_rows を呼ぶ）。出力の数字
+    がすべて変わるので「出力条件」に載せ、絞っているときは「前提・注意」で
+    全体の数字ではないことを書く。with_benefit（優待スイッチ）は利回りの分子を
+    変えるので画面の income_benefit と同じ値を渡すこと——ここだけ据え置くと、
+    同じ「簿価利回り」が画面と出力で別の定義になる。
     """
     inactive_count = sum(1 for row in rows if row.get("active") is False)
     columns = _columns(
         withdrawal_mode, with_benefit, inactive_count > 0, fund_share_unit
     )
     income_label = "年間収入" if withdrawal_mode is not None else "年間配当"
-    # 利回りだけは集計対象（投信込み/投信除く）でラベルも値も変わる。
-    yield_on_cost, yield_on_value = summary_yields(summary, yield_scope, with_benefit)
-    scope_suffix = YIELD_SCOPE_SUFFIX.get(yield_scope, "")
+    yield_on_cost, yield_on_value = summary_yields(summary, with_benefit)
     benefit_suffix = YIELD_BENEFIT_SUFFIX if with_benefit else ""
 
     count_text = str(len(rows))
@@ -334,7 +329,12 @@ def build_holdings_markdown(
             ["出力日時", generated_at],
             ["配当の税制", DIVIDEND_MODE_LABELS.get(dividend_mode, dividend_mode)],
             ["収入モード", WITHDRAWAL_LABELS.get(withdrawal_mode, str(withdrawal_mode))],
-            ["利回りの対象", YIELD_SCOPE_LABELS.get(yield_scope, str(yield_scope))],
+            # 一覧・サマリーとも、この資産クラスに絞った結果。
+            [
+                "対象の資産",
+                "・".join(ASSET_CLASS_LABELS[c] for c in ASSET_CLASSES if c in asset_scope)
+                + ("（全て）" if is_all_asset_scope(asset_scope) else ""),
+            ],
             ["利回りの優待", "含む" if with_benefit else "含まない"],
             ["USDJPY", _num(fx_rate, 4)],
             # 株価と為替は取得時刻が別（為替だけ古いことがある）なので分けて書く。
@@ -362,8 +362,8 @@ def build_holdings_markdown(
             [f"{income_label}(円)", _num(summary.total_dividend_jpy, 0)],
             ["優待(円)", _num(summary.total_benefit_jpy, 0)],
             ["合計(円)", _num(summary.total_numerator_jpy, 0)],
-            [f"簿価利回り{benefit_suffix}{scope_suffix}(%)", _pct(yield_on_cost)],
-            [f"時価利回り{benefit_suffix}{scope_suffix}(%)", _pct(yield_on_value)],
+            [f"簿価利回り{benefit_suffix}(%)", _pct(yield_on_cost)],
+            [f"時価利回り{benefit_suffix}(%)", _pct(yield_on_value)],
             ["損益(円)", _num(summary.total_profit_jpy, 0)],
             ["損益率(%)", _pct(summary.profit_rate)],
         ],
@@ -391,7 +391,7 @@ def build_holdings_markdown(
     lines += _notes(
         dividend_mode,
         withdrawal_mode,
-        yield_scope,
+        asset_scope,
         with_benefit,
         inactive_count > 0,
         fund_share_unit,

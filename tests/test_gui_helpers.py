@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import math
+from types import SimpleNamespace
 
 import pytest
 
@@ -37,6 +38,7 @@ def _window_stub(holdings, market_map):
         fx_rate = None
         show_inactive = False
         history = []
+        asset_scope = gui.DEFAULT_ASSET_SCOPE
 
         def _save_or_notify(self, action):
             action()
@@ -286,13 +288,14 @@ def _io_stub(holdings, history):
 
         _with_csv_suffix = staticmethod(gui.DividendWindow._with_csv_suffix)
         _with_md_suffix = staticmethod(gui.DividendWindow._with_md_suffix)
+        _scoped = gui.DividendWindow._scoped
 
         # Markdown エクスポートは compute_rows を呼び直すので、表示条件を持つ。
         market_data_map: dict = {}
         fx_rate = None
         dividend_mode = "gross"
         withdrawal_mode = None
-        yield_scope = "all"
+        asset_scope = gui.DEFAULT_ASSET_SCOPE
         income_benefit = "without"
         show_inactive = False
         market_fetched_at = None
@@ -386,6 +389,50 @@ def test_export_holdings_markdown_follows_show_inactive(monkeypatch, tmp_path):
     gui.DividendWindow.action_export_holdings_markdown(stub)
     assert "9999" in captured["text"]
     assert "無効を除く" not in stub.notes[-1][0]
+
+
+def test_export_markdown_follows_asset_scope_but_csv_exports_all(monkeypatch, tmp_path):
+    """Markdown は表示対象の資産に従い、CSV は全件（取込が全置換のため）を出す。"""
+    captured: dict = {}
+    monkeypatch.setattr(
+        gui.QFileDialog, "getSaveFileName", lambda *a, **k: (str(tmp_path / "a.md"), "")
+    )
+    monkeypatch.setattr(gui, "write_text_export", lambda path, text: captured.update(text=text))
+    holdings = [_holding(), _holding(symbol="AAPL", name="アップル", currency="USD")]
+    stub = _io_stub(holdings, [])
+    stub.asset_scope = ("jp_stock",)
+    gui.DividendWindow.action_export_holdings_markdown(stub)
+    assert "AAPL" not in captured["text"]
+    assert "7203" in captured["text"]
+    assert "対象: 日本株" in stub.notes[-1][0]
+
+    csv_path = tmp_path / "holdings.csv"
+    monkeypatch.setattr(
+        gui.QFileDialog, "getSaveFileName", lambda *a, **k: (str(csv_path), "")
+    )
+    gui.DividendWindow.action_export_holdings(stub)
+    exported = csv_path.read_text(encoding="utf-8-sig")
+    assert "AAPL" in exported and "7203" in exported
+
+
+def test_snapshot_notice_names_out_of_scope_split_holdings(monkeypatch):
+    """表示対象外の銘柄の分割で記録が止まるとき、その銘柄を通知文に書く。"""
+    stub = _window_stub([_holding(), _holding(symbol="AAPL", currency="USD")], {})
+    stub.asset_scope = ("jp_stock",)
+    monkeypatch.setattr(
+        gui.splits, "pending_holdings", lambda *a, **k: [(1, [("2026-10-01", 2.0)])]
+    )
+    notice = gui.DividendWindow._record_history_snapshot(stub)
+    assert "分割を反映するまで推移を記録しません" in notice
+    assert "表示対象外の銘柄: AAPL" in notice
+
+
+def test_out_of_scope_note():
+    stub = SimpleNamespace(asset_scope=("jp_stock",))
+    note = gui.DividendWindow._out_of_scope_note
+    assert note(stub, _holding()) == ""
+    assert "米国株は表示対象外" in note(stub, _holding(symbol="AAPL", currency="USD"))
+    assert "投信は表示対象外" in note(stub, _holding(asset_type="fund"))
 
 
 def test_export_holdings_markdown_empty_guard_skips_dialog(monkeypatch):

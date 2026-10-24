@@ -18,9 +18,9 @@ from .models import (
     FXRate,
     HistoryRecord,
 )
-from .calc import (  # 設定 "fund_share_unit" / "yield_scope" の許容値
+from .calc import (  # 設定 "fund_share_unit" / "asset_scope" の許容値
     FUND_SHARE_UNITS as _FUND_SHARE_UNITS,
-    YIELD_SCOPES as _YIELD_SCOPES,
+    normalize_asset_scope as _normalize_asset_scope,
 )
 from .theme import THEMES as _THEMES  # 設定 "theme" の許容値（Qt 非依存）
 from .utils import now_jst, normalize_iso_date, safe_float
@@ -394,9 +394,11 @@ _SETTINGS_VALIDATORS: dict[str, set | Callable[[object], bool]] = {
     # 収入グラフ（配当推移・月別配当）に優待を含めるか。取崩の有無は
     # withdrawal_mode が唯一の入口なので専用キーを持たない。
     "income_benefit": _VALID_INCLUDE,
-    # 簿価/時価利回りの集計対象（投信込み / 投信除く）。効くのは KPI カード2枚と
-    # Markdown サマリーだけで、行データ・グラフ・履歴には影響しない。
-    "yield_scope": set(_YIELD_SCOPES),
+    # 表示対象の資産クラス（calc.ASSET_CLASSES の空でない部分集合を、その順序の
+    # リストで保存する）。表・KPI・グラフ・Markdown に効き、履歴の記録と
+    # CSV エクスポートには効かない。旧キー yield_scope は廃止（読んでも捨てる）。
+    "asset_scope": lambda v: isinstance(v, list)
+    and _normalize_asset_scope(v) == tuple(v),
     # ウィンドウ状態の永続化（GUI が closeEvent / タブ切替時に保存する）
     "window_geometry": _is_geometry,
     # タブは [評価額, 配当金, 月別配当, 株価詳細, 配当優待詳細] の5枚。

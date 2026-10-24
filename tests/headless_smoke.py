@@ -125,7 +125,8 @@ def _check_actions(w) -> None:
                 "export_holdings", "export_history", "export_holdings_md",
                 "import_holdings", "import_history",
                 "change_data_dir", "open_data_dir", "create_shortcut", "quit",
-                "split_apply", "split_dismiss", "split_apply_all"):
+                "split_apply", "split_dismiss", "split_apply_all",
+                "asset_jp_stock", "asset_us_stock", "asset_fund", "asset_all"):
         assert key in actions, f"アクション {key} が無い: {sorted(actions)}"
 
     # 一文字ショートカットが残っていないこと（表で銘柄コードを打つと誤爆する）
@@ -205,7 +206,7 @@ def _check_toolbar(w) -> None:
     # あふれの検知は拡張ボタン（»）の可視性で見る。個々のボタンの isVisible だと、
     # 見ていない項目（1段目右端の「分割を反映」等）があふれても気付けない。
     # 実レイアウトが要るのでここだけ show() する（offscreen なら画面には出ない）。
-    combos = (w._mode_combo, w._withdrawal_combo, w._benefit_combo, w._yield_scope_combo)
+    combos = (w._mode_combo, w._withdrawal_combo, w._benefit_combo, w._asset_scope_button)
     original = w.size()
     w.show()
     try:
@@ -240,8 +241,13 @@ def _check_toolbar(w) -> None:
     assert w._withdrawal_combo.currentData() == (w.withdrawal_mode or "none")
     # 優待は推移グラフの操作行ではなくツールバー（税引・収入と同じ行）にある
     assert w._benefit_combo.currentData() == w.income_benefit
-    # 利回りの集計対象も同じ「収入の数え方」の行に並ぶ
-    assert w._yield_scope_combo.currentData() == w.yield_scope
+    # 表示対象の資産も同じ行に並び、ボタン面が現在の対象を示す
+    from src.calc import asset_scope_label
+
+    assert w._asset_scope_button.text() == asset_scope_label(w.asset_scope)
+    assert not hasattr(w, "yield_scope"), (
+        "利回りの「投信除く」が復活している（表示対象の資産に吸収した）"
+    )
     assert not hasattr(w, "income_withdrawal"), (
         "取崩の独立スイッチが復活している（収入モードと二重管理になる）"
     )
@@ -414,28 +420,23 @@ def _check_fund_share_unit(w) -> None:
             w.action_set_fund_share_unit(original)  # 設定（fund_share_unit）を元へ戻す
 
 
-def _check_yield_scope(w) -> None:
-    """利回りの集計対象・優待スイッチが KPI カードと表の利回り列へ届くこと。
+def _check_yield_definitions(w) -> None:
+    """優待スイッチが KPI カードと表の利回り列へ届くこと。
 
     値だけ切り替えてカード名が「簿価利回り」のままだと、画面から今どの定義を見て
-    いるのか分からず、投信を除いた（あるいは優待込みの）高い数字を全体の利回りと
-    して読んでしまう。集計対象は行データに効かない＝表示行が増減しないことも見る。
+    いるのか分からず、優待込みの高い数字を配当だけの利回りとして読んでしまう。
     """
     from src.calc import (
         compute_rows,
         row_yield_keys,
         summary_yields,
         YIELD_BENEFIT_SUFFIX,
-        YIELD_SCOPES,
-        YIELD_SCOPE_SUFFIX,
     )
     from src.utils import fmt_percent
 
-    original = w.yield_scope
     original_benefit = w.income_benefit
-    before_rows = w._price_proxy.rowCount()
     rows, summary = compute_rows(
-        w.holdings, w.market_data_map, w.fx_rate, w.dividend_mode,
+        [h for _, h in w._scoped()], w.market_data_map, w.fx_rate, w.dividend_mode,
         w.withdrawal_mode, include_inactive=w.show_inactive,
     )
     header = w._income_view.horizontalHeader().model()
@@ -447,33 +448,22 @@ def _check_yield_scope(w) -> None:
         for benefit in ("without", "with"):
             w._on_income_benefit(benefit)
             with_benefit = benefit == "with"
-            benefit_suffix = YIELD_BENEFIT_SUFFIX if with_benefit else ""
-            for scope in YIELD_SCOPES:
-                w._on_yield_scope(scope)
-                assert w.yield_scope == scope
-                w._sync_mode_controls()
-                assert w._yield_scope_combo.currentData() == scope, (
-                    "ドロップダウンが現在の集計対象を示していない"
-                )
-                suffix = f"{benefit_suffix}{YIELD_SCOPE_SUFFIX[scope]}"
-                assert w._cards["簿価利回り"]._title.text() == f"簿価利回り{suffix}", (
-                    f"カード名が定義を示していない: {w._cards['簿価利回り']._title.text()}"
-                )
-                assert w._cards["時価利回り"]._title.text() == f"時価利回り{suffix}"
-                yoc, yov = summary_yields(summary, scope, with_benefit)
-                assert w._cards["簿価利回り"]._value.text() == fmt_percent(yoc, 2), (
-                    f"{scope}/{benefit} の簿価利回りが Summary と食い違う"
-                )
-                assert w._cards["時価利回り"]._value.text() == fmt_percent(yov, 2)
-                assert w._price_proxy.rowCount() == before_rows, (
-                    "利回りの集計対象で表示行が増減している（効くのは集計だけのはず）"
-                )
+            suffix = YIELD_BENEFIT_SUFFIX if with_benefit else ""
+            assert w._cards["簿価利回り"]._title.text() == f"簿価利回り{suffix}", (
+                f"カード名が定義を示していない: {w._cards['簿価利回り']._title.text()}"
+            )
+            assert w._cards["時価利回り"]._title.text() == f"時価利回り{suffix}"
+            yoc, yov = summary_yields(summary, with_benefit)
+            assert w._cards["簿価利回り"]._value.text() == fmt_percent(yoc, 2), (
+                f"{benefit} の簿価利回りが Summary と食い違う"
+            )
+            assert w._cards["時価利回り"]._value.text() == fmt_percent(yov, 2)
 
             # 表の利回り列も同じ定義へ差し替わること（KPI だけ切り替えると、同じ名前の
             # 「簿価利回り」がタブによって別の数字になる）。
             assert (
                 header.headerData(yield_col, Qt.Orientation.Horizontal)
-                == f"簿価利回り{benefit_suffix}"
+                == f"簿価利回り{suffix}"
             ), "表のヘッダが優待の有無を示していない"
             if rows:
                 key = row_yield_keys(with_benefit)[0]
@@ -509,13 +499,9 @@ def _check_yield_scope(w) -> None:
         w._on_income_benefit("with")
         assert income_header.sectionSize(yield_col) == widened
 
-        # 接尾辞2つが付くとカード名は素の「簿価利回り」の3倍近い長さになる。KPI カードは
-        # 等分割（addWidget(card, 1)）なので幅次第で切れる——実測でウィンドウ最小幅
-        # 900px では収まらず 1024px 以上で収まる。ここでは通常使う幅で切れないこと、
-        # 2行目が折り返さないこと、切れる幅でも定義をツールチップで読めることを見る。
-        # 一番長くなる組（優待込み × 投信除く）で確かめる。
+        # 接尾辞付きのカード名が通常使う幅で切れないこと・2行目が折り返さないこと・
+        # 定義をツールチップで読めることを見る。
         w._on_income_benefit("with")
-        w._on_yield_scope("ex_fund")
         original_size = w.size()
         w.show()
         for width in (1100, 1536):
@@ -535,7 +521,7 @@ def _check_yield_scope(w) -> None:
                 )
         for title in ("簿価利回り", "時価利回り"):
             tip = w._cards[title].toolTip()
-            assert "配当＋優待" in tip and "投資信託を除く" in tip, (
+            assert "配当＋優待" in tip and "対象:" in tip, (
                 f"{title} のツールチップが定義を説明していない: {tip!r}"
             )
         # 表のヘッダにも定義を載せる。列幅はユーザーが手で狭められるので、
@@ -550,13 +536,120 @@ def _check_yield_scope(w) -> None:
         w.hide()
         QApplication.processEvents()
 
-        w._on_yield_scope(original)  # 設定（yield_scope / income_benefit）を元へ戻す
-        w._on_income_benefit(original_benefit)
-        assert w.yield_scope == original and w.income_benefit == original_benefit
+        w._on_income_benefit(original_benefit)  # 設定（income_benefit）を元へ戻す
+        assert w.income_benefit == original_benefit
     finally:
         w.hide()
-        w._on_yield_scope(original)  # 設定（yield_scope / income_benefit）を元へ戻す
         w._on_income_benefit(original_benefit)
+
+
+def _check_asset_scope(w) -> None:
+    """表示対象の資産（日本株 / 米国株 / 投信）の全組み合わせで画面が揃うこと。
+
+    表の行・表示行 ↔ 保有の対応・KPI・構成グラフ・月別が**同じ部分集合**を見て
+    いること、メニューとボタンが同じ QAction を共有し最後の1つを外せないこと、
+    設定へ保存されることを見る。行の対応がずれると編集・削除が別の銘柄に当たる。
+    """
+    from itertools import combinations
+
+    from src.calc import (
+        ASSET_CLASSES,
+        asset_class,
+        asset_scope_label,
+        compute_rows,
+        monthly_breakdown,
+        scope_holdings,
+    )
+    from src.utils import fmt_number
+
+    original = w.asset_scope
+    original_tab = w._tabs.currentIndex()
+    original_filter = w._filter.text()
+
+    # 表示メニューのサブメニューとツールバーのボタンが同じ QAction を持つこと。
+    view_menu = next(
+        a.menu() for a in w.menuBar().actions() if a.text().startswith("表示")
+    )
+    scope_menu = next(
+        a.menu() for a in view_menu.actions()
+        if a.menu() is not None and a.text() == "表示対象の資産"
+    )
+    shared = [w._actions[f"asset_{c}"] for c in ASSET_CLASSES]
+    for menu in (scope_menu, w._asset_scope_button.menu()):
+        for action in shared:
+            assert action in menu.actions(), f"{action.text()} がメニューに無い"
+
+    try:
+        w._filter.clear()  # 絞り込み欄の文字で行数が減らないようにする
+        w._tabs.setCurrentIndex(3)  # 株価詳細（行選択 → 保有の対応を確かめる）
+        subsets = [
+            combo for n in range(1, len(ASSET_CLASSES) + 1)
+            for combo in combinations(ASSET_CLASSES, n)
+        ]
+        for scope in subsets:
+            w._set_asset_scope(scope)
+            assert w.asset_scope == scope
+            assert io_csv.load_settings().get("asset_scope") == list(scope), (
+                "表示対象が設定へ保存されていない"
+            )
+            assert w._asset_scope_button.text() == asset_scope_label(scope)
+            for cls in ASSET_CLASSES:
+                action = w._actions[f"asset_{cls}"]
+                assert action.isChecked() is (cls in scope), f"{cls} のチェックがずれた"
+                if len(scope) == 1 and cls in scope:
+                    assert not action.isEnabled(), "最後の1つを外せる（全画面が空になる）"
+            assert w._actions["asset_all"].isEnabled() is (len(scope) < len(ASSET_CLASSES))
+
+            expected = scope_holdings(w.holdings, scope, include_inactive=w.show_inactive)
+            assert w.row_holding_indices["price"] == [i for i, _ in expected], (
+                "表示行 ↔ 保有の対応が絞り込みとずれている"
+            )
+            assert w.row_holding_indices["income"] == [i for i, _ in expected]
+            assert w._price_proxy.rowCount() == len(expected)
+            assert w._income_proxy.rowCount() == len(expected)
+            rows, summary = compute_rows(
+                [h for _, h in expected], w.market_data_map, w.fx_rate,
+                w.dividend_mode, w.withdrawal_mode, include_inactive=w.show_inactive,
+            )
+            assert w._cards["評価額計"]._value.text() == fmt_number(
+                summary.total_market_value_jpy, 0
+            ), f"{scope} の評価額計が絞り込みと食い違う"
+            assert w._cards["簿価計"]._value.text() == fmt_number(
+                summary.total_book_value_jpy, 0
+            )
+            chart_rows = [r for r in rows if r.get("active") is not False]
+            assert w._monthly.known_total_jpy == monthly_breakdown(
+                chart_rows
+            ).known_total_jpy, f"{scope} の月別が絞り込みと食い違う"
+            assert ("対象:" in w._info.text()) is (len(scope) < len(ASSET_CLASSES)), (
+                f"ステータスバーが絞り込みを示していない: {w._info.text()!r}"
+            )
+            if w._price_proxy.rowCount() > 0:
+                w._price_view.selectRow(0)
+                idx = w._current_holding_index()
+                assert idx is not None
+                holding = w.holdings[idx]
+                assert asset_class(holding.asset_type, holding.currency) in scope, (
+                    "選択行が表示対象外の銘柄を指している（編集・削除が別の銘柄に当たる）"
+                )
+
+        # 最後の1つを外そうとしても対象は空にならない（QAction 以外の経路の守り）。
+        w._set_asset_scope(("jp_stock",))
+        w.action_toggle_asset_class("jp_stock", False)
+        assert w.asset_scope == ("jp_stock",)
+        # 「すべて表示」で全クラスへ戻る。
+        w._actions["asset_all"].trigger()
+        assert w.asset_scope == ASSET_CLASSES
+        # チェックの付け外しは QAction から行える。
+        w._actions["asset_fund"].trigger()
+        assert w.asset_scope == ("jp_stock", "us_stock")
+        w._actions["asset_fund"].trigger()
+        assert w.asset_scope == ASSET_CLASSES
+    finally:
+        w._set_asset_scope(original)  # 設定（asset_scope）を元へ戻す
+        w._filter.setText(original_filter)
+        w._tabs.setCurrentIndex(original_tab)  # 設定（last_tab）を元へ戻す
+    assert w.asset_scope == original
 
 
 def _check_split_flags(w) -> None:
@@ -1135,7 +1228,8 @@ def _run_checks(data: Path) -> None:
     _check_net_trend_note(w)
     _check_theme_toggle(w)
     _check_fund_share_unit(w)
-    _check_yield_scope(w)
+    _check_yield_definitions(w)
+    _check_asset_scope(w)
     _check_split_flags(w)
 
     # 編集ダイアログ: 即時バリデーション（赤枠プロパティ＋集約エラーラベル）
