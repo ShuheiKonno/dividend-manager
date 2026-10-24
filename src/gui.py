@@ -46,6 +46,7 @@ from PySide6.QtWidgets import (
     QFileDialog,
     QComboBox,
     QMenu,
+    QCheckBox,
     QToolBar,
 )
 
@@ -95,10 +96,14 @@ from .calc import (
     to_display_shares,
     summary_yields,
     row_yield_keys,
-    DEFAULT_YIELD_SCOPE,
-    YIELD_SCOPES,
-    YIELD_SCOPE_LABELS,
-    YIELD_SCOPE_SUFFIX,
+    ASSET_CLASSES,
+    ASSET_CLASS_LABELS,
+    DEFAULT_ASSET_SCOPE,
+    asset_class,
+    asset_scope_label,
+    is_all_asset_scope,
+    normalize_asset_scope,
+    scope_holdings,
     YIELD_BENEFIT_SUFFIX,
 )
 from .history import (
@@ -106,6 +111,9 @@ from .history import (
     upsert_record,
     merge_records,
     combine_income,
+    class_breakdown,
+    scope_history_record,
+    scoped_history_start,
 )
 # market_data は yfinance / ToushinReader / pandas を芋づる式に読み込み起動を数秒遅らせる。
 # 取得は p / u キーのワーカースレッドでしか走らないため、import を run() 内へ遅延させる。
@@ -511,10 +519,12 @@ class DividendWindow(QMainWindow):
         # 取崩の有無は「収入」モード（withdrawal_mode）が唯一の入口なので独立の
         # 選択肢を持たない（二重に持つと表と推移で別々の状態になり食い違う）。
         self.income_benefit: str = _saved.get("income_benefit", "without")
-        # 簿価/時価利回りに投信を含めるか。無分配ファンドが「利回り 0%」として
-        # 分母だけを膨らませるため、株式・ETF だけの利回りも見られるようにする。
-        # 効くのは KPI カード2枚と Markdown サマリーだけ（行の利回り列は不変）。
-        self.yield_scope: str = _saved.get("yield_scope", DEFAULT_YIELD_SCOPE)
+        # 表示対象の資産クラス（日本株 / 米国株 / 投信の空でない組み合わせ）。
+        # 表・KPI・構成グラフ・月別・推移・Markdown を同じ部分集合で描く。履歴の
+        # 記録と CSV エクスポートは常に全件（scope_holdings を通さない）。
+        self.asset_scope: tuple[str, ...] = (
+            normalize_asset_scope(_saved.get("asset_scope")) or DEFAULT_ASSET_SCOPE
+        )
         # 円グラフの「その他」集約閾値（評価額/配当タブで独立）と起動時の表示タブ。
         self.pie_threshold_asset: float = float(_saved.get("pie_threshold_asset", 2.0))
         self.pie_threshold_income: float = float(_saved.get("pie_threshold_income", 2.0))
@@ -798,6 +808,25 @@ class DividendWindow(QMainWindow):
         self.addAction(inactive)
         self._actions["toggle_inactive"] = inactive
 
+        # 表示対象の資産クラス。複数選択なので排他グループにせず、1つずつ
+        # チェックを持たせる。表示メニューとツールバーのボタンが同じ QAction を
+        # 共有する（最後の1つは _sync_asset_scope_controls が押せなくする）。
+        for cls in ASSET_CLASSES:
+            action = QAction(ASSET_CLASS_LABELS[cls], self)
+            action.setCheckable(True)
+            action.setChecked(cls in self.asset_scope)
+            action.triggered.connect(
+                lambda checked=False, c=cls: self.action_toggle_asset_class(c, checked)
+            )
+            self.addAction(action)
+            self._actions[f"asset_{cls}"] = action
+        show_all = QAction("すべて表示", self)
+        show_all.triggered.connect(
+            lambda _checked=False: self._set_asset_scope(ASSET_CLASSES)
+        )
+        self.addAction(show_all)
+        self._actions["asset_all"] = show_all
+
         # テーマ（ダーク / ライト）は排他選択。QActionGroup に入れて現在の
         # テーマだけにチェックが付くようにする（トグル1個だと「今どちらか」が
         # メニューを開いても読み取れない）。
@@ -881,6 +910,7 @@ class DividendWindow(QMainWindow):
         view_menu.addAction(act["toggle_mode"])
         view_menu.addAction(act["toggle_withdrawal"])
         view_menu.addAction(act["toggle_inactive"])
+        view_menu.addMenu(self._build_asset_scope_menu())
         view_menu.addSeparator()
         theme_menu = view_menu.addMenu("テーマ")
         for name in theme.THEMES:
@@ -896,6 +926,19 @@ class DividendWindow(QMainWindow):
 
         help_menu = bar.addMenu("ヘルプ(&H)")
         help_menu.addAction(act["help_shortcuts"])
+
+    def _build_asset_scope_menu(self) -> QMenu:
+        """表示メニューの「表示対象の資産」サブメニュー。
+
+        ツールバー側はチェックボックスで、状態は _sync_asset_scope_controls が
+        QAction と同時に揃える。
+        """
+        menu = QMenu("表示対象の資産", self)
+        for cls in ASSET_CLASSES:
+            menu.addAction(self._actions[f"asset_{cls}"])
+        menu.addSeparator()
+        menu.addAction(self._actions["asset_all"])
+        return menu
 
     def _show_shortcut_help(self) -> None:
         """キーボードショートカットの一覧を表示する（F1）。"""
@@ -1127,14 +1170,27 @@ class DividendWindow(QMainWindow):
             self._on_income_benefit,
         )
         bar.addWidget(self._benefit_combo)
-        # 利回りの集計対象。優待と同じく「同じ画面の別の数え方」なのでここへ並べる。
-        bar.addWidget(QLabel("   利回り: "))
-        self._yield_scope_combo = self._make_combo(
-            [(key, YIELD_SCOPE_LABELS[key]) for key in YIELD_SCOPES],
-            self.yield_scope,
-            self._on_yield_scope,
+        # 表示対象の資産クラス。複数選択なので3つのチェックボックスを常に並べる
+        # （KPI がすべて変わるので、何を選んでいるかが開かずに見える形にする）。
+        # 状態は表示メニューの QAction と同じく _sync_asset_scope_controls の
+        # 1箇所で揃える。clicked で受けるのは、同期時の setChecked で再発火させないため。
+        bar.addWidget(QLabel("   対象: "))
+        tip = (
+            "表・KPI・グラフ・Markdown 出力の対象にする資産。"
+            "米国株＝USD 建ての株式・ETF、投信＝資産種別が投資信託。"
+            "最後の1つは外せません"
         )
-        bar.addWidget(self._yield_scope_combo)
+        self._asset_scope_checks: dict[str, QCheckBox] = {}
+        for cls in ASSET_CLASSES:
+            check = QCheckBox(ASSET_CLASS_LABELS[cls])
+            check.setObjectName(f"assetScope_{cls}")
+            check.setToolTip(tip)
+            check.clicked.connect(
+                lambda checked=False, c=cls: self.action_toggle_asset_class(c, checked)
+            )
+            bar.addWidget(check)
+            self._asset_scope_checks[cls] = check
+        self._sync_asset_scope_controls()
 
     def _build_filter_box(self) -> QWidget:
         """絞り込み欄（ラベル＋入力）を作る。タブ見出しの右端（コーナー）に置く。
@@ -1174,9 +1230,29 @@ class DividendWindow(QMainWindow):
         combo = getattr(self, "_withdrawal_combo", None)
         if combo is not None:
             combo.setCurrentIndex(combo.findData(self.withdrawal_mode or "none"))
-        combo = getattr(self, "_yield_scope_combo", None)
-        if combo is not None:
-            combo.setCurrentIndex(combo.findData(self.yield_scope))
+        self._sync_asset_scope_controls()
+
+    def _sync_asset_scope_controls(self) -> None:
+        """資産クラスの QAction とツールバーのチェックボックスのチェック・可否を揃える。
+
+        選ばれているのが1つだけなら、それを外せなくする（空集合にすると全画面が
+        空になる）。
+        """
+        only_one = len(self.asset_scope) == 1
+        for cls in ASSET_CLASSES:
+            action = self._actions.get(f"asset_{cls}")
+            if action is None:
+                continue
+            checked = cls in self.asset_scope
+            action.setChecked(checked)
+            action.setEnabled(not (only_one and checked))
+        show_all = self._actions.get("asset_all")
+        if show_all is not None:
+            show_all.setEnabled(not is_all_asset_scope(self.asset_scope))
+        for cls, check in getattr(self, "_asset_scope_checks", {}).items():
+            checked = cls in self.asset_scope
+            check.setChecked(checked)
+            check.setEnabled(not (only_one and checked))
 
     def _make_combo(
         self, defs: list[tuple[str, str]], current_key: str, on_select
@@ -1387,6 +1463,11 @@ class DividendWindow(QMainWindow):
         ))
 
         row.addStretch()
+        if kind == "asset":
+            # 資産を絞ったときの記録開始日を出す枠（配当側は下の注記と共用）。
+            self._asset_trend_note = QLabel("")
+            self._asset_trend_note.setObjectName("dialogNote")
+            row.addWidget(self._asset_trend_note)
         if kind == "income":
             # 取崩収入の記録開始日を出す枠。収入モードを取崩にすると、記録前の日は
             # combine_income が None を返して線が末尾だけになる——理由が画面に無いと
@@ -1435,18 +1516,49 @@ class DividendWindow(QMainWindow):
         self._refresh_view()
         self._resize_yield_columns()
 
-    def _on_yield_scope(self, key: str) -> None:
-        """利回りの集計対象（投信込み/投信除く）を切り替える。
-
-        変わるのは KPI カード2枚（値とカード名の接尾辞）と Markdown サマリー
-        だけ。行データ・構成グラフ・月別・推移には効かないので、列幅の取り直し
-        は不要。
-        """
-        if key == self.yield_scope:
+    def action_toggle_asset_class(self, cls: str, checked: bool) -> None:
+        """資産クラス1つの表示を切り替える（最後の1つは外さない）。"""
+        scope = set(self.asset_scope)
+        if checked:
+            scope.add(cls)
+        else:
+            scope.discard(cls)
+        if not scope:
+            # QAction は押せなくしてあるが、ほかの経路から呼ばれても守る。
+            self._sync_asset_scope_controls()
+            self._notify("表示対象は少なくとも1つ選んでください", error=True)
             return
-        self.yield_scope = key
-        self._save_or_notify(lambda: save_settings(yield_scope=key))
+        self._set_asset_scope(tuple(scope))
+
+    def _set_asset_scope(self, scope) -> None:
+        """表示対象の資産クラスを更新し、保存して全タブを描き直す。
+
+        列構成は変わらないので列幅は取り直さない（ユーザーが広げた幅を保つ）。
+        """
+        normalized = normalize_asset_scope(list(scope)) or DEFAULT_ASSET_SCOPE
+        if normalized == self.asset_scope:
+            self._sync_asset_scope_controls()
+            return
+        self.asset_scope = normalized
+        self._save_or_notify(lambda: save_settings(asset_scope=list(normalized)))
+        self._sync_asset_scope_controls()
         self._refresh_view()
+
+    def _scoped(self) -> list[tuple[int, Holding]]:
+        """画面に出す (holdings インデックス, Holding)。表示対象と無効銘柄の表示に従う。"""
+        return scope_holdings(
+            self.holdings, self.asset_scope, include_inactive=self.show_inactive
+        )
+
+    def _out_of_scope_note(self, holding: Holding) -> str:
+        """保存した銘柄が表示対象外なら、一覧から消えた理由を返す（対象内なら ""）。"""
+        cls = asset_class(holding.asset_type, holding.currency)
+        if cls in self.asset_scope:
+            return ""
+        return (
+            f"（{ASSET_CLASS_LABELS[cls]}は表示対象外のため一覧に出ません。"
+            "ツールバーの「対象」のチェックで表示できます）"
+        )
 
     def _on_filter_changed(self, text: str) -> None:
         self._price_proxy.set_filter_text(text)
@@ -1562,14 +1674,15 @@ class DividendWindow(QMainWindow):
             self._notify(history_notice)
 
     def _refresh_view(self) -> None:
+        # 表示対象で絞った保有と、表示行 ↔ 保有の対応を同じ1回の呼び出しから作る
+        # （インデックスを別の条件で組むと編集・削除が別の銘柄に当たる）。
+        scoped = self._scoped()
         rows, summary = compute_rows(
-            self.holdings, self.market_data_map, self.fx_rate, self.dividend_mode,
-            self.withdrawal_mode, include_inactive=self.show_inactive,
+            [h for _, h in scoped], self.market_data_map, self.fx_rate,
+            self.dividend_mode, self.withdrawal_mode,
+            include_inactive=self.show_inactive,
         )
-        # rows と同じ条件・同じ順序で holdings インデックスを組む（表示行 ↔ 保有の対応）。
-        visible_indices = [
-            i for i, h in enumerate(self.holdings) if h.active or self.show_inactive
-        ]
+        visible_indices = [i for i, _ in scoped]
         # 優待スイッチは構成グラフ・月別・推移だけでなく、KPI カードと両テーブルの
         # 利回り（分子）にも効く。先に決めて表・カード・グラフで同じ値を使う。
         with_benefit = self.income_benefit == "with"
@@ -1579,7 +1692,7 @@ class DividendWindow(QMainWindow):
         # 経路を必ず用意する（自由記述列と同じ作法）。
         yield_tip = (
             f"分子: {'配当＋優待' if with_benefit else '配当のみ'}"
-            f" / 対象: {'投資信託を除く' if self.yield_scope == 'ex_fund' else '投資信託を含む'}"
+            f" / 対象: {asset_scope_label(self.asset_scope)}"
         )
         # 株数列のヘッダは投信の口数単位を示すので、両テーブルとも毎回貼り直す
         # （設定を切り替えたのに「株数」のままだと桁が変わった理由が読めない）。
@@ -1652,13 +1765,18 @@ class DividendWindow(QMainWindow):
             f" | 未算出 {summary.missing_market_value_count}銘柄"
             if summary.missing_market_value_count else ""
         )
+        # 絞っているときは数字が全体ではないことを、ボタン以外にも常設で出す。
+        scope_note = (
+            "" if is_all_asset_scope(self.asset_scope)
+            else f" | 対象: {asset_scope_label(self.asset_scope)}"
+        )
         # 為替と株価は取得時刻が別（Ctrl+U だけ・手編集の fx.csv もある）なので
         # それぞれの時刻を出す。円換算がいつのレートかは画面のどこにも無かった。
         self._info.setText(
             f"USDJPY {fmt_number(self.fx_rate, 4)} "
             f"({self._compact_timestamp(self.fx_fetched_at)}) | "
             f"株価 {self._compact_timestamp(self.market_fetched_at)} "
-            f"({self.market_source or 'N/A'}){missing_note}"
+            f"({self.market_source or 'N/A'}){missing_note}{scope_note}"
         )
         income_kpi_label = "年間収入" if self.withdrawal_mode is not None else "年間配当"
         self._cards["年間配当"].set_title(income_kpi_label)
@@ -1667,16 +1785,13 @@ class DividendWindow(QMainWindow):
         self._cards["年間配当"].set_value(fmt_number(summary.total_dividend_jpy, 0))
         self._cards["優待"].set_value(fmt_number(summary.total_benefit_jpy, 0))
         self._cards["合計"].set_value(fmt_number(summary.total_numerator_jpy, 0))
-        # 利回りは集計対象（投信込み/投信除く）で値もカード名も変わる。
-        # どちらを見ているか画面だけで分かるよう接尾辞を付ける
-        # （年間配当 → 年間収入 の入替と同じやり方）。
-        yoc, yov = summary_yields(summary, self.yield_scope, with_benefit)
-        scope_suffix = YIELD_SCOPE_SUFFIX.get(self.yield_scope, "")
-        self._cards["簿価利回り"].set_title(f"簿価利回り{yield_suffix}{scope_suffix}")
-        self._cards["時価利回り"].set_title(f"時価利回り{yield_suffix}{scope_suffix}")
-        # 接尾辞2つが付くと最長の名前はカードに収まらず、狭い幅では切れる
-        # （実測: 「簿価利回り＋優待(投信除く)」は 168px 必要で、ウィンドウ最小幅
-        # 900px ではラベル幅 145px。1024px 以上で収まる）。切れた分は yield_tip で読む。
+        # 利回りは優待スイッチで分子が変わるので、カード名に接尾辞を付ける
+        # （年間配当 → 年間収入 の入替と同じやり方）。表示対象の資産は全カードに
+        # 効くので利回りにだけ付けず、ツールバーのボタンとステータスバーで示す。
+        yoc, yov = summary_yields(summary, with_benefit)
+        self._cards["簿価利回り"].set_title(f"簿価利回り{yield_suffix}")
+        self._cards["時価利回り"].set_title(f"時価利回り{yield_suffix}")
+        # 定義（分子・対象）はツールチップで読めるようにする。
         for _title in ("簿価利回り", "時価利回り"):
             self._cards[_title].setToolTip(yield_tip)
         self._cards["簿価利回り"].set_value(fmt_percent(yoc, 2))
@@ -1699,11 +1814,23 @@ class DividendWindow(QMainWindow):
         評価額タブ＝評価額・簿価の2系列。配当タブ＝ツールバーの「優待」と「収入」
         に応じて combine_income で合成した単一系列。
         """
-        hist_dicts = self._history_as_dicts()
+        # 表示対象の資産で絞った値へ差し替える（全クラスなら合計列のまま）。
+        # 系列定義・combine_income・取崩の注記は同じキーを読むだけで済む。
+        raw_dicts = self._history_as_dicts()
+        hist_dicts = [scope_history_record(r, self.asset_scope) for r in raw_dicts]
+        scope_note = self._scope_coverage_note(raw_dicts)
+        partial = not is_all_asset_scope(self.asset_scope)
+        # 一部の資産だけの線は、資産別の記録を始めた日からしか引けない。
+        scoped_empty = (
+            f"{asset_scope_label(self.asset_scope)}の内訳はまだ記録がありません"
+            "（株価を取得した日から記録されます）"
+        )
         self._asset_line.set_data(
             hist_dicts, asset_trend_series(),
-            empty_message="評価額の履歴がありません（株価更新か『インポート』で記録されます）",
+            empty_message=scoped_empty if partial else
+            "評価額の履歴がありません（株価更新か『インポート』で記録されます）",
         )
+        self._asset_trend_note.setText(scope_note)
         with_benefit = self.income_benefit == "with"
         mode = self.withdrawal_mode
         income_dicts = [
@@ -1716,15 +1843,36 @@ class DividendWindow(QMainWindow):
         )
         self._income_line.set_data(
             income_dicts, [(label, "income_value", income_trend_color())],
-            empty_message="配当の履歴がありません（株価更新か『インポート』で記録されます）",
+            empty_message=scoped_empty if partial else
+            "配当の履歴がありません（株価更新か『インポート』で記録されます）",
         )
-        notes = [self._withdrawal_coverage_note(hist_dicts, mode)]
+        # 絞っているときは資産別の列が全モードぶん同じ日から始まるので、取崩の
+        # 記録開始日より後になる。注記は資産別の開始日の1つにまとめる。
+        notes = [
+            scope_note if partial
+            else self._withdrawal_coverage_note(hist_dicts, mode)
+        ]
         # 履歴は表示モードに依存させないため税引前で記録している（変えない）。
         # 税引後を選んでいるのに推移だけ税引前のままだと、KPI の年間配当と
         # グラフ右端の値が食い違って見えるので、凡例と注記の両方で明示する。
         if self.dividend_mode == "net":
             notes.append(NET_TREND_NOTE)
         self._income_trend_note.setText(" / ".join(n for n in notes if n))
+
+    def _scope_coverage_note(self, hist_dicts: list[dict]) -> str:
+        """資産を絞っているとき、推移の線を引ける最初の日を注記で返す。
+
+        資産別の列は後から足したので、それより前の日は合計しか無く線が切れる
+        （推定で埋めない）。注記が無いと「対象を絞ったらグラフが短くなった」
+        理由が画面に残らない。全クラスを選んでいる・履歴が空なら ""。
+        """
+        if is_all_asset_scope(self.asset_scope) or not hist_dicts:
+            return ""
+        first = scoped_history_start(hist_dicts, self.asset_scope)
+        if first is None or first == hist_dicts[0]["date"]:
+            return ""  # 1点も無い（空メッセージ側の担当）か、全期間ぶんある
+        # 最小幅 900px の操作行に収まる長さにする（「資産別の内訳は」だと末尾が切れた）。
+        return f"※資産別は {first} 以降のみ記録"
 
     @staticmethod
     def _withdrawal_coverage_note(hist_dicts: list[dict], mode: str | None) -> str:
@@ -1775,6 +1923,8 @@ class DividendWindow(QMainWindow):
                     "total_fixed_withdrawal_income_jpy": (
                         rec.total_fixed_withdrawal_income_jpy
                     ),
+                    # 資産別の内訳（表示対象を絞ったときに scope_history_record が使う）。
+                    **rec.by_class,
                 }
             )
         return result
@@ -1789,7 +1939,20 @@ class DividendWindow(QMainWindow):
         評価額・配当・優待が全て None（起動直後で株価未取得）の場合は記録しない。
         株価が当日未取得・分割が未反映の場合も記録せず、呼出側へ通知文を返す。
         """
-        if splits.pending_holdings(self.holdings, self.market_data_map):
+        pending = splits.pending_holdings(self.holdings, self.market_data_map)
+        if pending:
+            # 記録は全件で判定するので、表示対象外の銘柄の旗でも止まる。その旗は
+            # 画面に出ていないため、どの銘柄かを通知文に書く。
+            hidden = [
+                self.holdings[i].symbol for i, _ in pending
+                if asset_class(self.holdings[i].asset_type, self.holdings[i].currency)
+                not in self.asset_scope
+            ]
+            if hidden:
+                return (
+                    "分割を反映するまで推移を記録しません"
+                    f"（表示対象外の銘柄: {', '.join(dict.fromkeys(hidden))}）"
+                )
             return "分割を反映するまで推移を記録しません"
         today = today_jst_str()
         for holding in self.holdings:
@@ -1832,6 +1995,11 @@ class DividendWindow(QMainWindow):
             total_withdrawal_income_jpy=wd_rate.total_dividend_jpy,
             total_fixed_withdrawal_income_jpy=wd_fixed.total_dividend_jpy,
             source="app",
+            # 表示対象（資産クラス）に関係なく全クラスぶんを記録する。あとから
+            # 対象を絞っても、記録を始めた日以降の線は欠けずに引ける。
+            by_class=class_breakdown(
+                self.holdings, self.market_data_map, self.fx_rate
+            ),
         )
         history = upsert_record(self.history, record)
         if not self._save_or_notify(lambda: save_history(history)):
@@ -1895,15 +2063,17 @@ class DividendWindow(QMainWindow):
         # 画面と同じ条件で計算し直す。compute_rows は純関数で
         # _record_history_snapshot も同様に追加で呼んでいる——表示結果を
         # self._last_rows のようなキャッシュへ溜める経路は増やさない。
+        # 画面と同じく表示対象の資産で絞る（CSV 版は取込が全置換なので全件のまま）。
         rows, summary = compute_rows(
-            self.holdings, self.market_data_map, self.fx_rate, self.dividend_mode,
-            self.withdrawal_mode, include_inactive=self.show_inactive,
+            [h for _, h in self._scoped()], self.market_data_map, self.fx_rate,
+            self.dividend_mode, self.withdrawal_mode,
+            include_inactive=self.show_inactive,
         )
         text = build_holdings_markdown(
             rows, summary,
             dividend_mode=self.dividend_mode,
             withdrawal_mode=self.withdrawal_mode,
-            yield_scope=self.yield_scope,
+            asset_scope=self.asset_scope,
             with_benefit=self.income_benefit == "with",
             fx_rate=self.fx_rate,
             fx_fetched_at=self.fx_fetched_at,
@@ -1918,6 +2088,8 @@ class DividendWindow(QMainWindow):
             # CSV 版は self.holdings を全件出すが、こちらは画面と同じく
             # show_inactive に従うので件数が食い違い得る。理由を通知に残す。
             note = "" if self.show_inactive else " / 無効を除く"
+            if not is_all_asset_scope(self.asset_scope):
+                note += f" / 対象: {asset_scope_label(self.asset_scope)}"
             self._notify(f"保有銘柄を Markdown で書き出しました（{len(rows)} 件{note}）")
 
     def action_export_history(self) -> None:
@@ -2589,7 +2761,10 @@ class DividendWindow(QMainWindow):
                 return
             self.holdings = holdings
             self._reload_all()
-            self._notify("銘柄を更新しました")
+            # 種別・通貨を変えて表示対象外になると、保存した直後に行が消える。
+            self._notify(
+                "銘柄を更新しました" + self._out_of_scope_note(dlg.result_holding)
+            )
 
     def action_delete(self) -> None:
         tab_key = self._active_tab_key()
@@ -2646,7 +2821,7 @@ class DividendWindow(QMainWindow):
             self.holdings = holdings
             self._reload_all()
             self._select_holding_row(len(self.holdings) - 1)
-            self._notify("銘柄を追加しました")
+            self._notify("銘柄を追加しました" + self._out_of_scope_note(result))
 
     # ---- 株式分割の補正 ----
     def _current_holding_index(self) -> int | None:
@@ -2800,11 +2975,20 @@ class DividendWindow(QMainWindow):
         if not pending:
             return
         summary = []
+        # 一括反映は表示対象に関係なく全件へ掛ける（未反映が残ると推移の記録が
+        # 止まるため）。画面に出ていない行が混ざることを確認文で必ず示す。
+        hidden_count = 0
         for holding_idx, events in pending:
             holding = self.holdings[holding_idx]
             plan = splits.plan_correction(holding, events)
+            hidden = (
+                asset_class(holding.asset_type, holding.currency)
+                not in self.asset_scope
+            )
+            hidden_count += hidden
             summary.append(
-                f"{self._holding_label(holding)}: "
+                ("［表示対象外］" if hidden else "")
+                + f"{self._holding_label(holding)}: "
                 + "、".join(f"{d} {splits.format_ratio(r)}" for d, r in events)
                 + f" / 株数 {holding.shares:g} → {plan.shares[1]:g}"
                 f" / 単価 {holding.avg_cost:g} → {plan.avg_cost[1]:g}"
@@ -2812,7 +2996,12 @@ class DividendWindow(QMainWindow):
         reply = QMessageBox.question(
             self,
             "未反映の分割をすべて反映",
-            f"{len(pending)} 行に株式分割を反映します。\n\n"
+            f"{len(pending)} 行に株式分割を反映します。"
+            + (
+                f"\n（うち {hidden_count} 行は表示対象外の資産で、いまの一覧には出ていません）"
+                if hidden_count else ""
+            )
+            + "\n\n"
             + "\n".join(summary)
             + "\n\nすでに手で直してある行が混ざっていると二重に反映されます。"
             "その行は「いいえ」で戻り、1行ずつ「分割を反映済みにする」を使ってください。",

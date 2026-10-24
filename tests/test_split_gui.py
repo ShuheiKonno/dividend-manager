@@ -57,6 +57,7 @@ class _Stub:
         self._busy = False
         self._selected_index = selected_index
         self.show_inactive = show_inactive
+        self.asset_scope = gui.DEFAULT_ASSET_SCOPE
         self.reloaded = False
         self.notes: list[tuple[str, bool]] = []
 
@@ -191,6 +192,20 @@ def test_apply_all_corrects_every_pending_row_and_skips_the_rest(monkeypatch, sa
     assert rows[1] == done and rows[2] == holdings[2]
     assert "1 行" in asked["text"]  # 対象は未反映の1行だけ
     assert stub.reloaded is True
+
+
+def test_apply_all_includes_rows_outside_the_asset_scope(monkeypatch, saved):
+    """一括反映は表示対象外の資産の行にも掛け、確認文でその旨を示す。"""
+    asked = _answer(monkeypatch, YES)
+    holdings = [_holding(), _holding("8316", name="三井住友")]
+    market = {"5334": _market(), "8316": _market("8316")}
+    stub = _Stub(holdings, market)
+    stub.asset_scope = ("us_stock",)  # どちらの行もいまの一覧には出ていない
+    gui.DividendWindow.action_apply_all_splits(stub)
+    assert "2 行" in asked["text"]
+    assert "うち 2 行は表示対象外" in asked["text"]
+    assert asked["text"].count("［表示対象外］") == 2
+    assert [r.shares for r in saved["rows"]] == [600.0, 600.0]
 
 
 def test_apply_all_declined_or_nothing_pending_changes_nothing(monkeypatch, saved):

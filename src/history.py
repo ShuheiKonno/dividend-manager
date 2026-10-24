@@ -11,7 +11,15 @@ from __future__ import annotations
 
 from typing import Iterable
 
-from .models import HistoryRecord
+from .calc import compute_rows, scope_holdings
+from .models import (
+    ASSET_CLASSES,
+    CLASS_HISTORY_METRICS,
+    Holding,
+    HistoryRecord,
+    MarketData,
+    class_history_key,
+)
 from .utils import safe_float
 
 
@@ -70,3 +78,113 @@ def combine_income(
     if with_benefit:
         base += safe_float(rec.get("total_benefit_jpy")) or 0.0
     return base
+
+
+def class_breakdown(
+    holdings: Iterable[Holding],
+    market_map: dict[str, MarketData],
+    fx_rate: float | None,
+) -> dict[str, float | None]:
+    """当日スナップショット用の資産クラス別内訳（キーは CLASS_HISTORY_FIELDS）。
+
+    合計列と同じく表示モードに依存させない（税引前・有効銘柄のみ）。株式2クラスは
+    取崩の影響を受けないので取崩なしの1回、投信は取崩なし・定率・定額の3回計算する。
+
+    「寄与ゼロ」と「不明」を区別して残す（同じ対象の KPI と食い違わせない）:
+    - そのクラスの銘柄が無い → 全指標 0.0
+    - 優待 → 0.0（Summary の None は「優待なし」の意味で、不明ではない）
+    - 配当・取崩収入が不明（未取得の配当だけ・取崩率未設定の投信だけ等）→ None
+      （KPI はこのとき N/A。0 で残すと推移にだけ誤ったゼロが描かれる）
+    評価額は呼び出し側が欠損なしを確かめてから呼ぶ（_record_history_snapshot が
+    先に弾く）ので、記録した日には必ず数値が入る——scoped_history_value はこれを
+    「その日は資産別を記録した」印に使う。
+    """
+    holdings = list(holdings)
+    result: dict[str, float | None] = {}
+    for cls in ASSET_CLASSES:
+        subset = [h for _, h in scope_holdings(holdings, (cls,))]
+        _, base = compute_rows(subset, market_map, fx_rate, "gross", None)
+        values = {
+            "market_value": base.total_market_value_jpy,
+            "book_value": base.total_book_value_jpy,
+            "dividend": base.total_dividend_jpy,
+            "benefit": base.total_benefit_jpy,
+        }
+        metrics = CLASS_HISTORY_METRICS[cls]
+        if "withdrawal_income" in metrics:
+            _, rate = compute_rows(subset, market_map, fx_rate, "gross", "rate")
+            values["withdrawal_income"] = rate.total_dividend_jpy
+        if "fixed_withdrawal_income" in metrics:
+            _, fixed = compute_rows(subset, market_map, fx_rate, "gross", "fixed")
+            values["fixed_withdrawal_income"] = fixed.total_dividend_jpy
+        for metric in metrics:
+            value = values[metric]
+            if not subset or metric == "benefit":
+                value = value or 0.0
+            result[class_history_key(cls, metric)] = value
+    return result
+
+
+# 合計列 total_<指標>_jpy のうち、資産クラス別の列から組み直せる指標。
+_SCOPED_METRICS = (
+    "market_value",
+    "book_value",
+    "dividend",
+    "benefit",
+    "withdrawal_income",
+    "fixed_withdrawal_income",
+)
+
+
+def scoped_history_value(rec: dict, metric: str, scope) -> float | None:
+    """選んだ資産クラスの列の和（推移グラフの1点）。
+
+    - 選んだクラスのどれかが**未記録**（評価額の列が空＝資産別の列を足す前の日）
+      なら None（線を切る。合計から按分しない）。
+    - 記録済みの日は、**既知の値だけ**を足す。選んだクラスがすべて不明なら None。
+      Summary の配当（既知の銘柄だけの和・1件も無ければ None）と同じ数え方なので、
+      同じ対象の KPI と推移の右端が食い違わない。
+    取崩の列を持たない株式クラスは、取崩込み収入＝配当として足す（取崩は投信に
+    しか付かない）。
+    """
+    known: list[float] = []
+    for cls in ASSET_CLASSES:
+        if cls not in scope:
+            continue
+        if safe_float(rec.get(class_history_key(cls, "market_value"))) is None:
+            return None
+        own = metric if metric in CLASS_HISTORY_METRICS[cls] else "dividend"
+        value = safe_float(rec.get(class_history_key(cls, own)))
+        if value is not None:
+            known.append(value)
+    return sum(known) if known else None
+
+
+def scope_history_record(rec: dict, scope) -> dict:
+    """推移グラフ用の1点を、表示対象の資産クラスで絞った値へ差し替えて返す。
+
+    全クラスを選んでいるときは合計列をそのまま使う（クラス別の列は途中から
+    足したので、和で描くと記録前の期間の線が消える）。一部だけのときは合計列の
+    キー（total_<指標>_jpy）をクラス別の和で上書きする——グラフ側（系列定義・
+    combine_income・取崩の記録開始日の注記）は同じキーを読むだけで済む。
+    過去分は合計しか残っていないので推定で埋めない（記録前は None で線が切れる）。
+    """
+    if set(scope) >= set(ASSET_CLASSES):
+        return rec
+    out = dict(rec)
+    for metric in _SCOPED_METRICS:
+        out[f"total_{metric}_jpy"] = scoped_history_value(rec, metric, scope)
+    market = out["total_market_value_jpy"]
+    book = out["total_book_value_jpy"]
+    out["total_profit_jpy"] = (
+        market - book if market is not None and book is not None else None
+    )
+    return out
+
+
+def scoped_history_start(records: Iterable[dict], scope) -> str | None:
+    """一部の資産クラスに絞ったとき、線を引ける最初の日（記録が無ければ None）。"""
+    for rec in records:
+        if scoped_history_value(rec, "market_value", scope) is not None:
+            return rec.get("date")
+    return None
