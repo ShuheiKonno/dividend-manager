@@ -74,6 +74,40 @@ FX_FIELDS = [
 # 両モードで使い回すと、定額を選んでいるのに定率の線が出る（値も凡例も尤もらしい
 # まま間違う）。列を足したのは後からなので、それ以前の日は空＝線を引かない。
 # Android バックアップ取込分は簿価・損益・取崩収入を持たない（None）。
+# 資産クラス（calc.asset_class の戻り値）。並びは UI・出力・履歴列の順序。
+# calc が models を import する側なので、履歴列を組むためにここへ置く
+# （calc.ASSET_CLASSES はこれの再エクスポート）。
+ASSET_CLASSES = ("jp_stock", "us_stock", "fund")
+
+# 履歴へ記録する資産クラス別の指標。合計列 total_<指標>_jpy と同じ指標名を使う
+# （history.scoped_history_value が名前で対応づける）。取崩は投信にしか付かない
+# ——株式の「取崩込み収入」は配当と同値なので、株式2クラスは列を持たない。
+CLASS_HISTORY_METRICS: dict[str, tuple[str, ...]] = {
+    "jp_stock": ("market_value", "book_value", "dividend", "benefit"),
+    "us_stock": ("market_value", "book_value", "dividend", "benefit"),
+    "fund": (
+        "market_value",
+        "book_value",
+        "dividend",
+        "benefit",
+        "withdrawal_income",
+        "fixed_withdrawal_income",
+    ),
+}
+
+
+def class_history_key(asset_class: str, metric: str) -> str:
+    """資産クラス別の履歴列名（例: jp_stock_market_value_jpy）。"""
+    return f"{asset_class}_{metric}_jpy"
+
+
+# 列を後から足したので、それ以前に書いた CSV には無い（→ None）。
+CLASS_HISTORY_FIELDS = [
+    class_history_key(cls, metric)
+    for cls in ASSET_CLASSES
+    for metric in CLASS_HISTORY_METRICS[cls]
+]
+
 HISTORY_FIELDS = [
     "record_date",
     "total_market_value_jpy",
@@ -83,6 +117,7 @@ HISTORY_FIELDS = [
     "total_profit_jpy",
     "total_withdrawal_income_jpy",
     "total_fixed_withdrawal_income_jpy",
+    *CLASS_HISTORY_FIELDS,
     "source",
 ]
 
@@ -249,6 +284,9 @@ class HistoryRecord:
     total_withdrawal_income_jpy: float | None  # 定率取崩
     total_fixed_withdrawal_income_jpy: float | None  # 定額取崩
     source: str | None
+    # 資産クラス別の内訳（キーは CLASS_HISTORY_FIELDS）。表示対象を絞ったときの
+    # 推移グラフ用。記録前の日は空（None）で、過去分は合計しか無いので復元しない。
+    by_class: dict[str, float | None] = field(default_factory=dict)
 
     @classmethod
     def from_dict(cls, row: dict[str, Any]) -> "HistoryRecord":
@@ -267,6 +305,12 @@ class HistoryRecord:
                 row.get("total_fixed_withdrawal_income_jpy")
             ),
             source=safe_str(row.get("source")),
+            # 空欄（記録前）はキーごと持たない＝ by_class.get(key) が None。
+            by_class={
+                key: value
+                for key in CLASS_HISTORY_FIELDS
+                if (value := safe_float(row.get(key))) is not None
+            },
         )
 
     def to_dict(self) -> dict[str, Any]:
@@ -282,6 +326,10 @@ class HistoryRecord:
             "total_fixed_withdrawal_income_jpy": _csv_num(
                 self.total_fixed_withdrawal_income_jpy
             ),
+            **{
+                key: _csv_num(self.by_class.get(key))
+                for key in CLASS_HISTORY_FIELDS
+            },
             "source": self.source or "",
         }
 

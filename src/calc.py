@@ -3,7 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Iterable
 
-from .models import FXRate, Holding, MarketData
+from .models import ASSET_CLASSES, FXRate, Holding, MarketData
 from .splits import applied_splits, pending_splits
 from .utils import safe_float
 
@@ -31,6 +31,74 @@ class Summary:
     total_numerator_ex_fund_jpy: float | None = None
     yield_on_cost_ex_fund: float | None = None
     yield_on_value_ex_fund: float | None = None
+
+
+# ---- 資産クラス（表示対象の切替） ----
+#
+# 日本株 / 米国株 / 投信の任意の組み合わせで画面を絞る。分類はここの1関数だけで
+# 決める（表示層・履歴・出力で書き写すと、同じ銘柄がタブによって別クラスになる）。
+# 資産種別に ETF が無いため、国内 ETF は日本株・米国 ETF は米国株に入る。
+ASSET_CLASS_LABELS = {"jp_stock": "日本株", "us_stock": "米国株", "fund": "投信"}
+DEFAULT_ASSET_SCOPE: tuple[str, ...] = ASSET_CLASSES
+# 全クラス選択時の表示名（「日本株・米国株・投信」と並べると長すぎてツールバーに収まらない）。
+ASSET_SCOPE_ALL_LABEL = "全て"
+
+
+def asset_class(asset_type: str | None, currency: str | None) -> str:
+    """銘柄の資産クラスを返す。必ず ASSET_CLASSES のどれかになる。
+
+    投信を**先に**判定する——通貨から見ると USD 建ての投信が米国株に入る。
+    JPY / USD 以外の通貨の株式も日本株へ落とし、どのクラスにも属さない銘柄を
+    作らない（作ると全クラスを選んでも合計と一致しなくなる）。
+    """
+    if asset_type == "fund":
+        return "fund"
+    return "us_stock" if currency == "USD" else "jp_stock"
+
+
+def normalize_asset_scope(value: object) -> tuple[str, ...] | None:
+    """設定値（リスト）を ASSET_CLASSES の順の重複なしタプルへ正規化する。
+
+    未知のクラスを含む・空・リストでない場合は None（呼び出し側が既定へ戻す）。
+    空集合を許すと全画面が空になり、しかも戻し方が分からない。
+    """
+    if not isinstance(value, (list, tuple)) or not value:
+        return None
+    if not all(isinstance(v, str) and v in ASSET_CLASSES for v in value):
+        return None
+    return tuple(cls for cls in ASSET_CLASSES if cls in value)
+
+
+def is_all_asset_scope(scope: Iterable[str]) -> bool:
+    return set(scope) >= set(ASSET_CLASSES)
+
+
+def asset_scope_label(scope: Iterable[str]) -> str:
+    """表示対象の短い名前（例: 「全て」「日本株・投信」）。"""
+    selected = [cls for cls in ASSET_CLASSES if cls in set(scope)]
+    if len(selected) == len(ASSET_CLASSES):
+        return ASSET_SCOPE_ALL_LABEL
+    return "・".join(ASSET_CLASS_LABELS[cls] for cls in selected)
+
+
+def scope_holdings(
+    holdings: Iterable[Holding],
+    scope: Iterable[str],
+    include_inactive: bool = False,
+) -> list[tuple[int, Holding]]:
+    """表示対象の (holdings 内のインデックス, Holding) を元の順序で返す。
+
+    compute_rows へ渡す保有と、表示行 ↔ 保有の対応（row_holding_indices）を
+    **必ずこの1関数から**作ること。インデックスだけ別の条件で組むと、編集・削除
+    が別の銘柄に当たる（エラーは出ない）。
+    """
+    wanted = set(scope)
+    return [
+        (i, h)
+        for i, h in enumerate(holdings)
+        if (h.active or include_inactive)
+        and asset_class(h.asset_type, h.currency) in wanted
+    ]
 
 
 # ---- 利回りの集計対象（表示・出力の切替のみ） ----

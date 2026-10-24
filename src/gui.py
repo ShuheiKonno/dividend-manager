@@ -106,6 +106,7 @@ from .history import (
     upsert_record,
     merge_records,
     combine_income,
+    class_breakdown,
 )
 # market_data は yfinance / ToushinReader / pandas を芋づる式に読み込み起動を数秒遅らせる。
 # 取得は p / u キーのワーカースレッドでしか走らないため、import を run() 内へ遅延させる。
@@ -1832,6 +1833,11 @@ class DividendWindow(QMainWindow):
             total_withdrawal_income_jpy=wd_rate.total_dividend_jpy,
             total_fixed_withdrawal_income_jpy=wd_fixed.total_dividend_jpy,
             source="app",
+            # 表示対象（資産クラス）に関係なく全クラスぶんを記録する。あとから
+            # 対象を絞っても、記録を始めた日以降の線は欠けずに引ける。
+            by_class=class_breakdown(
+                self.holdings, self.market_data_map, self.fx_rate
+            ),
         )
         history = upsert_record(self.history, record)
         if not self._save_or_notify(lambda: save_history(history)):

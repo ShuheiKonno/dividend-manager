@@ -11,7 +11,15 @@ from __future__ import annotations
 
 from typing import Iterable
 
-from .models import HistoryRecord
+from .calc import compute_rows, scope_holdings
+from .models import (
+    ASSET_CLASSES,
+    CLASS_HISTORY_METRICS,
+    Holding,
+    HistoryRecord,
+    MarketData,
+    class_history_key,
+)
 from .utils import safe_float
 
 
@@ -70,3 +78,41 @@ def combine_income(
     if with_benefit:
         base += safe_float(rec.get("total_benefit_jpy")) or 0.0
     return base
+
+
+def class_breakdown(
+    holdings: Iterable[Holding],
+    market_map: dict[str, MarketData],
+    fx_rate: float | None,
+) -> dict[str, float]:
+    """当日スナップショット用の資産クラス別内訳（キーは CLASS_HISTORY_FIELDS）。
+
+    合計列と同じく表示モードに依存させない（税引前・有効銘柄のみ）。株式2クラスは
+    取崩の影響を受けないので取崩なしの1回、投信は取崩なし・定率・定額の3回計算する。
+
+    値は 0.0 で埋める（そのクラスの銘柄が無い・配当が1件も無い＝寄与ゼロ）。None を
+    残すと「その日は記録していない」と区別できず、該当クラスを含む選択の線が
+    記録後も切れたままになる。呼び出し側は時価の欠損が無いことを確かめてから
+    呼ぶ（_record_history_snapshot が先に弾く）ので、0 埋めで合計と食い違わない。
+    """
+    holdings = list(holdings)
+    result: dict[str, float] = {}
+    for cls in ASSET_CLASSES:
+        subset = [h for _, h in scope_holdings(holdings, (cls,))]
+        _, base = compute_rows(subset, market_map, fx_rate, "gross", None)
+        values = {
+            "market_value": base.total_market_value_jpy,
+            "book_value": base.total_book_value_jpy,
+            "dividend": base.total_dividend_jpy,
+            "benefit": base.total_benefit_jpy,
+        }
+        metrics = CLASS_HISTORY_METRICS[cls]
+        if "withdrawal_income" in metrics:
+            _, rate = compute_rows(subset, market_map, fx_rate, "gross", "rate")
+            values["withdrawal_income"] = rate.total_dividend_jpy
+        if "fixed_withdrawal_income" in metrics:
+            _, fixed = compute_rows(subset, market_map, fx_rate, "gross", "fixed")
+            values["fixed_withdrawal_income"] = fixed.total_dividend_jpy
+        for metric in metrics:
+            result[class_history_key(cls, metric)] = values[metric] or 0.0
+    return result
