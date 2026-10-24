@@ -83,6 +83,14 @@ def _sandbox():
     try:
         app_config.save_data_dir(data)
         io_csv.set_data_dir(data, persist=False)
+        # SMOKE_ASSET_SCOPE=jp_stock,fund で、表示対象を絞って終了した状態の
+        # settings.json を再現する（サンドボックス内の設定だけを書き換える）。
+        scope = os.environ.get("SMOKE_ASSET_SCOPE")
+        if scope:
+            io_csv.save_settings(asset_scope=scope.split(","))
+            assert io_csv.load_settings().get("asset_scope") == scope.split(","), (
+                f"SMOKE_ASSET_SCOPE が不正（{scope}）。ASSET_CLASSES の順で書くこと"
+            )
         # 実データのフォルダを指すパスが1つでも残っていれば走らせない。
         for name in ("DATA_DIR", *io_csv._DERIVED_PATHS):
             path = getattr(io_csv, name)
@@ -92,7 +100,8 @@ def _sandbox():
         assert root in app_config.config_path().parents, app_config.config_path()
         assert app_config.load_data_dir() == data
         print(f"sandbox: {data}（コピー元: "
-              f"{'なし（空データ）' if os.environ.get('SMOKE_EMPTY_DATA') == '1' else real}）")
+              f"{'なし（空データ）' if os.environ.get('SMOKE_EMPTY_DATA') == '1' else real}）"
+              f"{f' / 対象: {scope}' if scope else ''}")
         yield data
     finally:
         if original_appdata is None:
@@ -208,30 +217,36 @@ def _check_toolbar(w) -> None:
     # 実レイアウトが要るのでここだけ show() する（offscreen なら画面には出ない）。
     combos = (w._mode_combo, w._withdrawal_combo, w._benefit_combo, w._asset_scope_button)
     original = w.size()
+    original_scope = w.asset_scope
     w.show()
     try:
-        for width in (w.minimumWidth(), 1024, 1100, 1536):
-            w.resize(width, max(620, w.minimumHeight()))
-            QApplication.processEvents()
-            for bar in (w._toolbar, w._view_toolbar):
-                ext = bar.findChild(QToolButton, "qt_toolbar_ext_button")
-                assert ext is None or not ext.isVisible(), (
-                    f"幅 {width}px で {bar.objectName()} があふれている "
-                    f"(sizeHint {bar.sizeHint().width()}px > 幅 {bar.width()}px)"
+        # 「対象」ボタンは選択で文言の長さが変わる。全て（最短）と2クラス選択
+        # （最長「日本株・米国株」）の両方で、あふれていないことを見る。
+        for scope in (("jp_stock", "us_stock", "fund"), ("jp_stock", "us_stock")):
+            w._set_asset_scope(scope)
+            for width in (w.minimumWidth(), 1024, 1100, 1536):
+                w.resize(width, max(620, w.minimumHeight()))
+                QApplication.processEvents()
+                for bar in (w._toolbar, w._view_toolbar):
+                    ext = bar.findChild(QToolButton, "qt_toolbar_ext_button")
+                    assert ext is None or not ext.isVisible(), (
+                        f"幅 {width}px で {bar.objectName()} があふれている "
+                        f"(sizeHint {bar.sizeHint().width()}px > 幅 {bar.width()}px)"
+                    )
+                assert all(c.isVisible() for c in combos), f"幅 {width}px でコンボが消えている"
+                assert w._filter.isVisible(), f"幅 {width}px で絞り込みが消えている"
+                # コーナーに幅を取られてタブ見出しが縮む（スクロール矢印が出てタブが
+                # 隠れる）のは、絞り込みを移したことで起こり得る別の回帰。
+                tab_bar = w._tabs.tabBar()
+                assert tab_bar.width() >= tab_bar.sizeHint().width(), (
+                    f"幅 {width}px でタブ見出しが縮んでいる "
+                    f"({tab_bar.width()}px < {tab_bar.sizeHint().width()}px)"
                 )
-            assert all(c.isVisible() for c in combos), f"幅 {width}px でコンボが消えている"
-            assert w._filter.isVisible(), f"幅 {width}px で絞り込みが消えている"
-            # コーナーに幅を取られてタブ見出しが縮む（スクロール矢印が出てタブが
-            # 隠れる）のは、絞り込みを移したことで起こり得る別の回帰。
-            tab_bar = w._tabs.tabBar()
-            assert tab_bar.width() >= tab_bar.sizeHint().width(), (
-                f"幅 {width}px でタブ見出しが縮んでいる "
-                f"({tab_bar.width()}px < {tab_bar.sizeHint().width()}px)"
-            )
-            assert corner.x() > tab_bar.geometry().right(), (
-                f"幅 {width}px で絞り込みがタブ見出しに重なっている"
-            )
+                assert corner.x() > tab_bar.geometry().right(), (
+                    f"幅 {width}px で絞り込みがタブ見出しに重なっている"
+                )
     finally:
+        w._set_asset_scope(original_scope)  # 設定（asset_scope）を元へ戻す
         w.resize(original)
         w.hide()
         QApplication.processEvents()
@@ -1234,10 +1249,32 @@ def main() -> None:
 
 
 def _run_checks(data: Path) -> None:
+    from src.calc import ASSET_CLASSES
+
     w = build_window()
     # 既定フォルダへのフォールバック（DividendWindow.__init__）でサンドボックスの
     # 外へ出ていないこと。
     assert gui.io_csv.DATA_DIR == data, f"データフォルダが外れた: {gui.io_csv.DATA_DIR}"
+    # 保存済みの表示対象で起動していること（SMOKE_ASSET_SCOPE で絞った設定を再現）。
+    saved_scope = io_csv.load_settings().get("asset_scope")
+    if saved_scope:
+        assert w.asset_scope == tuple(saved_scope), (w.asset_scope, saved_scope)
+    # 以降のチェックの多くは全銘柄を前提に期待値を組んでいる（推移の注記・分割の
+    # 旗・月別など）。絞った設定でも同じ前提で見られるよう全クラスへ固定し、
+    # 最後に元の対象へ戻す（_check_asset_scope 自体は全組み合わせを回す）。
+    original_scope = w.asset_scope
+    w._set_asset_scope(ASSET_CLASSES)
+    try:
+        _run_window_checks(w)
+    finally:
+        w._set_asset_scope(original_scope)
+    assert io_csv.load_settings().get("asset_scope", list(ASSET_CLASSES)) == list(
+        original_scope
+    ), "スモークの後で表示対象の設定が元に戻っていない"
+    _run_dialog_checks()
+
+
+def _run_window_checks(w) -> None:
 
     # タブ・メニュー構成
     assert w._tabs.count() == 5, "タブが5つ生成されていない"
@@ -1310,6 +1347,8 @@ def _run_checks(data: Path) -> None:
     _check_trend_scope(w)
     _check_split_flags(w)
 
+
+def _run_dialog_checks() -> None:
     # 編集ダイアログ: 即時バリデーション（赤枠プロパティ＋集約エラーラベル）
     dlg = EditHoldingDialog(_holding())
     dlg._shares.setText("-5")
