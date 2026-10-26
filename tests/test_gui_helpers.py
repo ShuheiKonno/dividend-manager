@@ -39,6 +39,8 @@ def _window_stub(holdings, market_map):
         show_inactive = False
         history = []
         asset_scope = gui.DEFAULT_ASSET_SCOPE
+        income_benefit = "without"
+        _in_scope = gui.DividendWindow._in_scope
 
         def _save_or_notify(self, action):
             action()
@@ -289,6 +291,8 @@ def _io_stub(holdings, history):
         _with_csv_suffix = staticmethod(gui.DividendWindow._with_csv_suffix)
         _with_md_suffix = staticmethod(gui.DividendWindow._with_md_suffix)
         _scoped = gui.DividendWindow._scoped
+        _in_scope = gui.DividendWindow._in_scope
+        _selection_label = gui.DividendWindow._selection_label
 
         # Markdown エクスポートは compute_rows を呼び直すので、表示条件を持つ。
         market_data_map: dict = {}
@@ -427,12 +431,33 @@ def test_snapshot_notice_names_out_of_scope_split_holdings(monkeypatch):
     assert "表示対象外の銘柄: AAPL" in notice
 
 
+def _scope_stub(scope, income_benefit="without"):
+    class _ScopeStub:
+        _in_scope = gui.DividendWindow._in_scope
+
+    stub = _ScopeStub()
+    stub.asset_scope = scope
+    stub.income_benefit = income_benefit
+    return stub
+
+
 def test_out_of_scope_note():
-    stub = SimpleNamespace(asset_scope=("jp_stock",))
+    stub = _scope_stub(("jp_stock",))
     note = gui.DividendWindow._out_of_scope_note
     assert note(stub, _holding()) == ""
     assert "米国株は表示対象外" in note(stub, _holding(symbol="AAPL", currency="USD"))
     assert "投信は表示対象外" in note(stub, _holding(asset_type="fund"))
+
+
+def test_out_of_scope_note_keeps_benefit_holders_when_benefit_selected():
+    """優待を選んでいると、選んでいない資産の優待銘柄は一覧に残る（理由の通知は不要）。"""
+    note = gui.DividendWindow._out_of_scope_note
+    us_with_benefit = _holding(symbol="AAPL", currency="USD", annual_benefit_jpy=3000.0)
+    assert note(_scope_stub(("jp_stock",), "with"), us_with_benefit) == ""
+    assert "米国株は表示対象外" in note(_scope_stub(("jp_stock",)), us_with_benefit)
+    assert "米国株は表示対象外" in note(
+        _scope_stub(("jp_stock",), "with"), _holding(symbol="AAPL", currency="USD")
+    )
 
 
 def test_export_holdings_markdown_empty_guard_skips_dialog(monkeypatch):

@@ -85,10 +85,14 @@ def _sandbox():
         io_csv.set_data_dir(data, persist=False)
         # SMOKE_ASSET_SCOPE=jp_stock,fund で、表示対象を絞って終了した状態の
         # settings.json を再現する（サンドボックス内の設定だけを書き換える）。
+        # SMOKE_ASSET_SCOPE=none は資産を全部外して優待だけを選んだ状態（優待のみ）。
         scope = os.environ.get("SMOKE_ASSET_SCOPE")
         if scope:
-            io_csv.save_settings(asset_scope=scope.split(","))
-            assert io_csv.load_settings().get("asset_scope") == scope.split(","), (
+            classes = [] if scope == "none" else scope.split(",")
+            if not classes:
+                io_csv.save_settings(income_benefit="with")
+            io_csv.save_settings(asset_scope=classes)
+            assert io_csv.load_settings().get("asset_scope") == classes, (
                 f"SMOKE_ASSET_SCOPE が不正（{scope}）。ASSET_CLASSES の順で書くこと"
             )
         # 実データのフォルダを指すパスが1つでも残っていれば走らせない。
@@ -216,8 +220,8 @@ def _check_toolbar(w) -> None:
     # 見ていない項目（1段目右端の「分割を反映」等）があふれても気付けない。
     # 実レイアウトが要るのでここだけ show() する（offscreen なら画面には出ない）。
     combos = (
-        w._mode_combo, w._withdrawal_combo, w._benefit_combo,
-        *w._asset_scope_checks.values(),
+        w._mode_combo, w._withdrawal_combo,
+        *w._asset_scope_checks.values(), w._benefit_check,
     )
     original = w.size()
     original_scope = w.asset_scope
@@ -253,8 +257,27 @@ def _check_toolbar(w) -> None:
     # ドロップダウンが現在のモードを示していること
     assert w._mode_combo.currentData() == w.dividend_mode
     assert w._withdrawal_combo.currentData() == (w.withdrawal_mode or "none")
-    # 優待は推移グラフの操作行ではなくツールバー（税引・収入と同じ行）にある
-    assert w._benefit_combo.currentData() == w.income_benefit
+    # 優待は推移グラフの操作行ではなくツールバー（資産のチェックボックスの並び）にある
+    assert not hasattr(w, "_benefit_combo"), "優待がドロップダウンに戻っている"
+    assert w._benefit_check.isChecked() is (w.income_benefit == "with")
+    assert w._benefit_check.isEnabled(), "優待のチェックボックスが押せない"
+    # チェックボックス操作で設定が切り替わり、コード経由の切替にも追随する
+    original_benefit = w.income_benefit
+    # 優待を外すと月別内訳の並び替え列が配当列へ落ちる（伏せた合計列で並べない）。
+    # 後続の _check_monthly_tab が既定の並びを確かめるので、並びも元へ戻す。
+    monthly_header = w._monthly_view.horizontalHeader()
+    original_sort = (monthly_header.sortIndicatorSection(), monthly_header.sortIndicatorOrder())
+    try:
+        w._benefit_check.click()
+        assert w.income_benefit == ("without" if original_benefit == "with" else "with")
+        assert io_csv.load_settings().get("income_benefit") == w.income_benefit
+        w._on_income_benefit(original_benefit)
+        assert w._benefit_check.isChecked() is (original_benefit == "with"), (
+            "コード経由で優待を切り替えてもチェックボックスが追随しない"
+        )
+    finally:
+        w._on_income_benefit(original_benefit)  # 設定（income_benefit）を元へ戻す
+        w._monthly_view.sortByColumn(*original_sort)
     # 表示対象の資産も同じ行にチェックボックスで並び、現在の対象を示す
     for cls, check in w._asset_scope_checks.items():
         assert check.isChecked() is (cls in w.asset_scope), f"{cls} のチェックがずれた"
@@ -350,7 +373,7 @@ def _check_theme_toggle(w) -> None:
         # 描画時に theme を読んでいるか（値 import していないか）の突合
         assert widgets.profit_text_qcolor(1.0).name() == theme.PALETTES[other]["PROFIT_UP"]
         assert gui.asset_trend_series()[0][2].name() == theme.PALETTES[other]["SERIES_VALUE"]
-        assert gui.monthly_series()[0][2].name() == theme.PALETTES[other]["SERIES_DIVIDEND"]
+        assert gui.monthly_series()[0][2].name() == theme.PALETTES[other]["SERIES_JP_STOCK"]
 
         w.action_set_theme(original)  # 設定（theme）を元へ戻す
         assert w.theme_name == original
@@ -565,18 +588,14 @@ def _check_asset_scope(w) -> None:
     """
     from itertools import combinations
 
-    from src.calc import (
-        ASSET_CLASSES,
-        asset_class,
-        compute_rows,
-        monthly_breakdown,
-        scope_holdings,
-    )
-    from src.utils import fmt_number
+    from src.calc import ASSET_CLASSES
 
     original = w.asset_scope
+    original_benefit = w.income_benefit
     original_tab = w._tabs.currentIndex()
     original_filter = w._filter.text()
+    header = w._monthly_view.horizontalHeader()
+    original_sort = (header.sortIndicatorSection(), header.sortIndicatorOrder())
 
     # 表示メニューのサブメニューとツールバーのボタンが同じ QAction を持つこと。
     view_menu = next(
@@ -596,61 +615,38 @@ def _check_asset_scope(w) -> None:
         w._filter.clear()  # 絞り込み欄の文字で行数が減らないようにする
         w._tabs.setCurrentIndex(3)  # 株価詳細（行選択 → 保有の対応を確かめる）
         subsets = [
-            combo for n in range(1, len(ASSET_CLASSES) + 1)
+            combo for n in range(0, len(ASSET_CLASSES) + 1)
             for combo in combinations(ASSET_CLASSES, n)
         ]
-        for scope in subsets:
-            w._set_asset_scope(scope)
-            assert w.asset_scope == scope
-            assert io_csv.load_settings().get("asset_scope") == list(scope), (
-                "表示対象が設定へ保存されていない"
-            )
-            for cls in ASSET_CLASSES:
-                # メニューの QAction とツールバーのチェックボックスが同じ状態を示す。
-                for control in (w._actions[f"asset_{cls}"], checks[cls]):
-                    assert control.isChecked() is (cls in scope), f"{cls} のチェックがずれた"
-                    if len(scope) == 1 and cls in scope:
-                        assert not control.isEnabled(), "最後の1つを外せる（全画面が空になる）"
-            assert w._actions["asset_all"].isEnabled() is (len(scope) < len(ASSET_CLASSES))
+        for benefit in ("without", "with"):
+            # 優待の切替は資産を全て選んだ状態で行う（優待のみの状態で外すと拒否される）。
+            w._set_asset_scope(ASSET_CLASSES)
+            w._on_income_benefit(benefit)
+            with_benefit = benefit == "with"
+            for scope in subsets:
+                if not scope and not with_benefit:
+                    continue  # 資産も優待も無い選択は作れない（下で拒否を確かめる）
+                _check_one_selection(w, scope, with_benefit)
 
-            expected = scope_holdings(w.holdings, scope, include_inactive=w.show_inactive)
-            assert w.row_holding_indices["price"] == [i for i, _ in expected], (
-                "表示行 ↔ 保有の対応が絞り込みとずれている"
-            )
-            assert w.row_holding_indices["income"] == [i for i, _ in expected]
-            assert w._price_proxy.rowCount() == len(expected)
-            assert w._income_proxy.rowCount() == len(expected)
-            rows, summary = compute_rows(
-                [h for _, h in expected], w.market_data_map, w.fx_rate,
-                w.dividend_mode, w.withdrawal_mode, include_inactive=w.show_inactive,
-            )
-            assert w._cards["評価額計"]._value.text() == fmt_number(
-                summary.total_market_value_jpy, 0
-            ), f"{scope} の評価額計が絞り込みと食い違う"
-            assert w._cards["簿価計"]._value.text() == fmt_number(
-                summary.total_book_value_jpy, 0
-            )
-            chart_rows = [r for r in rows if r.get("active") is not False]
-            assert w._monthly.known_total_jpy == monthly_breakdown(
-                chart_rows
-            ).known_total_jpy, f"{scope} の月別が絞り込みと食い違う"
-            assert ("対象:" in w._info.text()) is (len(scope) < len(ASSET_CLASSES)), (
-                f"ステータスバーが絞り込みを示していない: {w._info.text()!r}"
-            )
-            if w._price_proxy.rowCount() > 0:
-                w._price_view.selectRow(0)
-                idx = w._current_holding_index()
-                assert idx is not None
-                holding = w.holdings[idx]
-                assert asset_class(holding.asset_type, holding.currency) in scope, (
-                    "選択行が表示対象外の銘柄を指している（編集・削除が別の銘柄に当たる）"
-                )
-
-        # 最後の1つを外そうとしても対象は空にならない（QAction 以外の経路の守り）。
+        # 最後の1つ（資産3つ＋優待のうち）を外そうとしても空にならない
+        # （QAction・チェックボックス以外の経路の守り）。
+        w._set_asset_scope(ASSET_CLASSES)
+        w._on_income_benefit("without")
         w._set_asset_scope(("jp_stock",))
         w.action_toggle_asset_class("jp_stock", False)
         assert w.asset_scope == ("jp_stock",)
+        # 優待を選べば資産を全部外せる（優待のみ）。そのときは優待を外せない。
+        w._benefit_check.click()
+        assert w.income_benefit == "with"
+        checks["jp_stock"].click()
+        assert w.asset_scope == () and w.income_benefit == "with"
+        assert not w._benefit_check.isEnabled(), "優待のみで優待を外せる（全画面が空になる）"
+        w._on_income_benefit("without")
+        assert w.income_benefit == "with", "優待のみで優待を外せた"
+        w._set_asset_scope(ASSET_CLASSES)
+        w._on_income_benefit(original_benefit)
         # 「すべて表示」で全クラスへ戻る。
+        w._set_asset_scope(("jp_stock",))
         w._actions["asset_all"].trigger()
         assert w.asset_scope == ASSET_CLASSES
         # チェックの付け外しは QAction からもチェックボックスからも行え、互いに追随する。
@@ -665,20 +661,115 @@ def _check_asset_scope(w) -> None:
         checks["us_stock"].click()
         assert w.asset_scope == ASSET_CLASSES
     finally:
-        w._set_asset_scope(original)  # 設定（asset_scope）を元へ戻す
+        # 設定（asset_scope / income_benefit）を元へ戻す。優待のみ（空）へ戻すときは
+        # 先に優待を戻す（優待を外した状態で空集合は拒否される）。
+        w._set_asset_scope(ASSET_CLASSES)
+        w._on_income_benefit(original_benefit)
+        w._set_asset_scope(original)
+        w._monthly_view.sortByColumn(*original_sort)
         w._filter.setText(original_filter)
         w._tabs.setCurrentIndex(original_tab)  # 設定（last_tab）を元へ戻す
-    assert w.asset_scope == original
+    assert w.asset_scope == original and w.income_benefit == original_benefit
+
+
+def _check_one_selection(w, scope, with_benefit) -> None:
+    """1つの選択（資産の組み合わせ×優待）で、表・KPI・月別・操作部品が揃うこと。"""
+    from src.calc import (
+        ASSET_CLASS_LABELS,
+        ASSET_CLASSES,
+        compute_rows,
+        monthly_breakdown,
+        scope_holdings,
+    )
+    from src.utils import fmt_number
+
+    checks = w._asset_scope_checks
+    label = f"{scope}（優待{'あり' if with_benefit else 'なし'}）"
+    w._set_asset_scope(scope)
+    assert w.asset_scope == scope, label
+    assert io_csv.load_settings().get("asset_scope") == list(scope), (
+        "表示対象が設定へ保存されていない"
+    )
+    # 資産3つ＋優待のうち、選んでいるのが1つだけならそれを外せない。
+    only_one_class = len(scope) == 1 and not with_benefit
+    for cls in ASSET_CLASSES:
+        # メニューの QAction とツールバーのチェックボックスが同じ状態を示す。
+        for control in (w._actions[f"asset_{cls}"], checks[cls]):
+            assert control.isChecked() is (cls in scope), f"{label}: {cls} のチェックがずれた"
+            assert control.isEnabled() is not (only_one_class and cls in scope), (
+                f"{label}: {cls} の可否が「最後の1つは外せない」と食い違う"
+            )
+    assert w._benefit_check.isChecked() is with_benefit
+    assert w._benefit_check.isEnabled() is not (with_benefit and not scope), (
+        f"{label}: 優待のみで優待を外せる、または外せるはずの優待が押せない"
+    )
+    assert w._actions["asset_all"].isEnabled() is (len(scope) < len(ASSET_CLASSES))
+
+    expected = scope_holdings(
+        w.holdings, scope, include_inactive=w.show_inactive, with_benefit=with_benefit
+    )
+    assert w.row_holding_indices["price"] == [i for i, _ in expected], (
+        f"{label}: 表示行 ↔ 保有の対応が絞り込みとずれている"
+    )
+    assert w.row_holding_indices["income"] == [i for i, _ in expected]
+    assert w._price_proxy.rowCount() == len(expected)
+    assert w._income_proxy.rowCount() == len(expected)
+    rows, summary = compute_rows(
+        [h for _, h in expected], w.market_data_map, w.fx_rate,
+        w.dividend_mode, w.withdrawal_mode, include_inactive=w.show_inactive,
+        dividend_scope=scope,
+    )
+    assert w._cards["評価額計"]._value.text() == fmt_number(
+        summary.total_market_value_jpy, 0
+    ), f"{label} の評価額計が絞り込みと食い違う"
+    assert w._cards["簿価計"]._value.text() == fmt_number(summary.total_book_value_jpy, 0)
+    chart_rows = [r for r in rows if r.get("active") is not False]
+    assert w._monthly.known_total_jpy == monthly_breakdown(
+        chart_rows
+    ).known_total_jpy, f"{label} の月別が絞り込みと食い違う"
+    # 月別の棒は表示対象のクラスだけを積む（対象外の凡例を残さない）。優待は最上段。
+    series_labels = [s[0] for s in w._monthly_bar._series]
+    assert series_labels == [ASSET_CLASS_LABELS[c] for c in scope] + (
+        ["優待"] if with_benefit else []
+    ), f"{label} の月別の系列が絞り込みと食い違う: {series_labels}"
+    assert ("対象:" in w._info.text()) is (len(scope) < len(ASSET_CLASSES)), (
+        f"ステータスバーが絞り込みを示していない: {w._info.text()!r}"
+    )
+    # 配当を数えない行（選んでいない資産の優待銘柄）は配当欄が「対象外」。
+    excluded = [r for r in rows if r.get("dividend_excluded")]
+    if with_benefit and len(scope) < len(ASSET_CLASSES):
+        assert all(r["annual_dividend_jpy"] is None for r in excluded)
+    else:
+        assert not excluded, f"{label}: 優待を選んでいないのに配当を外した行がある"
+    if excluded:
+        col = [k for _, k in gui.INCOME_COLUMNS].index("annual_dividend_jpy")
+        texts = {
+            w._income_model.item(r, col).text()
+            for r in range(w._income_model.rowCount())
+        }
+        assert gui.DIVIDEND_EXCLUDED_TEXT in texts, f"{label}: 対象外の表示が無い"
+    if w._price_proxy.rowCount() > 0:
+        w._price_view.selectRow(0)
+        idx = w._current_holding_index()
+        assert idx is not None
+        assert w._in_scope(w.holdings[idx]), (
+            "選択行が表示対象外の銘柄を指している（編集・削除が別の銘柄に当たる）"
+        )
 
 
 def _check_trend_scope(w) -> None:
     """推移グラフが表示対象の資産に追随し、記録前の期間を推定で埋めないこと。
 
     履歴はメモリ上の合成データへ差し替える（保存はしない）。1日目は合計列だけ
-    （資産別の列を足す前）、2・3日目は資産別の列もある。
+    （資産別の列を足す前）、2・3日目は資産別の列もある。優待銘柄だけの評価額・
+    簿価の列は3日目にだけある（優待を選んで資産を絞ったときの線はそこから）。
     """
     from src.calc import ASSET_CLASSES
-    from src.models import HistoryRecord, class_history_key as key
+    from src.models import (
+        HistoryRecord,
+        benefit_holder_history_key as hkey,
+        class_history_key as key,
+    )
 
     def record(date, by_class):
         return HistoryRecord(
@@ -700,16 +791,26 @@ def _check_trend_scope(w) -> None:
         key("fund", "withdrawal_income"): 30.0,
         key("fund", "fixed_withdrawal_income"): 50.0,
     }
+    holders = {
+        hkey("jp_stock", "market_value"): 250.0, hkey("jp_stock", "book_value"): 200.0,
+        hkey("us_stock", "market_value"): 0.0, hkey("us_stock", "book_value"): 0.0,
+        hkey("fund", "market_value"): 0.0, hkey("fund", "book_value"): 0.0,
+    }
     synthetic = [
         record("2026-10-01", {}),
         record("2026-10-24", breakdown),
-        record("2026-10-25", breakdown),
+        record("2026-10-25", {**breakdown, **holders}),
     ]
     original_history = w.history
     original_scope = w.asset_scope
+    original_benefit = w.income_benefit
     original_period = w._asset_line._period
+    header = w._monthly_view.horizontalHeader()
+    original_sort = (header.sortIndicatorSection(), header.sortIndicatorOrder())
     try:
         w.history = synthetic
+        w._set_asset_scope(ASSET_CLASSES)
+        w._on_income_benefit("without")
         w._asset_line.set_period("all")
         w._income_line.set_period("all")
 
@@ -728,21 +829,50 @@ def _check_trend_scope(w) -> None:
         assert w._asset_trend_note.text() == note, w._asset_trend_note.text()
         assert note in w._income_trend_note.text(), w._income_trend_note.text()
         income = [r.get("income_value") for r in w._income_line._visible]
-        expected = 40.0 + (5.0 if w.income_benefit == "with" else 0.0)
-        if w.withdrawal_mode == "fixed":
-            expected = 80.0 + (5.0 if w.income_benefit == "with" else 0.0)
-        elif w.withdrawal_mode == "rate":
-            expected = 60.0 + (5.0 if w.income_benefit == "with" else 0.0)
+        expected = {None: 40.0, "fixed": 80.0, "rate": 60.0}[w.withdrawal_mode]
         assert income == [None, expected, expected], f"配当推移が絞れていない: {income}"
 
-        # 資産別の記録が1日も無ければ、空メッセージで理由を出す。
+        # 優待を選ぶと、選んでいない資産の優待銘柄の評価額が加わり（配当は数えない）、
+        # 優待は全クラスぶんになる。優待銘柄の列が無い日（2日目）は線を切る。
+        w._on_income_benefit("with")
+        w._set_asset_scope(("us_stock",))
+        market = [r.get("total_market_value_jpy") for r in w._asset_line._visible]
+        assert market == [None, None, 550.0], (
+            f"優待ありの絞った推移が KPI と同じ定義になっていない: {market}"
+        )
+        assert w._asset_trend_note.text() == "※資産別は 2026-10-25 以降のみ記録", (
+            w._asset_trend_note.text()
+        )
+        income = [r.get("income_value") for r in w._income_line._visible]
+        assert income == [None, None, 15.0], f"米国株の配当＋全優待になっていない: {income}"
+        # 優待のみ: 配当は 0、優待だけの線（None にすると線ごと消える）。
+        w._set_asset_scope(())
+        income = [r.get("income_value") for r in w._income_line._visible]
+        assert income == [None, None, 5.0], f"優待のみの推移が優待だけになっていない: {income}"
+        market = [r.get("total_market_value_jpy") for r in w._asset_line._visible]
+        assert market == [None, None, 250.0], market
+        w._set_asset_scope(("jp_stock", "fund"))
+        w._on_income_benefit("without")
+
+        # 資産別の記録が1日も無ければ、空メッセージで理由を出す。選んだ対象に
+        # 銘柄が無い（空データ等）なら「記録が無い」ではなく「銘柄が無い」と書く。
         w.history = synthetic[:1]
         w._refresh_trend()
-        assert "内訳はまだ記録がありません" in w._asset_line._empty_message
+        if w._scoped():
+            assert "内訳はまだ記録がありません" in w._asset_line._empty_message
+        else:
+            assert w._asset_line._empty_message == "日本株・投信の銘柄がありません", (
+                w._asset_line._empty_message
+            )
         assert w._asset_trend_note.text() == ""
     finally:
         w.history = original_history
-        w._set_asset_scope(original_scope)  # 設定（asset_scope）を元へ戻す
+        # 設定（asset_scope / income_benefit）を元へ戻す。優待のみ（空）へ戻すときは
+        # 先に優待を戻す（優待なしで空集合は拒否される）。
+        w._set_asset_scope(ASSET_CLASSES)
+        w._on_income_benefit(original_benefit)
+        w._set_asset_scope(original_scope)
+        w._monthly_view.sortByColumn(*original_sort)
         w._asset_line.set_period(original_period)
         w._income_line.set_period(w.income_trend_period)
         w._refresh_trend()
@@ -1105,8 +1235,8 @@ def _check_monthly_benefit_toggle(w) -> None:
     header = w._monthly_view.horizontalHeader()
 
     w._on_income_benefit("with")
-    assert [s[0] for s in w._monthly_bar._series] == ["配当", "優待"], (
-        "優待『含む』で棒が積み上げにならない"
+    assert [s[0] for s in w._monthly_bar._series] == ["日本株", "米国株", "投信", "優待"], (
+        "優待『含む』で棒が資産クラス別＋優待の積み上げにならない"
     )
     assert not w._monthly_view.isColumnHidden(gui.MONTHLY_COL_BENEFIT)
     assert not w._monthly_view.isColumnHidden(gui.MONTHLY_COL_BENEFIT_DETAIL)
@@ -1115,8 +1245,10 @@ def _check_monthly_benefit_toggle(w) -> None:
     w._monthly_view.sortByColumn(gui.MONTHLY_COL_TOTAL, Qt.SortOrder.DescendingOrder)
 
     w._on_income_benefit("without")
-    assert [s[0] for s in w._monthly_bar._series] == ["配当"], (
-        "優待『含まない』でも優待が積まれている"
+    # 配当の資産クラスは全て残ったまま優待だけが落ちること（先頭だけを残すと
+    # 日本株以外の配当が黙って棒から消える）。
+    assert [s[0] for s in w._monthly_bar._series] == ["日本株", "米国株", "投信"], (
+        "優待『含まない』で優待が積まれている、または配当の資産クラスが欠けた"
     )
     assert w._monthly_view.isColumnHidden(gui.MONTHLY_COL_BENEFIT), "優待列が伏せられない"
     # 金額を伏せて説明だけ残すと、見出しの合計（配当のみ）と表の見た目が食い違う。
@@ -1261,8 +1393,9 @@ def _run_checks(data: Path) -> None:
     assert gui.io_csv.DATA_DIR == data, f"データフォルダが外れた: {gui.io_csv.DATA_DIR}"
     # 保存済みの表示対象で起動していること（SMOKE_ASSET_SCOPE で絞った設定を再現）。
     saved_scope = io_csv.load_settings().get("asset_scope")
-    if saved_scope:
+    if saved_scope is not None:
         assert w.asset_scope == tuple(saved_scope), (w.asset_scope, saved_scope)
+    original_benefit = w.income_benefit
     # 以降のチェックの多くは全銘柄を前提に期待値を組んでいる（推移の注記・分割の
     # 旗・月別など）。絞った設定でも同じ前提で見られるよう全クラスへ固定し、
     # 最後に元の対象へ戻す（_check_asset_scope 自体は全組み合わせを回す）。
@@ -1271,6 +1404,8 @@ def _run_checks(data: Path) -> None:
     try:
         _run_window_checks(w)
     finally:
+        # 優待のみ（空）へ戻すときは先に優待を戻す（優待なしで空集合は拒否される）。
+        w._on_income_benefit(original_benefit)
         w._set_asset_scope(original_scope)
     assert io_csv.load_settings().get("asset_scope", list(ASSET_CLASSES)) == list(
         original_scope

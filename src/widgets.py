@@ -1005,7 +1005,7 @@ class BarChartWidget(QWidget):
       buckets … 12件の dict。各要素に "month"（1〜12）と各系列の数値キーを持つ。
       series  … (ラベル, キー, 塗り色 QColor) のタプルのリスト。下から順に積む。
 
-    バーの色は損益ではなく系列（配当/優待）の区別なので、日本式の損益カラー
+    バーの色は損益ではなく系列（資産クラス別の配当/優待）の区別なので、日本式の損益カラー
     （profit_text_qcolor / profit_tile_colors）は通さず呼び出し側から受け取る。
     """
 
@@ -1239,6 +1239,8 @@ class BarChartWidget(QWidget):
             for label, key, _color in self._series:
                 value = safe_float(bucket.get(key)) or 0.0
                 lines.append(f"{label}: {fmt_number(value, 0)} 円")
+            if len(self._series) > 1:
+                lines.append(f"合計: {fmt_number(self._total_of(bucket), 0)} 円")
             QToolTip.showText(event.globalPosition().toPoint(), "\n".join(lines), self)
         super().mouseMoveEvent(event)
 

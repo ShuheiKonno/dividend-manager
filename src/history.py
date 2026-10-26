@@ -11,13 +11,15 @@ from __future__ import annotations
 
 from typing import Iterable
 
-from .calc import compute_rows, scope_holdings
+from .calc import compute_rows, has_benefit, scope_holdings
 from .models import (
     ASSET_CLASSES,
+    BENEFIT_HOLDER_METRICS,
     CLASS_HISTORY_METRICS,
     Holding,
     HistoryRecord,
     MarketData,
+    benefit_holder_history_key,
     class_history_key,
 )
 from .utils import safe_float
@@ -70,14 +72,33 @@ def combine_income(
     with_benefit=True      : 上記へ優待（total_benefit_jpy）を加算。
     基準値が None（その列を記録する前の日＝過去の取込分など）の場合は None を
     返し、折れ線を分断する。優待が None の日は 0 として扱う。
+
+    ただし資産別の列を記録した日（_recorded_by_class）の基準値 None は「列が無い」
+    ではなく「配当（取崩）が不明」。優待を含めるときは KPI の「合計」
+    （calc._numerator: 片方だけ既知ならその値）と同じく既知の優待だけで描く——
+    None を返すと、合計カードに出ている優待の額が推移からだけ消える。
     """
     key = INCOME_BASE_KEYS.get(withdrawal_mode, "total_dividend_jpy")
     base = safe_float(rec.get(key))
+    benefit = safe_float(rec.get("total_benefit_jpy")) if with_benefit else None
     if base is None:
+        if benefit is not None and _recorded_by_class(rec):
+            return benefit
         return None
-    if with_benefit:
-        base += safe_float(rec.get("total_benefit_jpy")) or 0.0
-    return base
+    return base + (benefit or 0.0)
+
+
+def _recorded_by_class(rec: dict) -> bool:
+    """資産別の列を記録した日か（全クラスの評価額の列がある＝記録日の印）。
+
+    記録日の評価額は必ず数値で入る（欠損があると記録自体が止まる）ので、この列の
+    有無で「列を足す前の日」と「記録したが値が不明」を区別できる。取崩の列も
+    資産別の列と同じ日から揃って記録しているので、収入モードに関係なく使える。
+    """
+    return all(
+        safe_float(rec.get(class_history_key(cls, "market_value"))) is not None
+        for cls in ASSET_CLASSES
+    )
 
 
 def class_breakdown(
@@ -125,6 +146,36 @@ def class_breakdown(
     return result
 
 
+def benefit_holder_breakdown(
+    holdings: Iterable[Holding],
+    market_map: dict[str, MarketData],
+    fx_rate: float | None,
+) -> dict[str, float | None]:
+    """当日スナップショット用の、資産クラスごとの優待銘柄だけの評価額・簿価
+    （キーは BENEFIT_HOLDER_HISTORY_FIELDS）。
+
+    資産を絞って優待を選んだとき、選んでいない資産の優待銘柄も一覧・KPI の
+    評価額・簿価に入る。推移をその定義で組み直すための列（scope_history_record）。
+    優待の判定は scope_holdings と同じ calc.has_benefit（記録日時点の優待額）。
+    優待銘柄が無いクラスは 0.0。
+    """
+    holdings = list(holdings)
+    result: dict[str, float | None] = {}
+    for cls in ASSET_CLASSES:
+        subset = [h for _, h in scope_holdings(holdings, (cls,)) if has_benefit(h)]
+        _, base = compute_rows(subset, market_map, fx_rate, "gross", None)
+        values = {
+            "market_value": base.total_market_value_jpy,
+            "book_value": base.total_book_value_jpy,
+        }
+        for metric in BENEFIT_HOLDER_METRICS:
+            value = values[metric]
+            result[benefit_holder_history_key(cls, metric)] = (
+                0.0 if not subset else value
+            )
+    return result
+
+
 # 合計列 total_<指標>_jpy のうち、資産クラス別の列から組み直せる指標。
 _SCOPED_METRICS = (
     "market_value",
@@ -160,8 +211,11 @@ def scoped_history_value(rec: dict, metric: str, scope) -> float | None:
     return sum(known) if known else None
 
 
-def scope_history_record(rec: dict, scope) -> dict:
+def scope_history_record(rec: dict, scope, with_benefit: bool = False) -> dict:
     """推移グラフ用の1点を、表示対象の資産クラスで絞った値へ差し替えて返す。
+
+    with_benefit=True（ツールバーの「優待」）で資産を絞っているときは、画面の
+    KPI と同じ定義で組み直す（_scope_with_benefit）。
 
     全クラスを選んでいるときは合計列をそのまま使う（クラス別の列は途中から
     足したので、和で描くと記録前の期間の線が消える）。一部だけのときは合計列の
@@ -171,6 +225,8 @@ def scope_history_record(rec: dict, scope) -> dict:
     """
     if set(scope) >= set(ASSET_CLASSES):
         return rec
+    if with_benefit:
+        return _without_empty_selection(_scope_with_benefit(rec, scope))
     out = dict(rec)
     for metric in _SCOPED_METRICS:
         out[f"total_{metric}_jpy"] = scoped_history_value(rec, metric, scope)
@@ -179,12 +235,73 @@ def scope_history_record(rec: dict, scope) -> dict:
     out["total_profit_jpy"] = (
         market - book if market is not None and book is not None else None
     )
+    return _without_empty_selection(out)
+
+
+def _without_empty_selection(out: dict) -> dict:
+    """選んだ対象に銘柄が1つも無い日（評価額・簿価とも 0）は全指標を None にする。
+
+    銘柄の無いクラスの列は 0.0 で記録している（寄与ゼロ）ので、和を取ると 0 の線が
+    描かれる。一方、同じ選択の KPI は表示行が 0 件で N/A（compute_rows の
+    all-or-nothing）。0 のまま出すと推移にだけ「評価額 0 円」が描かれて食い違う。
+    評価額と簿価がともに 0 の銘柄は現実には無い（保有していれば簿価か時価が立つ）
+    ので、これを「銘柄が無い」の印に使う。
+    """
+    if out.get("total_market_value_jpy") == 0 and out.get("total_book_value_jpy") == 0:
+        out = dict(out)
+        for metric in _SCOPED_METRICS:
+            out[f"total_{metric}_jpy"] = None
+        out["total_profit_jpy"] = None
     return out
 
 
-def scoped_history_start(records: Iterable[dict], scope) -> str | None:
-    """一部の資産クラスに絞ったとき、線を引ける最初の日（記録が無ければ None）。"""
+def _scope_with_benefit(rec: dict, scope) -> dict:
+    """資産を絞って優待を選んだときの1点（画面の KPI と同じ定義）。
+
+    - 評価額・簿価 = 選んだクラスの列 ＋ 選んでいないクラスの優待銘柄の列
+      （どれか1つでも空＝記録前の日なら、全指標 None で線を切る）
+    - 配当・取崩収入 = 選んだクラスだけ（選んでいない資産の優待銘柄の配当は
+      数えない）。資産を1つも選んでいない（優待のみ）なら 0.0——None にすると
+      combine_income が優待の線まで消す。
+    - 優待 = 全クラスの和
+    """
+    selected = [cls for cls in ASSET_CLASSES if cls in set(scope)]
+    others = [cls for cls in ASSET_CLASSES if cls not in set(scope)]
+
+    def _value(metric: str) -> float | None:
+        keys = [class_history_key(cls, metric) for cls in selected] + [
+            benefit_holder_history_key(cls, metric) for cls in others
+        ]
+        values = [safe_float(rec.get(key)) for key in keys]
+        if any(v is None for v in values):
+            return None
+        return sum(values)
+
+    out = dict(rec)
+    market = _value("market_value")
+    book = _value("book_value")
+    if market is None or book is None:
+        for metric in _SCOPED_METRICS:
+            out[f"total_{metric}_jpy"] = None
+        out["total_profit_jpy"] = None
+        return out
+    out["total_market_value_jpy"] = market
+    out["total_book_value_jpy"] = book
+    for metric in ("dividend", "withdrawal_income", "fixed_withdrawal_income"):
+        out[f"total_{metric}_jpy"] = (
+            scoped_history_value(rec, metric, selected) if selected else 0.0
+        )
+    out["total_benefit_jpy"] = scoped_history_value(rec, "benefit", ASSET_CLASSES)
+    out["total_profit_jpy"] = market - book
+    return out
+
+
+def scoped_history_start(
+    records: Iterable[dict], scope, with_benefit: bool = False
+) -> str | None:
+    """資産を絞ったとき、線を引ける最初の日（記録が無ければ None）。"""
     for rec in records:
-        if scoped_history_value(rec, "market_value", scope) is not None:
+        scoped = scope_history_record(rec, scope, with_benefit)
+        if safe_float(scoped.get("total_market_value_jpy")) is not None:
             return rec.get("date")
     return None

@@ -108,6 +108,27 @@ CLASS_HISTORY_FIELDS = [
     for metric in CLASS_HISTORY_METRICS[cls]
 ]
 
+# 資産クラスごとの「優待のある銘柄」だけの評価額・簿価。ツールバーで資産を絞り
+# 優待を選んだとき、選んでいない資産の優待銘柄も一覧・KPI に入る（配当は数えない）
+# ので、推移の評価額・簿価をその定義で組み直すのに使う（history.scope_history_record）。
+# 合計列の内訳ではない（優待銘柄は上のクラス別の列にも入っている）——Σ を取る
+# 突合へ混ぜないこと。列を後から足したので、それ以前の日は空（線を切る）。
+BENEFIT_HOLDER_METRICS = ("market_value", "book_value")
+
+
+def benefit_holder_history_key(asset_class: str, metric: str) -> str:
+    """資産クラス別・優待銘柄だけの履歴列名（例: jp_stock_benefit_holder_market_value_jpy）。"""
+    return f"{asset_class}_benefit_holder_{metric}_jpy"
+
+
+BENEFIT_HOLDER_HISTORY_FIELDS = [
+    benefit_holder_history_key(cls, metric)
+    for cls in ASSET_CLASSES
+    for metric in BENEFIT_HOLDER_METRICS
+]
+# HistoryRecord.by_class が持つ列（クラス別の内訳＋優待銘柄の評価額・簿価）。
+BY_CLASS_HISTORY_FIELDS = [*CLASS_HISTORY_FIELDS, *BENEFIT_HOLDER_HISTORY_FIELDS]
+
 HISTORY_FIELDS = [
     "record_date",
     "total_market_value_jpy",
@@ -118,6 +139,7 @@ HISTORY_FIELDS = [
     "total_withdrawal_income_jpy",
     "total_fixed_withdrawal_income_jpy",
     *CLASS_HISTORY_FIELDS,
+    *BENEFIT_HOLDER_HISTORY_FIELDS,
     "source",
 ]
 
@@ -284,7 +306,7 @@ class HistoryRecord:
     total_withdrawal_income_jpy: float | None  # 定率取崩
     total_fixed_withdrawal_income_jpy: float | None  # 定額取崩
     source: str | None
-    # 資産クラス別の内訳（キーは CLASS_HISTORY_FIELDS）。表示対象を絞ったときの
+    # 資産クラス別の内訳（キーは BY_CLASS_HISTORY_FIELDS）。表示対象を絞ったときの
     # 推移グラフ用。評価額の列が空＝記録前の日（過去分は合計しか無いので復元しない）。
     # 記録した日の配当・取崩の空欄は「不明」（history.class_breakdown 参照）。
     by_class: dict[str, float | None] = field(default_factory=dict)
@@ -309,7 +331,7 @@ class HistoryRecord:
             # 空欄（記録前）はキーごと持たない＝ by_class.get(key) が None。
             by_class={
                 key: value
-                for key in CLASS_HISTORY_FIELDS
+                for key in BY_CLASS_HISTORY_FIELDS
                 if (value := safe_float(row.get(key))) is not None
             },
         )
@@ -329,7 +351,7 @@ class HistoryRecord:
             ),
             **{
                 key: _csv_num(self.by_class.get(key))
-                for key in CLASS_HISTORY_FIELDS
+                for key in BY_CLASS_HISTORY_FIELDS
             },
             "source": self.source or "",
         }

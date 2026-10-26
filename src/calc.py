@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Iterable
 
 from .models import ASSET_CLASSES, FXRate, Holding, MarketData
@@ -48,10 +48,12 @@ def asset_class(asset_type: str | None, currency: str | None) -> str:
 def normalize_asset_scope(value: object) -> tuple[str, ...] | None:
     """設定値（リスト）を ASSET_CLASSES の順の重複なしタプルへ正規化する。
 
-    未知のクラスを含む・空・リストでない場合は None（呼び出し側が既定へ戻す）。
-    空集合を許すと全画面が空になり、しかも戻し方が分からない。
+    未知のクラスを含む・リストでない場合は None（呼び出し側が既定へ戻す）。
+    空は () を返す——「優待だけ」を選んだ状態として有効。ただし優待も外れて
+    いると全画面が空になり戻し方が分からないので、その組み合わせは呼び出し側
+    （is_valid_selection）で弾く。
     """
-    if not isinstance(value, (list, tuple)) or not value:
+    if not isinstance(value, (list, tuple)):
         return None
     if not all(isinstance(v, str) and v in ASSET_CLASSES for v in value):
         return None
@@ -62,31 +64,60 @@ def is_all_asset_scope(scope: Iterable[str]) -> bool:
     return set(scope) >= set(ASSET_CLASSES)
 
 
-def asset_scope_label(scope: Iterable[str]) -> str:
-    """表示対象の短い名前（例: 「全て」「日本株・投信」）。"""
+def is_valid_selection(scope: Iterable[str], with_benefit: bool) -> bool:
+    """「対象」の4つ（資産3クラス＋優待）のうち1つ以上が選ばれているか。
+
+    全部外すと全画面が空になり、しかも戻し方が分からない。資産を全部外して
+    優待だけを選ぶのは有効（優待のある銘柄だけを見る）。
+    """
+    return bool(set(scope)) or with_benefit
+
+
+def asset_scope_label(scope: Iterable[str], with_benefit: bool = False) -> str:
+    """表示対象の短い名前（例: 「全て」「日本株・投信」「米国株＋優待」「優待のみ」）。
+
+    資産を絞って優待を選んでいるときは「＋優待」を付ける——選んでいない資産の
+    優待銘柄も一覧と集計に入るので、付けないと行や KPI が資産名と合わない。
+    """
     selected = [cls for cls in ASSET_CLASSES if cls in set(scope)]
     if len(selected) == len(ASSET_CLASSES):
         return ASSET_SCOPE_ALL_LABEL
-    return "・".join(ASSET_CLASS_LABELS[cls] for cls in selected)
+    if not selected:
+        return "優待のみ" if with_benefit else ""
+    label = "・".join(ASSET_CLASS_LABELS[cls] for cls in selected)
+    return label + "＋優待" if with_benefit else label
+
+
+def has_benefit(holding: Holding) -> bool:
+    """優待のある銘柄か（優待を選んでいるとき、資産の選択に関係なく対象に入る）。"""
+    return (safe_float(holding.annual_benefit_jpy) or 0.0) > 0
 
 
 def scope_holdings(
     holdings: Iterable[Holding],
     scope: Iterable[str],
     include_inactive: bool = False,
+    with_benefit: bool = False,
 ) -> list[tuple[int, Holding]]:
     """表示対象の (holdings 内のインデックス, Holding) を元の順序で返す。
 
     compute_rows へ渡す保有と、表示行 ↔ 保有の対応（row_holding_indices）を
     **必ずこの1関数から**作ること。インデックスだけ別の条件で組むと、編集・削除
     が別の銘柄に当たる（エラーは出ない）。
+
+    with_benefit=True（ツールバーの「優待」）なら、選んでいない資産の銘柄でも
+    優待があれば含める。その行の配当は数えないので、compute_rows へは
+    dividend_scope=scope を併せて渡すこと（渡さないと、外した資産の配当が混ざる）。
     """
     wanted = set(scope)
     return [
         (i, h)
         for i, h in enumerate(holdings)
         if (h.active or include_inactive)
-        and asset_class(h.asset_type, h.currency) in wanted
+        and (
+            asset_class(h.asset_type, h.currency) in wanted
+            or (with_benefit and has_benefit(h))
+        )
     ]
 
 
@@ -164,6 +195,9 @@ class _Totals:
     known_market: int = 0
     sum_dividend: float = 0.0
     known_dividend: int = 0
+    # 配当を数えない行（選んでいない資産の優待銘柄）の件数。全行がこれなら
+    # 配当は「不明」ではなく 0（銘柄の無いクラスを 0 で記録する履歴と揃える）。
+    excluded_dividend: int = 0
     sum_benefit: float = 0.0
 
     def add(
@@ -172,8 +206,11 @@ class _Totals:
         market_value_jpy: float | None,
         annual_dividend_jpy: float | None,
         benefit_jpy: float,
+        dividend_excluded: bool = False,
     ) -> None:
         self.active_count += 1
+        if dividend_excluded:
+            self.excluded_dividend += 1
         if book_value_jpy is not None:
             self.sum_book += book_value_jpy
             self.known_book += 1
@@ -200,7 +237,11 @@ class _Totals:
 
     @property
     def dividend(self) -> float | None:
-        return self.sum_dividend if self.known_dividend > 0 else None
+        if self.known_dividend > 0:
+            return self.sum_dividend
+        if self.active_count > 0 and self.excluded_dividend == self.active_count:
+            return 0.0
+        return None
 
     @property
     def benefit(self) -> float | None:
@@ -439,8 +480,16 @@ def compute_rows(
     mode: str,
     withdrawal_mode: str | None = None,
     include_inactive: bool = False,
+    dividend_scope: Iterable[str] | None = None,
 ) -> tuple[list[dict[str, float | str | None]], Summary]:
     """保有銘柄ごとの表示用 dict 列と、集計済み Summary を返す。
+
+    dividend_scope（資産クラスの集合）を渡すと、そこに入らない銘柄の配当
+    （取崩モードの取崩収入を含む）を数えない。scope_holdings(with_benefit=True)
+    が加えた「選んでいない資産の優待銘柄」用で、評価額・簿価・損益・優待は数え、
+    利回りは優待だけを分子にする。行には dividend_excluded=True と
+    annual_dividend_jpy=None を載せる（0 にすると表に ¥0 が出て、配当の無い銘柄に
+    見える）。None（既定）なら従来どおり全銘柄の配当を数える。
 
     include_inactive=True のとき active=False の銘柄も rows へ（元の順序のまま）
     含めるが、Summary の集計には一切加算しない（無効銘柄は集計対象外という
@@ -449,6 +498,7 @@ def compute_rows(
     """
     rows: list[dict[str, float | str | None]] = []
     totals = _Totals()
+    dividend_classes = set(dividend_scope) if dividend_scope is not None else None
     sum_profit = 0.0
     known_profit_count = 0
 
@@ -485,6 +535,15 @@ def compute_rows(
                 annual_dividend_jpy = market_value_jpy * holding.withdrawal_rate
             else:
                 annual_dividend_jpy = None
+
+        # 取崩の上書きより後で外す（前で外すと、選んでいない投信の取崩額が漏れる）。
+        dividend_excluded = (
+            dividend_classes is not None
+            and asset_class(holding.asset_type, holding.currency) not in dividend_classes
+        )
+        if dividend_excluded:
+            div_ps = None
+            annual_dividend_jpy = None
 
         benefit_jpy = holding.annual_benefit_jpy
         numerator_jpy = None
@@ -523,6 +582,8 @@ def compute_rows(
                 "last_price": last_price,
                 "annual_div_ps": div_ps,
                 "annual_dividend_jpy": annual_dividend_jpy,
+                # 選んでいない資産の優待銘柄で、配当を数えていない行（表示は「対象外」）。
+                "dividend_excluded": dividend_excluded,
                 "annual_benefit_jpy": benefit_jpy,
                 # 配当（取崩モードでは取崩収入）＋優待。Summary.total_numerator_jpy の
                 # 行版なので、片方の数え方を変えたらもう片方も必ず合わせること
@@ -561,7 +622,10 @@ def compute_rows(
         # 無効銘柄は行として返しても集計には一切加算しない（集計対象外の意味論）。
         if not is_active:
             continue
-        totals.add(book_value_jpy, market_value_jpy, annual_dividend_jpy, benefit_jpy)
+        totals.add(
+            book_value_jpy, market_value_jpy, annual_dividend_jpy, benefit_jpy,
+            dividend_excluded=dividend_excluded,
+        )
         if profit_jpy is not None:
             sum_profit += profit_jpy
             known_profit_count += 1
@@ -616,6 +680,12 @@ class MonthBucket:
     dividend_jpy: float
     benefit_jpy: float
     items: list[MonthlyItem]  # 入力順。並び替えは表示層の責務
+    # 配当（取崩モードでは取崩収入を含む）の資産クラス別内訳。月別グラフの色分け用。
+    # 常に ASSET_CLASSES の全キーを持ち、Σ値 == dividend_jpy になる（分類は
+    # asset_class の1関数だけ——表示側で通貨から判定し直すと USD 建て投信が米国株に化ける）。
+    dividend_by_class: dict[str, float] = field(
+        default_factory=lambda: {cls: 0.0 for cls in ASSET_CLASSES}
+    )
 
     @property
     def total_jpy(self) -> float:
@@ -681,13 +751,18 @@ def monthly_breakdown(rows: Iterable[dict]) -> MonthlyBreakdown:
         account = str(row.get("account") or "")
         estimated = not row.get("dividend_months_manual")
         benefit_detail = str(row.get("benefit_detail") or "")
+        cls = asset_class(row.get("asset_type"), row.get("currency"))
 
         # 月ごとの取り分をここでまとめてから items へ落とす（同じ銘柄が配当と優待で
         # 同じ月に来たとき、行を2つに割らず1行にする）。
         per_month: dict[int, list[float]] = {}
 
         dividend_jpy = safe_float(row.get("annual_dividend_jpy"))
-        if dividend_jpy is None:
+        if row.get("dividend_excluded"):
+            # 選んでいない資産の優待銘柄。配当は数えない（N/A にも月不明にも
+            # 積まない。比率だけで按分すると配当月に ¥0 の内訳行が出る）。
+            pass
+        elif dividend_jpy is None:
             na_symbols.append(symbol)
         else:
             ratios = row.get("dividend_month_ratios")
@@ -716,6 +791,7 @@ def monthly_breakdown(rows: Iterable[dict]) -> MonthlyBreakdown:
             if bucket is None:  # 範囲外の月はパーサが弾くはずだが念のため
                 continue
             bucket.dividend_jpy += div_part
+            bucket.dividend_by_class[cls] += div_part
             bucket.benefit_jpy += ben_part
             bucket.items.append(
                 MonthlyItem(

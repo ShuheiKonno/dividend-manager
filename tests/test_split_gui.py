@@ -50,6 +50,7 @@ class _Stub:
     _holding_label = staticmethod(gui.DividendWindow._holding_label)
     _commit_split_holdings = gui.DividendWindow._commit_split_holdings
     _split_notice = gui.DividendWindow._split_notice
+    _in_scope = gui.DividendWindow._in_scope
 
     def __init__(self, holdings, market_map, selected_index=None, show_inactive=False):
         self.holdings = holdings
@@ -58,6 +59,7 @@ class _Stub:
         self._selected_index = selected_index
         self.show_inactive = show_inactive
         self.asset_scope = gui.DEFAULT_ASSET_SCOPE
+        self.income_benefit = "without"
         self.reloaded = False
         self.notes: list[tuple[str, bool]] = []
 
