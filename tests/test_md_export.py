@@ -249,18 +249,40 @@ def test_asset_scope_appears_in_conditions():
     """出力の数字すべてが変わる設定なので「出力条件」に出す。"""
     conditions = "\n".join(_table_lines(_build([_row()]), "出力条件"))
     assert "| 対象の資産 | 日本株・米国株・投信（全て） |" in conditions
-    conditions = "\n".join(
-        _table_lines(_build([_row()], asset_scope=("jp_stock", "fund")), "出力条件")
-    )
+    conditions = "\n".join(_table_lines(
+        _build([_row()], asset_scope=("jp_stock", "fund"), with_benefit=False), "出力条件"
+    ))
     assert "| 対象の資産 | 日本株・投信 |" in conditions
+    # 優待を選んでいると、選んでいない資産の優待銘柄も加わる旨を書く。
+    conditions = "\n".join(_table_lines(
+        _build([_row()], asset_scope=("jp_stock", "fund"), with_benefit=True), "出力条件"
+    ))
+    assert (
+        "| 対象の資産 | 日本株・投信＋選んでいない資産の優待銘柄（配当は数えない） |"
+        in conditions
+    )
+    conditions = "\n".join(_table_lines(
+        _build([_row()], asset_scope=(), with_benefit=True), "出力条件"
+    ))
+    assert "| 対象の資産 | なし＋選んでいない資産の優待銘柄（配当は数えない） |" in conditions
 
 
 def test_notes_warn_when_scope_is_partial():
-    text = _build([_row()], asset_scope=("jp_stock",))
+    text = _build([_row()], asset_scope=("jp_stock",), with_benefit=False)
     assert "この出力は対象を**日本株**に絞っている" in text
     assert "米国株・投信の銘柄は銘柄一覧にもサマリーの合計・利回りにも含まれない" in text
     assert "ポートフォリオ全体の数字ではない" in text
     assert "絞っている" not in _build([_row()])
+
+
+def test_notes_explain_benefit_holders_outside_the_scope():
+    """優待を選んで資産を絞ると、外した資産の優待銘柄が配当抜きで入ることを書く。"""
+    text = _build([_row()], asset_scope=("jp_stock",), with_benefit=True)
+    assert "この出力は対象を**日本株＋優待**に絞っている" in text
+    assert "米国株・投信の銘柄は、優待のある銘柄だけを含め、その**配当は数えない**" in text
+    assert "ポートフォリオ全体の数字ではない" in text
+    only = _build([_row()], asset_scope=(), with_benefit=True)
+    assert "この出力は対象を**優待のみ**に絞っている" in only
 
 
 def test_fx_fetched_at_appears_in_conditions():

@@ -120,7 +120,7 @@ def test_class_history_metrics_cover_every_class():
         (["fund", "jp_stock"], ("jp_stock", "fund")),  # 順序を正規化
         (["jp_stock", "jp_stock"], ("jp_stock",)),  # 重複を潰す
         (list(ASSET_CLASSES), ASSET_CLASSES),
-        ([], None),  # 空集合は許さない
+        ([], ()),  # 空集合は「優待のみ」として有効（優待も外す組み合わせは gui が弾く）
         (["jp_stock", "bond"], None),
         ("jp_stock", None),  # 文字列はリストではない
         (None, None),

@@ -226,13 +226,28 @@ def _notes(
         )
         # 一覧から抜けた銘柄はサマリーにも入っていない。書かないと、出力された
         # 合計をポートフォリオ全体の数字として読まれる。
-        notes.append(
-            f"- この出力は対象を**{asset_scope_label(asset_scope)}**に絞っている。"
-            f"{excluded}の銘柄は銘柄一覧にもサマリーの合計・利回りにも含まれない"
-            "（ポートフォリオ全体の数字ではない）。"
-            "分類: 投信＝資産種別が投資信託、米国株＝USD 建ての株式・ETF、"
-            "日本株＝それ以外の株式・ETF（国内 ETF を含む）。"
-        )
+        label = asset_scope_label(asset_scope, with_benefit)
+        if with_benefit:
+            # 優待を選んでいると、選んでいない資産の優待銘柄も一覧・合計に入る。
+            # 書かないと「日本株を外したのに日本株の銘柄がある」と読まれる。
+            notes.append(
+                f"- この出力は対象を**{label}**に絞っている。"
+                f"{excluded}の銘柄は、優待のある銘柄だけを含め、その**配当は数えない**"
+                "（銘柄一覧の配当の列は空欄。評価額・簿価・損益・優待は数え、"
+                "利回りは優待だけが分子）。それ以外の"
+                f"{excluded}の銘柄は銘柄一覧にもサマリーにも含まれない"
+                "（ポートフォリオ全体の数字ではない）。"
+                "分類: 投信＝資産種別が投資信託、米国株＝USD 建ての株式・ETF、"
+                "日本株＝それ以外の株式・ETF（国内 ETF を含む）。"
+            )
+        else:
+            notes.append(
+                f"- この出力は対象を**{label}**に絞っている。"
+                f"{excluded}の銘柄は銘柄一覧にもサマリーの合計・利回りにも含まれない"
+                "（ポートフォリオ全体の数字ではない）。"
+                "分類: 投信＝資産種別が投資信託、米国株＝USD 建ての株式・ETF、"
+                "日本株＝それ以外の株式・ETF（国内 ETF を含む）。"
+            )
     if dividend_mode == "net":
         notes.append(
             "- 税引後（net）モードの税率は、銘柄ごとの明示指定がなければ"
@@ -332,8 +347,18 @@ def build_holdings_markdown(
             # 一覧・サマリーとも、この資産クラスに絞った結果。
             [
                 "対象の資産",
-                "・".join(ASSET_CLASS_LABELS[c] for c in ASSET_CLASSES if c in asset_scope)
-                + ("（全て）" if is_all_asset_scope(asset_scope) else ""),
+                (
+                    "・".join(
+                        ASSET_CLASS_LABELS[c] for c in ASSET_CLASSES if c in asset_scope
+                    )
+                    or "なし"
+                )
+                + ("（全て）" if is_all_asset_scope(asset_scope) else "")
+                # 優待を選んでいると、選んでいない資産の優待銘柄も加わる。
+                + (
+                    "＋選んでいない資産の優待銘柄（配当は数えない）"
+                    if with_benefit and not is_all_asset_scope(asset_scope) else ""
+                ),
             ],
             ["利回りの優待", "含む" if with_benefit else "含まない"],
             ["USDJPY", _num(fx_rate, 4)],

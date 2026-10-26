@@ -59,6 +59,8 @@ def _row(**overrides) -> dict:
         symbol="7203",
         name="トヨタ",
         account="特定",
+        asset_type="stock",
+        currency="JPY",
         active=True,
         annual_dividend_jpy=1200.0,
         annual_benefit_jpy=0.0,
@@ -269,6 +271,48 @@ def test_totals_reconcile_with_input():
     assert abs(actual - expected) < 1e-9
     # バケットの合計は「按分できた額」と一致する。
     assert abs(sum(b.total_jpy for b in result.buckets) - result.known_total_jpy) < 1e-9
+
+
+def test_dividend_is_split_by_asset_class():
+    """月別グラフの色分け用に、配当を資産クラス別にも積むこと。
+
+    分類は calc.asset_class と同じ（USD 建ての投信は米国株ではなく投信）。
+    優待はクラス別に入れない（優待は独立した系列で積む）。
+    """
+    rows = [
+        _row(symbol="7203", annual_dividend_jpy=1200.0, dividend_month_ratios={6: 1.0},
+             annual_benefit_jpy=3000.0, benefit_months=[6]),
+        _row(symbol="AAPL", currency="USD", annual_dividend_jpy=400.0,
+             dividend_month_ratios={6: 0.5, 12: 0.5}),
+        _row(symbol="USFUND", asset_type="fund", currency="USD", annual_dividend_jpy=300.0,
+             dividend_month_ratios={6: 1.0}),
+        _row(symbol="JPFUND", asset_type="fund", annual_dividend_jpy=200.0,
+             dividend_month_ratios={12: 1.0}),
+    ]
+    result = monthly_breakdown(rows)
+    june, dec = result.buckets[5], result.buckets[11]
+    assert june.dividend_by_class == {"jp_stock": 1200.0, "us_stock": 200.0, "fund": 300.0}
+    assert dec.dividend_by_class == {"jp_stock": 0.0, "us_stock": 200.0, "fund": 200.0}
+    assert june.benefit_jpy == 3000.0
+
+
+def test_class_breakdown_reconciles_with_dividend_every_month():
+    """全バケットで Σクラス別 == dividend_jpy（棒の高さと内訳見出しを一致させる）。
+
+    月不明・N/A の配当はどのクラスにも載らない。
+    """
+    rows = [
+        _row(symbol="A", annual_dividend_jpy=1000.0, dividend_month_ratios={3: 0.3, 9: 0.7}),
+        _row(symbol="B", currency="USD", annual_dividend_jpy=777.0,
+             dividend_month_ratios={m: 1 / 12 for m in range(1, 13)}),
+        _row(symbol="C", asset_type="fund", annual_dividend_jpy=500.0, dividend_month_ratios=None),
+        _row(symbol="D", asset_type="fund", annual_dividend_jpy=None),
+    ]
+    result = monthly_breakdown(rows)
+    for bucket in result.buckets:
+        assert set(bucket.dividend_by_class) == {"jp_stock", "us_stock", "fund"}
+        assert abs(sum(bucket.dividend_by_class.values()) - bucket.dividend_jpy) < 1e-9
+    assert all(b.dividend_by_class["fund"] == 0.0 for b in result.buckets)
 
 
 def test_estimated_flag_follows_manual_setting():

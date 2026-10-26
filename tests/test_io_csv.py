@@ -444,14 +444,17 @@ def test_settings_load_drops_invalid_values(monkeypatch, tmp_path):
 
 
 def test_settings_asset_scope_roundtrip(monkeypatch, tmp_path):
-    """表示対象の資産が往復し、空・未知・未正規化の値は拒否されること。"""
+    """表示対象の資産が往復し、未知・未正規化の値は拒否されること。
+
+    空は「優待のみ」（資産を全部外して優待だけを選んだ状態）として保存できる。
+    """
     from src import calc
 
     _configure_tmp_dirs(monkeypatch, tmp_path)
-    for scope in (["jp_stock"], ["jp_stock", "fund"], list(calc.ASSET_CLASSES)):
+    for scope in ([], ["jp_stock"], ["jp_stock", "fund"], list(calc.ASSET_CLASSES)):
         io_csv.save_settings(asset_scope=scope)
         assert io_csv.load_settings()["asset_scope"] == scope
-    for bad in ([], ["bond"], ["fund", "jp_stock"], ["fund", "fund"], "fund"):
+    for bad in (["bond"], ["fund", "jp_stock"], ["fund", "fund"], "fund"):
         io_csv.save_settings(asset_scope=bad)  # 拒否されて前の値が残る
         assert io_csv.load_settings()["asset_scope"] == list(calc.ASSET_CLASSES)
 

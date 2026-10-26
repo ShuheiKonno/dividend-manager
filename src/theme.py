@@ -99,7 +99,11 @@ _DARK = {
     "SERIES_VALUE": "#42a5f5",     # 評価額推移
     "SERIES_BOOK": "#9e9e9e",      # 簿価推移
     "SERIES_INCOME": "#66bb6a",    # 配当（収入）推移
-    "SERIES_DIVIDEND": "#1565c0",  # 月別: 配当の棒
+    # 月別の棒は資産クラスで塗り分ける。赤（日本式の含み益）と緑（配当推移の線）を
+    # 避け、青・紫・シアン・橙で色相を離す。
+    "SERIES_JP_STOCK": "#1e88e5",  # 月別: 日本株の配当
+    "SERIES_US_STOCK": "#ab47bc",  # 月別: 米国株の配当
+    "SERIES_FUND": "#26c6da",      # 月別: 投信の分配金（取崩）
     "SERIES_BENEFIT": "#ffa726",   # 月別: 優待の棒（配当推移の緑と取り違えない橙）
     # ---- 表の注意喚起 ----
     "SPLIT_FLAG": "#ffca28",       # 株式分割の未反映フラグ（損益の赤青と取り違えない黄）
@@ -177,7 +181,9 @@ _LIGHT = {
     "SERIES_VALUE": "#1976d2",
     "SERIES_BOOK": "#757575",
     "SERIES_INCOME": "#2e7d32",
-    "SERIES_DIVIDEND": "#1565c0",
+    "SERIES_JP_STOCK": "#1565c0",
+    "SERIES_US_STOCK": "#8e24aa",
+    "SERIES_FUND": "#0097a7",
     "SERIES_BENEFIT": "#ef6c00",
     "SPLIT_FLAG": "#b26a00",
     "SPLIT_DONE": "#2e7d32",
