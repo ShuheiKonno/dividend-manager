@@ -2103,6 +2103,13 @@ class DividendWindow(QMainWindow):
                 ),
             },
         )
+        # 当日の記録が既にあって中身が同じなら書き直さない（起動し直し・再読込のたびに
+        # 履歴全体を書くと、クラウド同期のフォルダではそのつど全体が同期される）。
+        # 既存側は CSV から読み直した値なので、dataclass の == ではなく CSV に書く表現
+        # （to_dict）で比べる。
+        existing = next((r for r in self.history if r.record_date == today), None)
+        if existing is not None and existing.to_dict() == record.to_dict():
+            return None
         history = upsert_record(self.history, record)
         if not self._save_or_notify(lambda: save_history(history)):
             return

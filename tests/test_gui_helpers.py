@@ -127,6 +127,48 @@ def test_history_snapshot_uses_gross_dividend(monkeypatch):
     assert saved[0].total_dividend_jpy == 10_000.0
 
 
+def _fresh_snapshot_stub():
+    market = _snapshot_market()
+    return _window_stub([_holding()], {"7203": market})
+
+
+def test_history_snapshot_skips_save_when_today_is_unchanged(monkeypatch):
+    """当日の記録が既にあり中身が同じなら、履歴を書き直さない（戻り値も None）。"""
+    saved = []
+    monkeypatch.setattr(gui, "save_history", lambda rows: saved.append(list(rows)))
+    stub = _fresh_snapshot_stub()
+    assert gui.DividendWindow._record_history_snapshot(stub) is None
+    assert len(saved) == 1  # 最初の 1 回は記録する
+    # CSV から読み直した状態を再現する（to_dict → from_dict の往復）。
+    from src.models import HistoryRecord
+
+    stub.history = [HistoryRecord.from_dict(r.to_dict()) for r in stub.history]
+    assert gui.DividendWindow._record_history_snapshot(stub) is None
+    assert len(saved) == 1
+
+
+def test_history_snapshot_saves_when_today_changed(monkeypatch):
+    saved = []
+    monkeypatch.setattr(gui, "save_history", lambda rows: saved.append(list(rows)))
+    stub = _fresh_snapshot_stub()
+    stub.history = [_history(gui.today_jst_str(), total_market_value_jpy=123.0)]
+    gui.DividendWindow._record_history_snapshot(stub)
+    assert len(saved) == 1
+    today_rows = [r for r in stub.history if r.record_date == gui.today_jst_str()]
+    assert len(today_rows) == 1
+    assert today_rows[0].total_market_value_jpy != 123.0  # 当日の行が置き換わる
+
+
+def test_history_snapshot_saves_when_today_is_missing(monkeypatch):
+    saved = []
+    monkeypatch.setattr(gui, "save_history", lambda rows: saved.append(list(rows)))
+    stub = _fresh_snapshot_stub()
+    stub.history = [_history("2020-01-01", total_market_value_jpy=1.0)]
+    gui.DividendWindow._record_history_snapshot(stub)
+    assert len(saved) == 1
+    assert [r.record_date for r in stub.history] == ["2020-01-01", gui.today_jst_str()]
+
+
 def test_history_snapshot_skips_missing_market_value(monkeypatch):
     called = False
 
