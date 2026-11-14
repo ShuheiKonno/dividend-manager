@@ -330,31 +330,75 @@ class _Close(list):
         return self
 
 
+class _EmptyClose(list):
+    empty = True
+
+    def dropna(self):
+        return self
+
+
 class _Ticker:
-    def __init__(self, day, failed):
+    """history() だけを持つ偽の Ticker（dividends / splits を読んだら失敗させる）。
+
+    failed: "price"=通信の例外 / "no_close"=終値が空 / "dividend"=Dividends 列なし /
+    "splits"=Stock Splits 列なし。events の値は pandas の列と同じく、イベントの無い
+    営業日にも 0.0 の行が入る形で渡す。
+    """
+
+    def __init__(self, day, failed, dividends=None, splits=None, close_day=None):
         self.day = day
         self.failed = failed
+        self.close_day = close_day or day
+        self._dividends = [(day, 12.0)] if dividends is None else dividends
+        self._splits = [] if splits is None else splits
+        self.history_calls = 0
 
     def history(self, **kwargs):
-        assert kwargs == {"period": "10d", "auto_adjust": False}
+        from datetime import date as _date
+
+        assert kwargs == {"period": md._HISTORY_PERIOD, "auto_adjust": False}
+        self.history_calls += 1
         if self.failed == "price":
             raise OSError("株価エラー")
-        return {"Close": _Close(self.day)}
+        frame = {
+            "Close": (
+                _EmptyClose() if self.failed == "no_close" else _Close(self.close_day)
+            )
+        }
+        # 営業日の 0.0 行を混ぜる（イベント行の前後）。
+        zero = _FakeStamp(_date.today())
+        if self.failed != "dividend":
+            frame["Dividends"] = _FakeSeries(
+                [(zero, 0.0)]
+                + [(_FakeStamp(d), v) for d, v in self._dividends]
+                + [(zero, 0.0)]
+            )
+        if self.failed != "splits":
+            frame["Stock Splits"] = _FakeSeries(
+                [(zero, 0.0)] + [(_FakeStamp(d), v) for d, v in self._splits]
+            )
+        return frame
 
     @property
     def dividends(self):
-        if self.failed == "dividend":
-            raise OSError("配当エラー")
-        return _series([(_ymd(self.day), 12.0)])
+        raise AssertionError("ticker.dividends は読まない（通信が倍になる）")
 
     @property
     def splits(self):
-        if self.failed == "splits":
-            raise OSError("分割エラー")
-        return _series([])
+        raise AssertionError("ticker.splits は読まない（通信が倍になる）")
 
 
-@pytest.mark.parametrize("failed", ["price", "dividend", "splits", None])
+def _cached_row(cached_splits, old_stamp):
+    return MarketData(
+        symbol="AAA", currency="JPY", last_price=100.0, price_as_of="2025-01-01",
+        annual_div_ps_gross=5.0, annual_div_ps_net=4.0,
+        div_forecast_as_of="2025-01-01", source="yfinance", fetched_at=old_stamp,
+        div_ex_month_ratios={1: 1.0}, recent_splits=cached_splits,
+        price_fetched_at=old_stamp,
+    )
+
+
+@pytest.mark.parametrize("failed", ["price", "no_close", "dividend", "splits", None])
 @pytest.mark.parametrize("cached_splits", [None, [], [("2026-09-29", 2.0)]])
 def test_partial_fetch_merges_each_item(monkeypatch, failed, cached_splits):
     """取得失敗と取得成功で空を区別し、成功項目だけをキャッシュへ反映する。"""
@@ -370,17 +414,15 @@ def test_partial_fetch_merges_each_item(monkeypatch, failed, cached_splits):
     old_stamp = "2025-01-01T09:00:00+09:00"
     existing = {}
     if cached_splits is not None:
-        existing["AAA"] = MarketData(
-            symbol="AAA", currency="JPY", last_price=100.0, price_as_of="2025-01-01",
-            annual_div_ps_gross=5.0, annual_div_ps_net=4.0,
-            div_forecast_as_of="2025-01-01", source="yfinance", fetched_at=old_stamp,
-            div_ex_month_ratios={1: 1.0}, recent_splits=cached_splits,
-            price_fetched_at=old_stamp,
-        )
+        existing["AAA"] = _cached_row(cached_splits, old_stamp)
     result = md.fetch_market_data([_holding("AAA", name="銘柄")], existing, force=True)
     row = result.rows[0]
     cached = existing.get("AAA")
-    if failed == "price":
+    # 通信の例外は 3 項目とも失敗。終値が空なら株価だけ失敗（配当・分割は列があれば成功）。
+    price_failed = failed in ("price", "no_close")
+    dividend_failed = failed in ("price", "dividend")
+    splits_failed = failed in ("price", "splits")
+    if price_failed:
         assert row.last_price == (100.0 if cached else None)
         assert row.price_as_of == ("2025-01-01" if cached else None)
         assert row.price_fetched_at == (old_stamp if cached else None)
@@ -388,7 +430,7 @@ def test_partial_fetch_merges_each_item(monkeypatch, failed, cached_splits):
         assert row.last_price == 250.0
         assert row.price_as_of == day.isoformat()
         assert row.price_fetched_at == stamp
-    if failed == "dividend":
+    if dividend_failed:
         assert row.annual_div_ps_gross == (5.0 if cached else None)
         assert row.annual_div_ps_net == (4.0 if cached else None)
         assert row.div_forecast_as_of == ("2025-01-01" if cached else None)
@@ -398,15 +440,102 @@ def test_partial_fetch_merges_each_item(monkeypatch, failed, cached_splits):
         assert row.annual_div_ps_net is None
         assert row.div_forecast_as_of == day.isoformat()
         assert row.div_ex_month_ratios == {day.month: 1.0}
-    assert row.recent_splits == (cached_splits if failed == "splits" and cached else [])
+    assert row.recent_splits == (cached_splits if splits_failed and cached else [])
     assert row.fetched_at == (None if failed else stamp)
+    # 通信の例外は同じ原因なので 1 件だけ。それ以外は失敗した項目ごとに 1 件。
     assert len(result.errors) == (1 if failed else 0)
+    assert ticker.history_calls == 1  # 1 銘柄 1 リクエスト
     if failed:
         # 部分失敗を当日取得済みとしてスキップしない。
         retried = md.fetch_market_data(
             [_holding("AAA", name="銘柄")], {"AAA": row}, force=False,
         )
         assert len(retried.errors) == 1
+
+
+def _fetch_with(monkeypatch, ticker, existing=None):
+    from types import SimpleNamespace
+
+    monkeypatch.setattr(md, "_yf", lambda: SimpleNamespace(Ticker=lambda _: ticker))
+    return md.fetch_market_data(
+        [_holding("AAA", name="銘柄")], existing or {}, force=True
+    )
+
+
+def test_zero_rows_in_dividends_do_not_move_the_anchor(monkeypatch):
+    """Dividends 列の 0.0 行（イベントの無い営業日）を落としてから集計する。
+
+    落とさないと最新の権利落ち日が「最新の営業日」になり、div_forecast_as_of が
+    今日付近になる（エラーは出ない）。ゼロ行を除いた入力と同じ結果になること。
+    """
+    from datetime import date, timedelta
+
+    ex = date.today() - timedelta(days=40)
+    ticker = _Ticker(date.today() - timedelta(days=1), None, dividends=[(ex, 12.0)])
+    row = _fetch_with(monkeypatch, ticker).rows[0]
+    expected = md._parse_yfinance_dividends(_series([(_ymd(ex), 12.0)]))
+    assert (
+        row.annual_div_ps_gross, row.div_forecast_as_of, row.div_ex_month_ratios
+    ) == expected
+    assert row.div_forecast_as_of == ex.isoformat()
+
+
+def test_all_zero_dividends_column_clears_cached_dividends(monkeypatch):
+    """列があって全部 0 は「配当なし」＝成功で空（古い配当を消す）。"""
+    from datetime import date, timedelta
+
+    ticker = _Ticker(date.today() - timedelta(days=1), None, dividends=[])
+    existing = {"AAA": _cached_row([], "2025-01-01T09:00:00+09:00")}
+    result = _fetch_with(monkeypatch, ticker, existing)
+    row = result.rows[0]
+    assert row.annual_div_ps_gross is None
+    assert row.div_forecast_as_of is None
+    assert row.div_ex_month_ratios is None
+    assert result.errors == []
+
+
+def test_missing_dividends_column_keeps_cache_and_reports(monkeypatch):
+    """列が無い（存在しない銘柄など）は失敗＝キャッシュを保持してエラーを 1 件積む。"""
+    from datetime import date, timedelta
+
+    ticker = _Ticker(date.today() - timedelta(days=1), "dividend")
+    existing = {"AAA": _cached_row([], "2025-01-01T09:00:00+09:00")}
+    result = _fetch_with(monkeypatch, ticker, existing)
+    assert result.rows[0].annual_div_ps_gross == 5.0
+    assert len(result.errors) == 1 and "配当取得失敗" in result.errors[0]
+
+
+@pytest.mark.parametrize("age, ok", [(14, True), (15, False)])
+def test_stale_close_is_not_a_successful_price_fetch(monkeypatch, age, ok):
+    """5 年ぶん取るので、売買停止銘柄の古い終値を当日取得として記録しない。"""
+    from datetime import date, timedelta
+
+    close_day = date.today() - timedelta(days=age)
+    ticker = _Ticker(date.today(), None, close_day=close_day)
+    existing = {"AAA": _cached_row([], "2025-01-01T09:00:00+09:00")}
+    result = _fetch_with(monkeypatch, ticker, existing)
+    row = result.rows[0]
+    if ok:
+        assert row.last_price == 250.0 and not result.errors
+    else:
+        assert row.last_price == 100.0  # キャッシュ保持
+        assert row.price_fetched_at == "2025-01-01T09:00:00+09:00"
+        assert result.errors == ["株価取得失敗: AAA (終値データなし)"]
+
+
+def test_dividend_after_last_close_does_not_shift_the_window(monkeypatch):
+    """最後の終値より後ろの行にある先日付の権利落ちは、今日以前の配当があれば集計に入らない。"""
+    from datetime import date, timedelta
+
+    past = date.today() - timedelta(days=60)
+    future = date.today() + timedelta(days=20)
+    ticker = _Ticker(
+        date.today(), None, dividends=[(past, 10.0), (future, 99.0)],
+        close_day=date.today() - timedelta(days=1),
+    )
+    row = _fetch_with(monkeypatch, ticker).rows[0]
+    assert row.annual_div_ps_gross == pytest.approx(10.0)
+    assert row.div_forecast_as_of == past.isoformat()
 
 
 def test_unexpected_fetch_failure_preserves_all_cached_items(monkeypatch):
