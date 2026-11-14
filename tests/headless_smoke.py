@@ -384,6 +384,42 @@ def _check_theme_toggle(w) -> None:
             w.action_set_theme(original)  # 設定（theme）を元へ戻す
 
 
+def _check_checkbox_mark(w) -> None:
+    """チェック済みのチェックボックスにチェックマークが描かれ、未チェックには無いこと。
+
+    ACCENT 塗りだけだと青い四角が並び、グラフの凡例の色見本と見分けられなかった。
+    インジケータの範囲（左端から 18px）に明るい画素（白いマーク）があるかで見る。
+    ライトテーマは未チェックの枠の中が明るいので、ダークテーマで判定して元へ戻す。
+    """
+    from PySide6.QtGui import QColor
+
+    original_theme = w.theme_name
+    box = w._asset_scope_checks["jp_stock"]
+    original_checked = box.isChecked()
+
+    def bright_pixels() -> int:
+        image = box.grab().toImage()
+        return sum(
+            1
+            for y in range(image.height())
+            for x in range(min(18, image.width()))
+            if QColor(image.pixel(x, y)).lightness() > 200
+        )
+
+    try:
+        w.action_set_theme("dark")
+        box.setChecked(True)
+        checked = bright_pixels()
+        box.setChecked(False)
+        unchecked = bright_pixels()
+        assert checked > 0, "チェック済みなのにチェックマークが描かれていない"
+        assert unchecked == 0, f"未チェックに明るい画素がある: {unchecked}"
+    finally:
+        box.setChecked(original_checked)
+        if w.theme_name != original_theme:
+            w.action_set_theme(original_theme)
+
+
 def _check_fund_share_unit(w) -> None:
     """投信の口数単位が表示・入力だけを変え、保存値を動かさないことを検証する。
 
@@ -1489,6 +1525,7 @@ def _run_window_checks(w) -> None:
     _check_withdrawal_trend_note(w)
     _check_net_trend_note(w)
     _check_theme_toggle(w)
+    _check_checkbox_mark(w)
     _check_fund_share_unit(w)
     _check_yield_definitions(w)
     _check_asset_scope(w)

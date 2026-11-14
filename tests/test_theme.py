@@ -119,3 +119,28 @@ def test_disabled_checkbox_is_greyed_out(name):
     assert theme.TEXT_DISABLED in rule.group(1)
     assert theme.ACCENT not in rule.group(1)
     assert re.search(r"QCheckBox:disabled\s*\{[^}]*" + re.escape(theme.TEXT_DISABLED), qss)
+
+
+@pytest.mark.parametrize("name", list(theme.THEMES))
+def test_checked_checkbox_uses_check_image_when_asset_exists(name):
+    """チェック済み（有効・無効とも）にチェックマーク画像を当てる。ファイルがある場合だけ。"""
+    assert theme.CHECK_ICON_PATH.is_file(), "assets/check.png が無い（tools/make_check_icon.py）"
+    theme.set_theme(name)
+    qss = build_app_qss()
+    url = f'image: url("{theme.CHECK_ICON_PATH.as_posix()}");'
+    for selector in ("QCheckBox::indicator:checked {", "QCheckBox::indicator:checked:disabled {"):
+        block = qss[qss.index(selector):]
+        block = block[: block.index("}")]
+        assert url in block, selector
+    # チェックマークはこの 1 枚だけ（矢印などへ画像を広げない）。
+    assert qss.count("image:") == 2
+
+
+@pytest.mark.parametrize("name", list(theme.THEMES))
+def test_qss_falls_back_to_fill_only_without_check_image(monkeypatch, tmp_path, name):
+    """画像が無くても例外にせず、ACCENT 塗りだけの従来の QSS へ落ちる。"""
+    monkeypatch.setattr(theme, "CHECK_ICON_PATH", tmp_path / "missing.png")
+    theme.set_theme(name)
+    qss = build_app_qss()
+    assert "image:" not in qss
+    assert "QCheckBox::indicator:checked {" in qss
