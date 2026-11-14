@@ -374,3 +374,16 @@ def date_axis_ticks(
         ticks.append((x_j, date.fromordinal(ord_j).isoformat()))
     return ticks
 
+
+def clamp_label_left(
+    center_x: float, label_width: float, min_left: float, max_right: float
+) -> float:
+    """目盛ラベルの矩形の左端を返す（中心 center_x に置き、範囲 [min_left, max_right] へ収める）。
+
+    右端の目盛はプロット右端ちょうどにあり、右余白が狭いと中心揃えのラベルが
+    はみ出して日付が途中で切れる。範囲を超えるぶんだけ内側へ寄せる。
+    ラベルが範囲より広いときは左端（min_left）を優先する。
+    """
+    left = center_x - label_width / 2.0
+    left = min(left, max_right - label_width)
+    return max(left, min_left)

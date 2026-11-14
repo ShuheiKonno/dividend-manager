@@ -37,6 +37,7 @@ from .utils import (
     date_x_positions,
     nearest_x_index,
     date_axis_ticks,
+    clamp_label_left,
 )
 
 # チャートの最小サイズ。ウィンドウの最小高さ（900x600）に収まる値にしてある
@@ -905,9 +906,22 @@ class LineChartWidget(QWidget):
         xs = self._x_positions(plot)
         dates = [str(rec.get("date", "")) for rec in self._visible]
         painter.setPen(QPen(QColor(theme.CHART_AXIS_TEXT)))
-        for x, date_label in date_axis_ticks(dates, plot.left(), plot.width()):
+        # 右端の目盛は右余白（16px）に収まらず、中心揃えだと日付が途中で切れるので
+        # ウィジェット内へ寄せる。寄せたぶん手前の目盛と接するので、後ろ（右）から
+        # 描いて、重なる手前の目盛は省く（目盛は日数で等分した参考値で、省いても
+        # 線の読み取りは変わらない）。
+        label_fm = painter.fontMetrics()
+        drawn_left = float("inf")
+        for x, date_label in reversed(
+            date_axis_ticks(dates, plot.left(), plot.width())
+        ):
+            tick_w = float(label_fm.horizontalAdvance(date_label) + 8)
+            left = clamp_label_left(x, tick_w, 0.0, float(rect.width()))
+            if left + tick_w + 4.0 > drawn_left:
+                continue
+            drawn_left = left
             painter.drawText(
-                QRectF(x - 44, plot.bottom() + 4, 88, 16),
+                QRectF(left, plot.bottom() + 4, tick_w, 16),
                 Qt.AlignmentFlag.AlignCenter,
                 date_label,
             )
@@ -948,24 +962,33 @@ class LineChartWidget(QWidget):
                 painter.setPen(QPen(QColor(theme.CHART_BG), 1))
                 painter.drawEllipse(QRectF(hx - 3.5, hy - 3.5, 7, 7))
 
-        # 凡例（右上）
-        legend_x = plot.right() - 8
-        legend_y = plot.top() + 4
+        # 凡例。プロット領域の中（右上）に置くと、最新値が右上へ来る推移の線と重なる。
+        # 月別グラフと同じく上余白の 1 行に、系列の順で左→右に並べて右寄せにする
+        # （先に総幅を測って左端を決める）。狭くて入りきらないときは左端を 0 に寄せる。
         painter.setFont(small_font)
-        for label, _key, color in self._series:
-            text_w = painter.fontMetrics().horizontalAdvance(label)
-            sw = 16  # 色見本の幅
-            row_w = sw + 4 + text_w
-            lx = legend_x - row_w
+        sw = 16  # 色見本の幅
+        gap = 12  # 系列間の間隔
+        legend_fm = painter.fontMetrics()
+        widths = [
+            sw + 4 + legend_fm.horizontalAdvance(label)
+            for label, _key, _color in self._series
+        ]
+        legend_x = max(
+            0.0, plot.right() - 8 - sum(widths) - gap * (len(widths) - 1)
+        )
+        legend_y = 6
+        for (label, _key, color), row_w in zip(self._series, widths):
             painter.setPen(QPen(color, 2))
-            painter.drawLine(int(lx), int(legend_y + 7), int(lx + sw), int(legend_y + 7))
+            painter.drawLine(
+                int(legend_x), int(legend_y + 8), int(legend_x + sw), int(legend_y + 8)
+            )
             painter.setPen(QPen(QColor(theme.CHART_LABEL_TEXT)))
             painter.drawText(
-                QRectF(lx + sw + 4, legend_y, text_w + 4, 14),
+                QRectF(legend_x + sw + 4, legend_y, row_w - sw, 16),
                 Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter,
                 label,
             )
-            legend_y += 16
+            legend_x += row_w + gap
 
         painter.end()
 

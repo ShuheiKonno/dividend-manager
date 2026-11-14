@@ -13,6 +13,7 @@ from src.utils import (
     date_x_positions,
     nearest_x_index,
     date_axis_ticks,
+    clamp_label_left,
 )
 
 
@@ -205,3 +206,25 @@ def test_date_axis_ticks_proportional_to_calendar_days():
     two_days = date_axis_ticks(["2026-01-01", "2026-01-02"], 0.0, 400.0, max_ticks=5)
     assert two_days == [(0.0, "2026-01-01"), (400.0, "2026-01-02")]
 
+
+# ---- clamp_label_left（X 軸ラベルをウィジェット内へ収める） ----
+
+
+def test_clamp_label_left_keeps_center_ticks_centered():
+    # 中央の目盛は中心揃えのまま（幅 88 → 左端は中心 − 44）。
+    assert clamp_label_left(300.0, 88.0, 0.0, 600.0) == 256.0
+
+
+def test_clamp_label_left_pulls_right_edge_tick_inside():
+    # プロット右端（右余白 16px → x=584）のラベルは右へはみ出すので内側へ寄せる。
+    left = clamp_label_left(584.0, 88.0, 0.0, 600.0)
+    assert left == 600.0 - 88.0
+    assert left + 88.0 <= 600.0
+
+
+def test_clamp_label_left_pulls_left_edge_tick_inside():
+    assert clamp_label_left(10.0, 88.0, 0.0, 600.0) == 0.0
+
+
+def test_clamp_label_left_prefers_left_when_label_wider_than_range():
+    assert clamp_label_left(50.0, 88.0, 0.0, 60.0) == 0.0
