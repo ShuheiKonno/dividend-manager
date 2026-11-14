@@ -17,3 +17,7 @@ venv/
 .omc/
 build/
 dist/
+
+# AI エージェント向けの作業メモ（手元専用。公開しない）
+CLAUDE.md
+AGENTS.md

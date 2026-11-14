@@ -137,3 +137,14 @@ NISA（成長）/ NISA（積立）/ 旧NISA**）。表記ゆれで同じ口座�
 ```powershell
 .venv\Scripts\python.exe -m pip install -r requirements-legacy.txt
 ```
+
+## ライセンスと注意事項
+
+- 本リポジトリのソースコードは [MIT License](LICENSE) です。
+- GUI は PySide6（Qt）を使用しています。PySide6 は LGPL-3.0 / GPL-2.0 / GPL-3.0 のいずれかで提供されます。
+  PyInstaller で作成した配布物（onedir）には Qt のライブラリが入っており、LGPL の条件に従って利用しています。
+  その他の依存ライブラリ（yfinance・pandas・requests・ToushinReader など）のライセンスは各パッケージを参照してください。
+- 株価・配当・為替は [yfinance](https://github.com/ranaroussi/yfinance) 経由で Yahoo! Finance から取得します。
+  yfinance は Yahoo の公式 API ではなく、取得したデータの利用条件は Yahoo 側の規約に従います。**個人利用を前提としたツールです。**
+- 表示される金額・税額・利回りは目安であり、投資判断や税務申告の根拠にはなりません。
+  税率の自動判定は簡略化したもので、実際の課税とは異なる場合があります。
