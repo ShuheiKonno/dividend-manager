@@ -1,14 +1,20 @@
-"""widgets.py の描画に使う純関数の検証（円グラフのラベル・ツールチップ・ヒートマップのタイル文字）。
+"""widgets.py の描画に使う純関数の検証（ラベル・タイル文字・損益の色段階）。
 
 描画そのもの（QPainter）はテストしない。文字列の組み立てと色の境界だけを固定する。
 """
 
 from __future__ import annotations
 
+import pytest
+
+from src import theme
 from src.widgets import (
+    TILE_RATE_MID,
+    TILE_RATE_STRONG,
     _duplicate_symbols,
     _label_text,
     _tooltip_head,
+    profit_tile_colors,
     tile_lines,
 )
 
@@ -77,3 +83,38 @@ def test_tile_lines_fund_without_account_has_no_sub():
 def test_tile_lines_fund_without_name_falls_back_to_code():
     tile = _tile("JP90C000J569", "", "特定", asset_type="fund")
     assert tile_lines(tile) == ("JP90C000J569", "特定")
+
+
+# ---- 損益の色段階（T7） ----
+
+
+def test_tile_rate_boundaries_are_ten_and_fifty_percent():
+    assert (TILE_RATE_MID, TILE_RATE_STRONG) == (0.10, 0.50)
+
+
+@pytest.mark.parametrize("sign, strong, mid", [
+    (1, "TILE_UP_STRONG", "TILE_UP_MID"),
+    (-1, "TILE_DOWN_STRONG", "TILE_DOWN_MID"),
+])
+def test_profit_tile_colors_three_steps_at_ten_and_fifty_percent(sign, strong, mid):
+    def bg(rate):
+        return profit_tile_colors(sign * rate)[0].name()
+
+    from PySide6.QtGui import QColor
+
+    def token(name):
+        return QColor(getattr(theme, name)).name()
+
+    assert bg(0.0999) == token("TILE_WEAK_BG")
+    assert bg(0.10) == token(mid)
+    assert bg(0.4999) == token(mid)
+    assert bg(0.50) == token(strong)
+    assert bg(3.0) == token(strong)
+
+
+def test_profit_tile_colors_zero_and_unknown_are_neutral():
+    from PySide6.QtGui import QColor
+
+    neutral = QColor(theme.TILE_NEUTRAL_BG).name()
+    assert profit_tile_colors(0)[0].name() == neutral
+    assert profit_tile_colors(None)[0].name() == neutral

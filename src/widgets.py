@@ -211,6 +211,13 @@ def _readable_text_color(bg: QColor) -> QColor:
     return QColor(theme.ON_FILL_DARK if luminance > 0.62 else theme.ON_FILL_LIGHT)
 
 
+# ヒートマップの濃淡の境界（取得時からの損益率の絶対値）。
+# 1日の値動き向けの 2% / 5% だと、長期保有（損益率が数十〜数百 %）ではほぼ全タイルが
+# 最濃色になり、色が情報を持たない。
+TILE_RATE_MID = 0.10     # これ以上で中間色
+TILE_RATE_STRONG = 0.50  # これ以上で最濃色
+
+
 def profit_tile_colors(profit_rate: float | None) -> tuple[QColor, QColor]:
     """損益率に応じたタイルの (背景色, 文字色) を3段階で返す（日本式: +赤 / -青）。
 
@@ -222,14 +229,14 @@ def profit_tile_colors(profit_rate: float | None) -> tuple[QColor, QColor]:
         return _with_readable_text(theme.TILE_NEUTRAL_BG)
     magnitude = abs(rate)
     if rate > 0:
-        if magnitude >= 0.05:
+        if magnitude >= TILE_RATE_STRONG:
             return _with_readable_text(theme.TILE_UP_STRONG)
-        if magnitude >= 0.02:
+        if magnitude >= TILE_RATE_MID:
             return _with_readable_text(theme.TILE_UP_MID)
         return QColor(theme.TILE_WEAK_BG), QColor(theme.PROFIT_UP)
-    if magnitude >= 0.05:
+    if magnitude >= TILE_RATE_STRONG:
         return _with_readable_text(theme.TILE_DOWN_STRONG)
-    if magnitude >= 0.02:
+    if magnitude >= TILE_RATE_MID:
         return _with_readable_text(theme.TILE_DOWN_MID)
     return QColor(theme.TILE_WEAK_BG), QColor(theme.PROFIT_DOWN)
 

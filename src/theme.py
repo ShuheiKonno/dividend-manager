@@ -87,11 +87,11 @@ _DARK = {
     "TILE_BORDER": "#7f7f7f",      # タイル枠線
     "TILE_HOVER_OUTLINE": "#f5f5f5",  # ホバー中タイルの上描き枠
     "TILE_NEUTRAL_BG": "#3a3a3a",  # 損益 0 / 不明
-    "TILE_WEAK_BG": "#262626",     # |損益率| < 2%（文字色で赤青を示す）
-    "TILE_UP_STRONG": "#c62828",   # 損益率 >= +5%
-    "TILE_UP_MID": "#8e2424",      # +2% 〜 +5%
-    "TILE_DOWN_STRONG": "#1565c0",  # 損益率 <= -5%
-    "TILE_DOWN_MID": "#1a3a6b",    # -5% 〜 -2%
+    "TILE_WEAK_BG": "#262626",     # |損益率| < 10%（文字色で赤青を示す）
+    "TILE_UP_STRONG": "#c62828",   # 損益率 >= +50%
+    "TILE_UP_MID": "#8e2424",      # +10% 〜 +50%
+    "TILE_DOWN_STRONG": "#1565c0",  # 損益率 <= -50%
+    "TILE_DOWN_MID": "#1a3a6b",    # -50% 〜 -10%
     "ON_FILL_LIGHT": "#f5f5f5",    # 濃い塗りの上の文字
     "ON_FILL_DARK": "#1c1c1c",     # 淡い塗りの上の文字
     "CATEGORICAL_OTHER": "#757575",  # 円グラフ「その他」のスライス
