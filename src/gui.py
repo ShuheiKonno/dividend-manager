@@ -7,11 +7,14 @@
 from __future__ import annotations
 
 import sys
+import threading
 from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Iterable, Optional
 
-from PySide6.QtCore import Qt, QObject, QThread, Signal, QSortFilterProxyModel, QRect, QUrl
+from PySide6.QtCore import (
+    Qt, QObject, QThread, QTimer, Signal, QSortFilterProxyModel, QRect, QUrl,
+)
 from PySide6.QtGui import (
     QAction,
     QActionGroup,
@@ -3376,8 +3379,41 @@ def _ensure_app() -> QApplication:
     return app
 
 
+# ウィンドウ表示から先読みを始めるまでの待ち（ms）。起動直後の最初の描画と操作に
+# 重ならないようにする。
+PREWARM_DELAY_MS = 3000
+
+
+def _prewarm_market_data() -> threading.Thread:
+    """yfinance を裏で読み込んでおく（初回 F5 の待ち時間から import ぶんを除く）。
+
+    yfinance は初回の F5 で初めて import される（単独で約 1 秒、冷えた状態では数秒）。
+    ウィンドウを出した後に、デーモンスレッドで読み込んでおく。失敗しても何もしない——
+    F5 のときに同じ import が走り、そこで通常どおりエラーになる。
+
+    **main() だけから呼ぶ**。build_window() / DividendWindow.__init__ へ入れると、
+    テストやスモークのたびに yfinance を読み込み、起動パスに重い import を載せない方針も
+    破る。QThread は使わない（_busy / closeEvent の管理対象を増やさない）。デーモン
+    スレッドなので、読み込み中にアプリを閉じてもプロセスは終了する。先読みと F5 が
+    同時に走っても import ロックが二重読み込みを防ぐので、排他は持たない。
+    """
+
+    def _load() -> None:
+        try:
+            from .market_data import _yf
+
+            _yf()
+        except Exception:  # noqa: BLE001 — 先読みの失敗は表に出さない
+            pass
+
+    thread = threading.Thread(target=_load, name="prewarm-yfinance", daemon=True)
+    thread.start()
+    return thread
+
+
 def main() -> None:
     app = _ensure_app()
     win = build_window()
     win.show()
+    QTimer.singleShot(PREWARM_DELAY_MS, _prewarm_market_data)
     sys.exit(app.exec())

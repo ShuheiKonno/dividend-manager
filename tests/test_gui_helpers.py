@@ -1090,3 +1090,34 @@ def test_monthly_benefit_detail_column_never_shrinks_user_widened_width():
     gui.DividendWindow._render_monthly_breakdown(stub)
     assert stub._monthly_view.columnWidth(col) == 360
 
+
+def test_prewarm_market_data_loads_yfinance_once_in_background(monkeypatch):
+    import src.market_data as market_data
+
+    calls = []
+    monkeypatch.setattr(market_data, "_yf", lambda: calls.append(1))
+    thread = gui._prewarm_market_data()
+    thread.join(timeout=5)
+    assert calls == [1]
+    assert thread.daemon and not thread.is_alive()
+
+
+def test_prewarm_market_data_swallows_import_failure(monkeypatch):
+    import src.market_data as market_data
+
+    def broken():
+        raise ImportError("yfinance が入っていない")
+
+    monkeypatch.setattr(market_data, "_yf", broken)
+    thread = gui._prewarm_market_data()
+    thread.join(timeout=5)  # 例外が外へ出ない（スレッドが正常に終わる）
+    assert not thread.is_alive()
+
+
+def test_build_window_does_not_prewarm(monkeypatch):
+    """先読みは main() だけ。build_window() が呼ぶと検証のたびに yfinance を読み込む。"""
+    import inspect
+
+    assert "_prewarm_market_data" not in inspect.getsource(gui.build_window)
+    assert "_prewarm_market_data" not in inspect.getsource(gui.DividendWindow.__init__)
+    assert "_prewarm_market_data" in inspect.getsource(gui.main)

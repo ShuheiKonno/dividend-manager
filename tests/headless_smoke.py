@@ -1424,6 +1424,7 @@ def _run_checks(data: Path) -> None:
     from src.calc import ASSET_CLASSES
 
     w = build_window()
+    _check_no_heavy_imports()  # 先読みは main() だけ。ここで読まれていたら起動パスが重い
     # 既定フォルダへのフォールバック（DividendWindow.__init__）でサンドボックスの
     # 外へ出ていないこと。
     assert gui.io_csv.DATA_DIR == data, f"データフォルダが外れた: {gui.io_csv.DATA_DIR}"
@@ -1447,6 +1448,16 @@ def _run_checks(data: Path) -> None:
         original_scope
     ), "スモークの後で表示対象の設定が元に戻っていない"
     _run_dialog_checks()
+
+
+def _check_no_heavy_imports() -> None:
+    """起動（build_window）の経路で yfinance / pandas を読み込んでいないこと。
+
+    初回 F5 の待ちを減らす先読みは main() だけが行う（gui._prewarm_market_data）。
+    build_window() の経路へ入れると、起動が数秒遅くなり、検証のたびに読み込む。
+    """
+    for name in ("yfinance", "pandas"):
+        assert name not in sys.modules, f"起動の経路で {name} が読み込まれている"
 
 
 def _run_window_checks(w) -> None:
