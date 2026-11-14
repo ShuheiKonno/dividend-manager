@@ -444,7 +444,7 @@ def _check_fund_share_unit(w) -> None:
         assert w._actions["fund_unit_per1"].isChecked()
         assert not w._actions["fund_unit_per10k"].isChecked()
         # 表示（セル・ヘッダ・並び替えの生値）が 1口単位になること
-        assert gui._format_cell(row, "shares", "per1")[0] == "2,067,284.00"
+        assert gui._format_cell(row, "shares", "per1")[0] == "2,067,284"
         assert gui.cell_sort_value(row, "shares", "per1") == 2_067_284.0
         label = FUND_SHARE_UNIT_COLUMN_LABELS["per1"]
         assert (label, "shares") in w._with_shares_label(gui.PRICE_COLUMNS)
@@ -454,7 +454,7 @@ def _check_fund_share_unit(w) -> None:
         assert header == label, f"株数列のヘッダが単位に追随しない: {header!r}"
         # 株式は単位設定の影響を受けない
         stock_row = {"asset_type": "stock", "shares": 100.0, "active": True}
-        assert gui._format_cell(stock_row, "shares", "per1")[0] == "100.00"
+        assert gui._format_cell(stock_row, "shares", "per1")[0] == "100"
 
         # 入力欄も 1口単位。開いて保存しただけで保存値が変わらないこと（往復が恒等）
         dlg = EditHoldingDialog(fund, fund_share_unit="per1")

@@ -337,6 +337,16 @@ def cell_sort_value(
     return value
 
 
+def _trim_trailing_zeros(text: str) -> str:
+    """小数点を含む数字文字列の末尾の 0 と、残った小数点を落とす（`450.00` → `450`）。
+
+    小数点を含まない文字列には触れない（`1,500` を `1,5` にしない。`N/A` もそのまま）。
+    """
+    if "." not in text:
+        return text
+    return text.rstrip("0").rstrip(".")
+
+
 def _format_cell(
     row: dict, key: str, fund_share_unit: str = DEFAULT_FUND_SHARE_UNIT
 ) -> tuple[str, Optional[QColor]]:
@@ -366,11 +376,13 @@ def _cell_text_and_color(
             return splits.done_flag_text(done), QColor(theme.SPLIT_DONE)
         return "", None
     if key == "shares":
-        # 投信の口数は表示単位で見せる（保存値は常に万口単位）。
-        return fmt_number(
+        # 投信の口数は表示単位で見せる（保存値は常に万口単位）。株式はほぼ整数なので
+        # `.00` が並ばないよう末尾の 0 を落とす（並び替えの生値は別。単価・株価など
+        # 桁が揃っていることに意味のある列は 2 桁のまま）。
+        return _trim_trailing_zeros(fmt_number(
             to_display_shares(safe_float(val), row.get("asset_type"), fund_share_unit),
             2,
-        ), None
+        )), None
     if key == "asset_type":
         text = str(val or "")
         return ASSET_TYPE_LABELS.get(text, text), None

@@ -89,6 +89,26 @@ def test_format_cell_translates_asset_type_and_shows_account():
     assert gui._format_cell({"asset_type": "bond"}, "asset_type")[0] == "bond"
 
 
+@pytest.mark.parametrize("shares, asset_type, unit, expected", [
+    (450.0, "stock", "per10k", "450"),
+    (1500.0, "stock", "per10k", "1,500"),        # 整数部の 0 は削らない
+    (206.7284, "fund", "per10k", "206.73"),
+    (10.5, "stock", "per10k", "10.5"),
+    (206.7284, "fund", "per1", "2,067,284"),
+    (0.0, "stock", "per10k", "0"),
+    (None, "stock", "per10k", "N/A"),
+])
+def test_format_cell_shares_drops_trailing_zeros(shares, asset_type, unit, expected):
+    row = {"shares": shares, "asset_type": asset_type}
+    assert gui._format_cell(row, "shares", unit)[0] == expected
+
+
+def test_format_cell_shares_keeps_other_numeric_columns_at_two_decimals():
+    row = {"avg_cost": 1000.0, "last_price": 2500.0, "annual_div_ps": 50.0}
+    for key in row:
+        assert gui._format_cell(row, key)[0].endswith(".00")
+
+
 def test_format_cell_dims_inactive_rows_over_profit_color():
     """無効銘柄は損益の赤青より優先して淡色になること。"""
     active = {"profit_jpy": 1000.0, "active": True}
