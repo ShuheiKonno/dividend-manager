@@ -494,7 +494,7 @@ def compute_rows(
     include_inactive=True のとき active=False の銘柄も rows へ（元の順序のまま）
     含めるが、Summary の集計には一切加算しない（無効銘柄は集計対象外という
     意味論を保つ）。既定の False では従来どおり無効銘柄を完全に読み飛ばすため、
-    既存の呼び出し側（legacy_tui / 履歴スナップショット）の結果は変わらない。
+    既存の呼び出し側（履歴スナップショット）の結果は変わらない。
     """
     rows: list[dict[str, float | str | None]] = []
     totals = _Totals()

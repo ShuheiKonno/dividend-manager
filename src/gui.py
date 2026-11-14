@@ -1,7 +1,7 @@
 """PySide6 ネイティブGUI（配当優待管理アプリのエントリ）。
 
 ロジック層（io_csv / models / calc / market_data / utils）は無改変で再利用し、
-表示層のみを Qt6 で再構築する。レガシー TUI は src/legacy_tui.py に温存。
+表示層のみを Qt6 で構築する。
 """
 
 from __future__ import annotations
@@ -439,7 +439,7 @@ def _format_import_holdings_preview(
 class NumericSortProxy(QSortFilterProxyModel):
     """数値列は Qt.UserRole の生値で比較（桁区切り文字列の誤ソート回避）。
 
-    数値が無い行は legacy `_sort_rows` と同様、昇順/降順いずれでも末尾へ。
+    数値が無い行は昇順/降順いずれでも末尾へ。
     """
 
     def __init__(self, numeric_columns: set[int], parent=None) -> None:
@@ -1745,7 +1745,7 @@ class DividendWindow(QMainWindow):
             else:
                 self._view_for_tab(tab_key).setFocus()
 
-    # ---- データ読み込み / 再描画（legacy DividendApp から移植） ----
+    # ---- データ読み込み / 再描画 ----
     def _reload_all(self) -> None:
         # 4種の CSV をすべて読み終えてから self の状態を更新する（途中失敗で新旧が混ざらない）。
         holdings = load_holdings()

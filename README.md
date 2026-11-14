@@ -130,14 +130,6 @@ NISA（成長）/ NISA（積立）/ 旧NISA**）。表記ゆれで同じ口座�
 
 `data/` ディレクトリは `.gitignore` 済み（ローカル専用）。
 
-## レガシー TUI
-
-旧 Textual TUI を実行する場合のみ、追加依存をインストールしてください。
-
-```powershell
-.venv\Scripts\python.exe -m pip install -r requirements-legacy.txt
-```
-
 ## ライセンスと注意事項
 
 - 本リポジトリのソースコードは [MIT License](LICENSE) です。
