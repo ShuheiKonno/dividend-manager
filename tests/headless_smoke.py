@@ -384,6 +384,42 @@ def _check_theme_toggle(w) -> None:
             w.action_set_theme(original)  # 設定（theme）を元へ戻す
 
 
+def _check_checkbox_mark(w) -> None:
+    """チェック済みのチェックボックスにチェックマークが描かれ、未チェックには無いこと。
+
+    ACCENT 塗りだけだと青い四角が並び、グラフの凡例の色見本と見分けられなかった。
+    インジケータの範囲（左端から 18px）に明るい画素（白いマーク）があるかで見る。
+    ライトテーマは未チェックの枠の中が明るいので、ダークテーマで判定して元へ戻す。
+    """
+    from PySide6.QtGui import QColor
+
+    original_theme = w.theme_name
+    box = w._asset_scope_checks["jp_stock"]
+    original_checked = box.isChecked()
+
+    def bright_pixels() -> int:
+        image = box.grab().toImage()
+        return sum(
+            1
+            for y in range(image.height())
+            for x in range(min(18, image.width()))
+            if QColor(image.pixel(x, y)).lightness() > 200
+        )
+
+    try:
+        w.action_set_theme("dark")
+        box.setChecked(True)
+        checked = bright_pixels()
+        box.setChecked(False)
+        unchecked = bright_pixels()
+        assert checked > 0, "チェック済みなのにチェックマークが描かれていない"
+        assert unchecked == 0, f"未チェックに明るい画素がある: {unchecked}"
+    finally:
+        box.setChecked(original_checked)
+        if w.theme_name != original_theme:
+            w.action_set_theme(original_theme)
+
+
 def _check_fund_share_unit(w) -> None:
     """投信の口数単位が表示・入力だけを変え、保存値を動かさないことを検証する。
 
@@ -408,7 +444,7 @@ def _check_fund_share_unit(w) -> None:
         assert w._actions["fund_unit_per1"].isChecked()
         assert not w._actions["fund_unit_per10k"].isChecked()
         # 表示（セル・ヘッダ・並び替えの生値）が 1口単位になること
-        assert gui._format_cell(row, "shares", "per1")[0] == "2,067,284.00"
+        assert gui._format_cell(row, "shares", "per1")[0] == "2,067,284"
         assert gui.cell_sort_value(row, "shares", "per1") == 2_067_284.0
         label = FUND_SHARE_UNIT_COLUMN_LABELS["per1"]
         assert (label, "shares") in w._with_shares_label(gui.PRICE_COLUMNS)
@@ -418,7 +454,7 @@ def _check_fund_share_unit(w) -> None:
         assert header == label, f"株数列のヘッダが単位に追随しない: {header!r}"
         # 株式は単位設定の影響を受けない
         stock_row = {"asset_type": "stock", "shares": 100.0, "active": True}
-        assert gui._format_cell(stock_row, "shares", "per1")[0] == "100.00"
+        assert gui._format_cell(stock_row, "shares", "per1")[0] == "100"
 
         # 入力欄も 1口単位。開いて保存しただけで保存値が変わらないこと（往復が恒等）
         dlg = EditHoldingDialog(fund, fund_share_unit="per1")
@@ -1388,6 +1424,7 @@ def _run_checks(data: Path) -> None:
     from src.calc import ASSET_CLASSES
 
     w = build_window()
+    _check_no_heavy_imports()  # 先読みは main() だけ。ここで読まれていたら起動パスが重い
     # 既定フォルダへのフォールバック（DividendWindow.__init__）でサンドボックスの
     # 外へ出ていないこと。
     assert gui.io_csv.DATA_DIR == data, f"データフォルダが外れた: {gui.io_csv.DATA_DIR}"
@@ -1413,7 +1450,26 @@ def _run_checks(data: Path) -> None:
     _run_dialog_checks()
 
 
+def _check_no_heavy_imports() -> None:
+    """起動（build_window）の経路で yfinance / pandas を読み込んでいないこと。
+
+    初回 F5 の待ちを減らす先読みは main() だけが行う（gui._prewarm_market_data）。
+    build_window() の経路へ入れると、起動が数秒遅くなり、検証のたびに読み込む。
+    """
+    for name in ("yfinance", "pandas"):
+        assert name not in sys.modules, f"起動の経路で {name} が読み込まれている"
+
+
 def _run_window_checks(w) -> None:
+
+    # 中身が必要とする最小の高さがウィンドウの最小高さに収まること（収まらないと、
+    # 縮めたウィンドウでチャートの下側が切れ、月別タブの注記が棒に重なる）。
+    # オフスクリーンは実フォントより約 50px 低く出るので、これが緑でもネイティブで
+    # 溢れていることはあり得る——実フォントでの確認は CLAUDE.md の手順（windows
+    # プラットフォーム＋WA_DontShowOnScreen で minimumSizeHint を出力）で行う。
+    assert w.minimumSizeHint().height() <= w.minimumHeight(), (
+        f"最小高さが足りない: 必要 {w.minimumSizeHint().height()} > {w.minimumHeight()}"
+    )
 
     # タブ・メニュー構成
     assert w._tabs.count() == 5, "タブが5つ生成されていない"
@@ -1480,11 +1536,59 @@ def _run_window_checks(w) -> None:
     _check_withdrawal_trend_note(w)
     _check_net_trend_note(w)
     _check_theme_toggle(w)
+    _check_checkbox_mark(w)
     _check_fund_share_unit(w)
     _check_yield_definitions(w)
     _check_asset_scope(w)
     _check_trend_scope(w)
     _check_split_flags(w)
+
+
+def _check_dialog_height() -> None:
+    """編集・新規ダイアログが、中身が必要とする高さで開くこと（支払月が潰れない）。
+
+    Qt は最初に開くとき高さを画面の 2/3 までに抑え、折り返しラベルを含むレイアウトでは
+    minimumSizeHint も低く出る。不足分が支払月のチェックボックス群へ押し付けられ、
+    3 行が重なって読めなくなっていた（入力エラーのラベルが出るとさらに不足する）。
+    実データの銘柄を探さず _holding / _market で作る（空データでも通すため）。
+    """
+    from PySide6.QtWidgets import QLineEdit
+
+    ratios = {6: 0.5, 12: 0.5}  # 自動判定の月が出る（トグル付きの支払月欄になる）
+    cases = {
+        "編集・株式": lambda: EditHoldingDialog(
+            _holding(), market=_market(div_ex_month_ratios=ratios)
+        ),
+        "編集・投信": lambda: EditHoldingDialog(
+            _holding(symbol="JP90C000J569", asset_type="fund")
+        ),
+        "新規": lambda: NewHoldingDialog(_holding(symbol="", name="")),
+    }
+    app = QApplication.instance()
+
+    def _assert_fits(dlg, label: str, when: str) -> None:
+        for group in dlg.findChildren(MonthCheckboxGroup):
+            assert group.height() >= group.minimumSizeHint().height(), (
+                f"{label}（{when}）: 支払月欄が潰れている "
+                f"{group.height()} < {group.minimumSizeHint().height()}"
+            )
+        assert dlg.height() >= dlg.sizeHint().height(), (
+            f"{label}（{when}）: ダイアログの高さが足りない "
+            f"{dlg.height()} < {dlg.sizeHint().height()}"
+        )
+
+    for label, make in cases.items():
+        dlg = make()
+        dlg.show()
+        app.processEvents()
+        _assert_fits(dlg, label, "開いた直後")
+        # 入力エラーのラベルが出ると必要な高さが増える。
+        target = next(e for e in dlg.findChildren(QLineEdit) if e in dlg._validators)
+        target.setText("abc")
+        app.processEvents()
+        assert not dlg._error_label.isHidden(), f"{label}: エラーラベルが出ない"
+        _assert_fits(dlg, label, "エラー表示後")
+        dlg.close()
 
 
 def _run_dialog_checks() -> None:
@@ -1504,6 +1608,7 @@ def _run_dialog_checks() -> None:
     assert {nd._asset_type.itemData(i) for i in range(nd._asset_type.count())} == {"stock", "fund"}
     assert {nd._currency.itemData(i) for i in range(nd._currency.count())} == {"JPY", "USD"}
 
+    _check_dialog_height()
     _check_account_combo()
     _check_auto_fields_are_untouched()
     _check_month_checkboxes()

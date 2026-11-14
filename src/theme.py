@@ -16,9 +16,14 @@
 注意: QComboBox::down-arrow 等の矢印サブコントロールは意図的に定義しない
 （画像リソースが必要になるため）。矢印の描画は Fusion スタイルに任せる
 （gui.py の _ensure_app() で app.setStyle("Fusion") を適用している）。
+**例外はチェックボックスのチェックマーク 1 枚だけ**（assets/check.png。
+生成は tools/make_check_icon.py）。ACCENT 塗りだけだと青い四角の並びになり、
+グラフの凡例の色見本と見分けられなかった。ファイルが無ければ塗りだけに落ちる。
 """
 
 from __future__ import annotations
+
+from pathlib import Path
 
 # ---- テーマ定義 ----
 DEFAULT_THEME = "dark"
@@ -87,11 +92,11 @@ _DARK = {
     "TILE_BORDER": "#7f7f7f",      # タイル枠線
     "TILE_HOVER_OUTLINE": "#f5f5f5",  # ホバー中タイルの上描き枠
     "TILE_NEUTRAL_BG": "#3a3a3a",  # 損益 0 / 不明
-    "TILE_WEAK_BG": "#262626",     # |損益率| < 2%（文字色で赤青を示す）
-    "TILE_UP_STRONG": "#c62828",   # 損益率 >= +5%
-    "TILE_UP_MID": "#8e2424",      # +2% 〜 +5%
-    "TILE_DOWN_STRONG": "#1565c0",  # 損益率 <= -5%
-    "TILE_DOWN_MID": "#1a3a6b",    # -5% 〜 -2%
+    "TILE_WEAK_BG": "#262626",     # |損益率| < 10%（文字色で赤青を示す）
+    "TILE_UP_STRONG": "#c62828",   # 損益率 >= +50%
+    "TILE_UP_MID": "#8e2424",      # +10% 〜 +50%
+    "TILE_DOWN_STRONG": "#1565c0",  # 損益率 <= -50%
+    "TILE_DOWN_MID": "#1a3a6b",    # -50% 〜 -10%
     "ON_FILL_LIGHT": "#f5f5f5",    # 濃い塗りの上の文字
     "ON_FILL_DARK": "#1c1c1c",     # 淡い塗りの上の文字
     "CATEGORICAL_OTHER": "#757575",  # 円グラフ「その他」のスライス
@@ -229,8 +234,25 @@ def theme_label(name: str) -> str:
 set_theme(DEFAULT_THEME)
 
 
+# チェックマークの画像（生成は tools/make_check_icon.py。gui.APP_ICON_PATH と同じ基準）。
+CHECK_ICON_PATH = Path(__file__).resolve().parents[1] / "assets" / "check.png"
+
+
+def _check_image_rule() -> str:
+    """チェック済みのインジケータへ当てる `image: url(...)` 宣言（画像が無ければ空）。
+
+    build_window() はヘッドレス検証の入口でもあるので、見た目だけの資産が欠けても
+    落とさず、ACCENT 塗りだけの従来の見た目へ落とす。パスは `/` 区切りにして
+    ダブルクォートで囲む（Windows の `\` は QSS でエスケープ扱いになる）。
+    """
+    if not CHECK_ICON_PATH.is_file():
+        return ""
+    return f'image: url("{CHECK_ICON_PATH.as_posix()}");'
+
+
 def build_app_qss() -> str:
     """現在のテーマの QSS を生成して返す（テーマ切替のたびに呼び直す）。"""
+    check_image = _check_image_rule()
     return f"""
 /* ---- 基本 ---- */
 QMainWindow, QWidget {{
@@ -320,19 +342,21 @@ QAbstractSpinBox {{
 }}
 QAbstractSpinBox:focus {{ border-color: {BORDER_FOCUS}; }}
 
-/* ---- チェックボックス（チェック画像レス: ACCENT 塗りで表現） ---- */
+/* ---- チェックボックス（ACCENT 塗り＋白いチェックマーク画像 1 枚） ---- */
 QCheckBox::indicator {{
     width: 15px; height: 15px; border: 1px solid {BORDER_LIGHT};
     border-radius: 3px; background: {BG_INPUT};
 }}
 QCheckBox::indicator:hover {{ border-color: {BORDER_FOCUS}; }}
-QCheckBox::indicator:checked {{ background: {ACCENT}; border-color: {ACCENT}; }}
+QCheckBox::indicator:checked {{
+    background: {ACCENT}; border-color: {ACCENT}; {check_image}
+}}
 /* 無効（外せない最後の1つ・自動判定中の月など）。定義が無いと ACCENT 塗りのまま
    有効と見分けが付かない。hover より後ろに置いて枠色の上書きに勝たせる。 */
 QCheckBox:disabled {{ color: {TEXT_DISABLED}; }}
 QCheckBox::indicator:disabled {{ background: {BG_DISABLED}; border-color: {BORDER}; }}
 QCheckBox::indicator:checked:disabled {{
-    background: {TEXT_DISABLED}; border-color: {TEXT_DISABLED};
+    background: {TEXT_DISABLED}; border-color: {TEXT_DISABLED}; {check_image}
 }}
 
 /* ---- スクロールバー（ボタンレス） ---- */

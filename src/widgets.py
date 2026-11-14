@@ -37,7 +37,14 @@ from .utils import (
     date_x_positions,
     nearest_x_index,
     date_axis_ticks,
+    clamp_label_left,
 )
+
+# チャートの最小サイズ。ウィンドウの最小高さ（900x600）に収まる値にしてある
+# （実フォントで全体の最小の高さが 597px。170→180 / 160→170 にすると 607px で溢れる）。
+# 大きくすると、縮めたウィンドウでチャートの下側が切れ、月別タブの注記が棒に重なる。
+_CHART_MIN_SIZE = (320, 170)
+_BAR_CHART_MIN_SIZE = (360, 160)
 
 # 株価未取得時などチャートが空のときに中央表示する既定メッセージ
 _EMPTY_MESSAGE = "株価未取得 — F5 で株価・配当を取得してください"
@@ -52,15 +59,67 @@ def _fmt_compact(v: float) -> str:
     return f"{v:.0f}円"
 
 
-def _label_text(tile: dict) -> str:
-    """円グラフの引き出し線ラベル1行分（「銘柄名(コード)」／集約行は「その他(N銘柄)」）。"""
+def _duplicate_symbols(tiles: list[dict]) -> set[str]:
+    """同じ銘柄コードが 2 行以上ある銘柄の集合（複数口座・取得単価違いで起きる）。
+
+    保有は「銘柄 × 口座」で 1 行なので、同じ銘柄を複数の口座で持つと構成グラフに
+    同じ名前が並ぶ。行は合算せず（表の行と対応しなくなり、損益率の色も平均になる）、
+    表示名とツールチップに口座を足して区別する。
+    """
+    seen: set[str] = set()
+    duplicated: set[str] = set()
+    for tile in tiles:
+        symbol = str(tile.get("symbol", ""))
+        if symbol in seen:
+            duplicated.add(symbol)
+        seen.add(symbol)
+    return duplicated
+
+
+def _label_text(tile: dict, duplicates: frozenset[str] | set[str] = frozenset()) -> str:
+    """円グラフの引き出し線ラベル1行分。
+
+    「銘柄名(コード)」／同じ銘柄が複数行ある（duplicates）かつ口座があれば
+    「銘柄名(口座・コード)」／集約行は「その他(N銘柄)」。
+
+    口座をコードより前に置くのは、ラベルが幅に収まらず末尾を省略されるとき、
+    長いコード（投信の ISIN など）が先に削られて口座が残るようにするため。
+    """
     symbol = str(tile.get("symbol", ""))
     name = str(tile.get("name") or "")
     if tile.get("is_other"):
         return f"{symbol}{name}"
+    account = str(tile.get("account") or "")
+    code = f"{account}・{symbol}" if symbol in duplicates and account else symbol
     if not name:
-        return symbol
-    return f"{name}({symbol})"
+        return code
+    return f"{name}({code})"
+
+
+def _tooltip_head(tile: dict) -> str:
+    """ツールチップの先頭（「コード  銘柄名」＋口座があれば「口座: 〇〇」の行）。
+
+    口座は重複の有無に関係なく出す。円グラフの「その他」は口座を持たない。
+    """
+    head = f"{tile.get('symbol', '')}  {tile.get('name') or ''}"
+    account = str(tile.get("account") or "")
+    if account and not tile.get("is_other"):
+        head += f"\n口座: {account}"
+    return head
+
+
+def tile_lines(tile: dict) -> tuple[str, str]:
+    """ヒートマップのタイルに描く (見出し, 副題)。副題は空文字のことがある。
+
+    投信はコードが ISIN（12桁の英数字）で意味が読めないため、銘柄名を見出しにして
+    副題に口座を出す（同じファンドを複数口座で持つ場合の区別にもなる）。
+    名前の無い投信は ISIN を見出しにする。株式は今までどおり コード／銘柄名。
+    """
+    symbol = str(tile.get("symbol", "") or "")
+    name = str(tile.get("name") or "")
+    if tile.get("asset_type") == "fund":
+        return (name or symbol), str(tile.get("account") or "")
+    return symbol, name
 
 
 def _categorical_colors(tiles: list[dict]) -> list[QColor]:
@@ -152,6 +211,13 @@ def _readable_text_color(bg: QColor) -> QColor:
     return QColor(theme.ON_FILL_DARK if luminance > 0.62 else theme.ON_FILL_LIGHT)
 
 
+# ヒートマップの濃淡の境界（取得時からの損益率の絶対値）。
+# 1日の値動き向けの 2% / 5% だと、長期保有（損益率が数十〜数百 %）ではほぼ全タイルが
+# 最濃色になり、色が情報を持たない。
+TILE_RATE_MID = 0.10     # これ以上で中間色
+TILE_RATE_STRONG = 0.50  # これ以上で最濃色
+
+
 def profit_tile_colors(profit_rate: float | None) -> tuple[QColor, QColor]:
     """損益率に応じたタイルの (背景色, 文字色) を3段階で返す（日本式: +赤 / -青）。
 
@@ -163,14 +229,14 @@ def profit_tile_colors(profit_rate: float | None) -> tuple[QColor, QColor]:
         return _with_readable_text(theme.TILE_NEUTRAL_BG)
     magnitude = abs(rate)
     if rate > 0:
-        if magnitude >= 0.05:
+        if magnitude >= TILE_RATE_STRONG:
             return _with_readable_text(theme.TILE_UP_STRONG)
-        if magnitude >= 0.02:
+        if magnitude >= TILE_RATE_MID:
             return _with_readable_text(theme.TILE_UP_MID)
         return QColor(theme.TILE_WEAK_BG), QColor(theme.PROFIT_UP)
-    if magnitude >= 0.05:
+    if magnitude >= TILE_RATE_STRONG:
         return _with_readable_text(theme.TILE_DOWN_STRONG)
-    if magnitude >= 0.02:
+    if magnitude >= TILE_RATE_MID:
         return _with_readable_text(theme.TILE_DOWN_MID)
     return QColor(theme.TILE_WEAK_BG), QColor(theme.PROFIT_DOWN)
 
@@ -204,7 +270,7 @@ class TreemapWidget(QWidget):
         self._value_key: str = "market_value_jpy"
         self._value_label: str = "評価額"
         self._empty_message: str = _EMPTY_MESSAGE
-        self.setMinimumSize(420, 320)
+        self.setMinimumSize(*_CHART_MIN_SIZE)
         self.setMouseTracking(True)
         self.setAutoFillBackground(True)
 
@@ -276,29 +342,33 @@ class TreemapWidget(QWidget):
             painter.drawRect(qrect.adjusted(0.5, 0.5, -0.5, -0.5))
 
             if rw >= 56 and rh >= 34:  # ラベルが収まる程度の矩形だけ描画
-                symbol = str(tile.get("symbol", ""))
-                name = str(tile.get("name") or "")
+                heading, sub = tile_lines(tile)
                 mv_str = _fmt_compact(float(tile[self._value_key]))
                 painter.setPen(QPen(fg))
                 bold = QFont(small_font)
                 bold.setBold(True)
-                if rh >= 60 and name:
-                    # 3行: シンボル / 銘柄名 / 評価額
+                # 見出しは太字で測って、タイル幅に収まらなければ末尾を省略する
+                # （細字で測ると太字のぶんはみ出す。ISIN などの長い文字列が両端で切れる）。
+                painter.setFont(bold)
+                heading_text = painter.fontMetrics().elidedText(
+                    heading, Qt.TextElideMode.ElideRight, int(rw - 4)
+                )
+                if rh >= 60 and sub:
+                    # 3行: 見出し / 副題 / 評価額
                     third = rh / 3.0
-                    painter.setFont(bold)
                     painter.drawText(
                         qrect.adjusted(2, 2, -2, -(rh * 2.0 / 3.0)),
                         Qt.AlignmentFlag.AlignCenter,
-                        symbol,
+                        heading_text,
                     )
                     painter.setFont(small_font)
-                    name_rect = qrect.adjusted(2, third, -2, -third)
+                    sub_rect = qrect.adjusted(2, third, -2, -third)
                     # タイル幅に収まれば全文表示、超える場合のみ末尾を「…」省略する
-                    elided_name = painter.fontMetrics().elidedText(
-                        name, Qt.TextElideMode.ElideRight, int(name_rect.width())
+                    elided_sub = painter.fontMetrics().elidedText(
+                        sub, Qt.TextElideMode.ElideRight, int(sub_rect.width())
                     )
                     painter.drawText(
-                        name_rect, Qt.AlignmentFlag.AlignCenter, elided_name
+                        sub_rect, Qt.AlignmentFlag.AlignCenter, elided_sub
                     )
                     painter.drawText(
                         qrect.adjusted(2, rh * 2.0 / 3.0, -2, -2),
@@ -306,12 +376,11 @@ class TreemapWidget(QWidget):
                         mv_str,
                     )
                 else:
-                    # 2行: シンボル / 評価額
-                    painter.setFont(bold)
+                    # 2行: 見出し / 評価額
                     painter.drawText(
                         qrect.adjusted(2, 2, -2, -rh / 2),
                         Qt.AlignmentFlag.AlignCenter,
-                        symbol,
+                        heading_text,
                     )
                     painter.setFont(small_font)
                     painter.drawText(
@@ -335,11 +404,10 @@ class TreemapWidget(QWidget):
         if tile is None:
             QToolTip.hideText()
         else:
-            name = tile.get("name") or ""
             mv = fmt_number(tile.get(self._value_key), 0)
             pr = fmt_percent(tile.get("profit_rate"), 2)
             text = (
-                f"{tile.get('symbol', '')}  {name}\n"
+                f"{_tooltip_head(tile)}\n"
                 f"{self._value_label}: {mv} 円\n"
                 f"損益率: {pr}"
             )
@@ -378,10 +446,11 @@ class PieChartWidget(QWidget):
         self._total: float = 0.0
         self._threshold_pct: float = 2.0  # この%未満のセグメントを「その他」に集約
         self._segments: list[tuple[float, float, dict]] = []  # (start_deg, span_deg, tile)
+        self._dup_symbols: set[str] = set()  # 複数行ある銘柄（ラベルに口座を足す）
         self._value_key: str = "market_value_jpy"
         self._value_label: str = "評価額"
         self._empty_message: str = _EMPTY_MESSAGE
-        self.setMinimumSize(420, 320)
+        self.setMinimumSize(*_CHART_MIN_SIZE)
         self.setMouseTracking(True)
         self.setAutoFillBackground(True)
 
@@ -403,6 +472,7 @@ class PieChartWidget(QWidget):
         tiles.sort(key=lambda r: float(r[value_key]), reverse=True)
         self._tiles = tiles
         self._total = sum(float(t[value_key]) for t in tiles)
+        self._dup_symbols = _duplicate_symbols(tiles)
         self._segments = []
         self.update()
 
@@ -554,7 +624,9 @@ class PieChartWidget(QWidget):
                 painter.setFont(lbl_font)
                 painter.setPen(QPen(QColor(theme.TEXT_PRIMARY)))
                 text = painter.fontMetrics().elidedText(
-                    _label_text(tile), Qt.TextElideMode.ElideRight, int(label_w)
+                    _label_text(tile, self._dup_symbols),
+                    Qt.TextElideMode.ElideRight,
+                    int(label_w),
                 )
                 painter.drawText(
                     QRectF(box_x, y_lbl - row_h / 2.0, label_w, row_h),
@@ -726,11 +798,10 @@ class PieChartWidget(QWidget):
         if tile is None:
             QToolTip.hideText()
         else:
-            name = tile.get("name") or ""
             mv = fmt_number(tile.get(self._value_key), 0)
             weight = float(tile[self._value_key]) / self._total * 100.0 if self._total else 0
             text = (
-                f"{tile.get('symbol', '')}  {name}\n"
+                f"{_tooltip_head(tile)}\n"
                 f"{self._value_label}: {mv} 円（{weight:.1f}%）"
             )
             QToolTip.showText(event.globalPosition().toPoint(), text, self)
@@ -793,7 +864,7 @@ class LineChartWidget(QWidget):
         self._floor: float = 0.0            # Y 軸下限値
         self._top: float = 1.0              # Y 軸上限値
         self._hover_idx: int | None = None
-        self.setMinimumSize(420, 320)
+        self.setMinimumSize(*_CHART_MIN_SIZE)
         self.setMouseTracking(True)
         self.setAutoFillBackground(True)
 
@@ -899,9 +970,22 @@ class LineChartWidget(QWidget):
         xs = self._x_positions(plot)
         dates = [str(rec.get("date", "")) for rec in self._visible]
         painter.setPen(QPen(QColor(theme.CHART_AXIS_TEXT)))
-        for x, date_label in date_axis_ticks(dates, plot.left(), plot.width()):
+        # 右端の目盛は右余白（16px）に収まらず、中心揃えだと日付が途中で切れるので
+        # ウィジェット内へ寄せる。寄せたぶん手前の目盛と接するので、後ろ（右）から
+        # 描いて、重なる手前の目盛は省く（目盛は日数で等分した参考値で、省いても
+        # 線の読み取りは変わらない）。
+        label_fm = painter.fontMetrics()
+        drawn_left = float("inf")
+        for x, date_label in reversed(
+            date_axis_ticks(dates, plot.left(), plot.width())
+        ):
+            tick_w = float(label_fm.horizontalAdvance(date_label) + 8)
+            left = clamp_label_left(x, tick_w, 0.0, float(rect.width()))
+            if left + tick_w + 4.0 > drawn_left:
+                continue
+            drawn_left = left
             painter.drawText(
-                QRectF(x - 44, plot.bottom() + 4, 88, 16),
+                QRectF(left, plot.bottom() + 4, tick_w, 16),
                 Qt.AlignmentFlag.AlignCenter,
                 date_label,
             )
@@ -942,24 +1026,33 @@ class LineChartWidget(QWidget):
                 painter.setPen(QPen(QColor(theme.CHART_BG), 1))
                 painter.drawEllipse(QRectF(hx - 3.5, hy - 3.5, 7, 7))
 
-        # 凡例（右上）
-        legend_x = plot.right() - 8
-        legend_y = plot.top() + 4
+        # 凡例。プロット領域の中（右上）に置くと、最新値が右上へ来る推移の線と重なる。
+        # 月別グラフと同じく上余白の 1 行に、系列の順で左→右に並べて右寄せにする
+        # （先に総幅を測って左端を決める）。狭くて入りきらないときは左端を 0 に寄せる。
         painter.setFont(small_font)
-        for label, _key, color in self._series:
-            text_w = painter.fontMetrics().horizontalAdvance(label)
-            sw = 16  # 色見本の幅
-            row_w = sw + 4 + text_w
-            lx = legend_x - row_w
+        sw = 16  # 色見本の幅
+        gap = 12  # 系列間の間隔
+        legend_fm = painter.fontMetrics()
+        widths = [
+            sw + 4 + legend_fm.horizontalAdvance(label)
+            for label, _key, _color in self._series
+        ]
+        legend_x = max(
+            0.0, plot.right() - 8 - sum(widths) - gap * (len(widths) - 1)
+        )
+        legend_y = 6
+        for (label, _key, color), row_w in zip(self._series, widths):
             painter.setPen(QPen(color, 2))
-            painter.drawLine(int(lx), int(legend_y + 7), int(lx + sw), int(legend_y + 7))
+            painter.drawLine(
+                int(legend_x), int(legend_y + 8), int(legend_x + sw), int(legend_y + 8)
+            )
             painter.setPen(QPen(QColor(theme.CHART_LABEL_TEXT)))
             painter.drawText(
-                QRectF(lx + sw + 4, legend_y, text_w + 4, 14),
+                QRectF(legend_x + sw + 4, legend_y, row_w - sw, 16),
                 Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter,
                 label,
             )
-            legend_y += 16
+            legend_x += row_w + gap
 
         painter.end()
 
@@ -1027,7 +1120,7 @@ class BarChartWidget(QWidget):
         self._selected: int | None = None
         self._hover_month: int | None = None
         self._top: float = 1.0
-        self.setMinimumSize(480, 300)
+        self.setMinimumSize(*_BAR_CHART_MIN_SIZE)
         self.setMouseTracking(True)
         self.setAutoFillBackground(True)
 

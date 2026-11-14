@@ -89,6 +89,26 @@ def test_format_cell_translates_asset_type_and_shows_account():
     assert gui._format_cell({"asset_type": "bond"}, "asset_type")[0] == "bond"
 
 
+@pytest.mark.parametrize("shares, asset_type, unit, expected", [
+    (450.0, "stock", "per10k", "450"),
+    (1500.0, "stock", "per10k", "1,500"),        # 整数部の 0 は削らない
+    (206.7284, "fund", "per10k", "206.73"),
+    (10.5, "stock", "per10k", "10.5"),
+    (206.7284, "fund", "per1", "2,067,284"),
+    (0.0, "stock", "per10k", "0"),
+    (None, "stock", "per10k", "N/A"),
+])
+def test_format_cell_shares_drops_trailing_zeros(shares, asset_type, unit, expected):
+    row = {"shares": shares, "asset_type": asset_type}
+    assert gui._format_cell(row, "shares", unit)[0] == expected
+
+
+def test_format_cell_shares_keeps_other_numeric_columns_at_two_decimals():
+    row = {"avg_cost": 1000.0, "last_price": 2500.0, "annual_div_ps": 50.0}
+    for key in row:
+        assert gui._format_cell(row, key)[0].endswith(".00")
+
+
 def test_format_cell_dims_inactive_rows_over_profit_color():
     """無効銘柄は損益の赤青より優先して淡色になること。"""
     active = {"profit_jpy": 1000.0, "active": True}
@@ -125,6 +145,48 @@ def test_history_snapshot_uses_gross_dividend(monkeypatch):
     stub = _window_stub([holding], {"7203": market})
     gui.DividendWindow._record_history_snapshot(stub)
     assert saved[0].total_dividend_jpy == 10_000.0
+
+
+def _fresh_snapshot_stub():
+    market = _snapshot_market()
+    return _window_stub([_holding()], {"7203": market})
+
+
+def test_history_snapshot_skips_save_when_today_is_unchanged(monkeypatch):
+    """当日の記録が既にあり中身が同じなら、履歴を書き直さない（戻り値も None）。"""
+    saved = []
+    monkeypatch.setattr(gui, "save_history", lambda rows: saved.append(list(rows)))
+    stub = _fresh_snapshot_stub()
+    assert gui.DividendWindow._record_history_snapshot(stub) is None
+    assert len(saved) == 1  # 最初の 1 回は記録する
+    # CSV から読み直した状態を再現する（to_dict → from_dict の往復）。
+    from src.models import HistoryRecord
+
+    stub.history = [HistoryRecord.from_dict(r.to_dict()) for r in stub.history]
+    assert gui.DividendWindow._record_history_snapshot(stub) is None
+    assert len(saved) == 1
+
+
+def test_history_snapshot_saves_when_today_changed(monkeypatch):
+    saved = []
+    monkeypatch.setattr(gui, "save_history", lambda rows: saved.append(list(rows)))
+    stub = _fresh_snapshot_stub()
+    stub.history = [_history(gui.today_jst_str(), total_market_value_jpy=123.0)]
+    gui.DividendWindow._record_history_snapshot(stub)
+    assert len(saved) == 1
+    today_rows = [r for r in stub.history if r.record_date == gui.today_jst_str()]
+    assert len(today_rows) == 1
+    assert today_rows[0].total_market_value_jpy != 123.0  # 当日の行が置き換わる
+
+
+def test_history_snapshot_saves_when_today_is_missing(monkeypatch):
+    saved = []
+    monkeypatch.setattr(gui, "save_history", lambda rows: saved.append(list(rows)))
+    stub = _fresh_snapshot_stub()
+    stub.history = [_history("2020-01-01", total_market_value_jpy=1.0)]
+    gui.DividendWindow._record_history_snapshot(stub)
+    assert len(saved) == 1
+    assert [r.record_date for r in stub.history] == ["2020-01-01", gui.today_jst_str()]
 
 
 def test_history_snapshot_skips_missing_market_value(monkeypatch):
@@ -1028,3 +1090,34 @@ def test_monthly_benefit_detail_column_never_shrinks_user_widened_width():
     gui.DividendWindow._render_monthly_breakdown(stub)
     assert stub._monthly_view.columnWidth(col) == 360
 
+
+def test_prewarm_market_data_loads_yfinance_once_in_background(monkeypatch):
+    import src.market_data as market_data
+
+    calls = []
+    monkeypatch.setattr(market_data, "_yf", lambda: calls.append(1))
+    thread = gui._prewarm_market_data()
+    thread.join(timeout=5)
+    assert calls == [1]
+    assert thread.daemon and not thread.is_alive()
+
+
+def test_prewarm_market_data_swallows_import_failure(monkeypatch):
+    import src.market_data as market_data
+
+    def broken():
+        raise ImportError("yfinance が入っていない")
+
+    monkeypatch.setattr(market_data, "_yf", broken)
+    thread = gui._prewarm_market_data()
+    thread.join(timeout=5)  # 例外が外へ出ない（スレッドが正常に終わる）
+    assert not thread.is_alive()
+
+
+def test_build_window_does_not_prewarm(monkeypatch):
+    """先読みは main() だけ。build_window() が呼ぶと検証のたびに yfinance を読み込む。"""
+    import inspect
+
+    assert "_prewarm_market_data" not in inspect.getsource(gui.build_window)
+    assert "_prewarm_market_data" not in inspect.getsource(gui.DividendWindow.__init__)
+    assert "_prewarm_market_data" in inspect.getsource(gui.main)

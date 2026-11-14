@@ -233,32 +233,43 @@ class _FakeClose:
 
 
 class _FakeHistory:
-    def __init__(self, day, price):
-        self._close = _FakeClose(day, price)
+    """history() の戻り値。Dividends / Stock Splits 列はイベントの無い日の 0.0 行を含む。"""
+
+    def __init__(self, day, price, dividends, splits):
+        self._columns = {"Close": _FakeClose(day, price)}
+        zero = [(_FakeStamp(day), 0.0)]
+        if dividends is not None:
+            self._columns["Dividends"] = _Events(zero + list(dividends.items()))
+        if splits is not None:
+            self._columns["Stock Splits"] = _Events(zero + list(splits.items()))
+
+    def __contains__(self, key):
+        return key in self._columns
 
     def __getitem__(self, key):
-        assert key == "Close"
-        return self._close
+        return self._columns[key]
+
+
+class _Events:
+    def __init__(self, pairs):
+        self._pairs = pairs
+
+    def __len__(self):
+        return len(self._pairs)
+
+    def items(self):
+        return iter(self._pairs)
 
 
 class _FakeTicker:
-    def __init__(self, dividends, splits, splits_error=None):
+    """splits=None は Stock Splits 列が無い（＝分割の取得失敗）ことを表す。"""
+
+    def __init__(self, dividends, splits):
         self._dividends = dividends
         self._splits = splits
-        self._splits_error = splits_error
 
     def history(self, **_kwargs):
-        return _FakeHistory(date.today(), 3737.0)
-
-    @property
-    def dividends(self):
-        return self._dividends
-
-    @property
-    def splits(self):
-        if self._splits_error:
-            raise self._splits_error
-        return self._splits
+        return _FakeHistory(date.today(), 3737.0, self._dividends, self._splits)
 
 
 class _FakeYf:
@@ -297,12 +308,9 @@ def test_fetch_one_stores_recent_splits_and_corrects_dividend(monkeypatch):
 def test_fetch_one_survives_splits_failure(monkeypatch):
     ex = date.today() - timedelta(days=1)
     dividends = _series([(_ymd(ex - timedelta(days=183)), 56.0), (_ymd(ex), 105.0)])
-    row, errors, _, succeeded = _fetch_with(
-        monkeypatch,
-        _FakeTicker(dividends, None, splits_error=RuntimeError("boom")),
-    )
+    row, errors, _, succeeded = _fetch_with(monkeypatch, _FakeTicker(dividends, None))
     # 株価・配当は取得を続け、分割だけ失敗として集約側へ通知する。
-    assert errors == ["分割取得失敗: 5334 (boom)"]
+    assert errors == ["分割取得失敗: 5334 (Stock Splits 列なし)"]
     assert succeeded == {"price", "dividend"}
     assert row.last_price == 3737.0
     assert row.annual_div_ps_gross == pytest.approx(161.0)

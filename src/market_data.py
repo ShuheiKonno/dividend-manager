@@ -85,6 +85,46 @@ _SPLIT_KEEP_DAYS = 800
 _SPLIT_DIV_MIN_STEP = 1.5
 # 分割当日の配当と比べる参照配当として、前年同期を探す幅（±日）。
 _SAME_SEASON_DAYS = 45
+# 株価・配当・分割を 1 回で取る期間。配当の集計に 370 日、分割当日配当の補正に前年同期の
+# 参照配当（＋45 日）、分割の保存に 800 日（_SPLIT_KEEP_DAYS）が要り、5 年ならすべて
+# 余裕をもって入る。"max" は 1 回でも重い（ticker.dividends の 2 回目と同じ）ので使わない。
+_HISTORY_PERIOD = "5y"
+# 採用した終値がこの日数（暦日）より古ければ取得失敗として扱う。period="10d" の頃は
+# 直近に取引の無い銘柄の終値が返らず失敗になっていた。5 年ぶん取ると何か月も前の終値が
+# 「当日取得」として記録されてしまう。年末年始・大型連休でも通常の銘柄を弾かない幅。
+_PRICE_MAX_AGE_DAYS = 14
+
+
+class _EventSeries:
+    """イベントのあった行だけを持つ最小の Series 互換（items と len だけ）。"""
+
+    def __init__(self, pairs: list) -> None:
+        self._pairs = pairs
+
+    def __len__(self) -> int:
+        return len(self._pairs)
+
+    def items(self):
+        return iter(self._pairs)
+
+
+def _nonzero_events(series) -> _EventSeries:
+    """history() の Dividends / Stock Splits 列から、イベントのある行だけを残す。
+
+    これらの列はイベントの無い営業日に 0.0 が入っている。そのまま配当の集計へ渡すと
+    「最新の権利落ち日」が最新の営業日になり、年額・最新日・月別比率がエラーも出ないまま
+    狂う。pandas に依存させず .items() を回して 0・NaN・数値でない値を捨てる。
+    """
+    pairs = []
+    for idx, value in series.items():
+        try:
+            number = float(value)
+        except (TypeError, ValueError):
+            continue
+        if not math.isfinite(number) or number == 0:
+            continue
+        pairs.append((idx, number))
+    return _EventSeries(pairs)
 
 
 def _parse_yfinance_splits(series) -> list[tuple[str, float]]:
@@ -282,40 +322,60 @@ def _fetch_one(
         succeeded.update(("dividend", "splits"))
     else:
         yf_symbol = _yfinance_symbol(holding)
-        ticker = None
+        # 株価・配当・分割を history() の 1 回の戻り値から作る（1 銘柄 1 リクエスト）。
+        # ticker.dividends / ticker.splits は内部で history(period="max") をもう一度
+        # 呼ぶので、読むと通信が倍になる。
+        history = None
         try:
             ticker = _yf().Ticker(yf_symbol)
-            # 最新の終値だけ使うので配当・分割の調整は不要。既定の auto_adjust=True だと、
-            # 最新バーの後ろに未来の権利落ち日の配当があるとき最新バーまで調整され
-            # 市場価格より安い値が入る（分割直後は分割前基準の配当で -23% になった）。
-            history = ticker.history(period="10d", auto_adjust=False)
-            # 最終行の Close が NaN（最新バー未確定）の銘柄があるため、
-            # 最後の非 NaN 終値を採用する。
-            close = history["Close"].dropna()
-            if not close.empty:
-                price = float(close.iloc[-1])
-                price_date = close.index[-1].date().isoformat()
-                succeeded.add("price")
-            else:
-                errors.append(f"株価取得失敗: {holding.symbol} (終値データなし)")
+            history = ticker.history(period=_HISTORY_PERIOD, auto_adjust=False)
         except Exception as exc:
+            # 通信自体の失敗は 3 項目とも失敗（キャッシュを保持）。エラーは 1 件だけ積む。
             errors.append(f"株価取得失敗: {holding.symbol} ({exc})")
 
-        if ticker is not None:
+        if history is not None:
+            try:
+                # 最終行の Close が NaN（最新バー未確定）の銘柄があるため、
+                # 最後の非 NaN 終値を採用する。
+                close = history["Close"].dropna()
+                if close.empty:
+                    errors.append(f"株価取得失敗: {holding.symbol} (終値データなし)")
+                else:
+                    last_day = close.index[-1].date()
+                    if (date.today() - last_day).days > _PRICE_MAX_AGE_DAYS:
+                        # 5 年ぶん取るので、売買停止・上場廃止の銘柄でも古い終値が
+                        # 返る。当日取得扱いにすると履歴へ古い株価が記録される。
+                        errors.append(
+                            f"株価取得失敗: {holding.symbol} (終値データなし)"
+                        )
+                    else:
+                        price = float(close.iloc[-1])
+                        price_date = last_day.isoformat()
+                        succeeded.add("price")
+            except Exception as exc:
+                errors.append(f"株価取得失敗: {holding.symbol} ({exc})")
+
             # 分割の失敗は独立して扱い、集約時に既存の分割情報を保持する。
-            # 配当と同じ履歴から取れるので、通常は追加の通信は発生しない。
+            # 列が無い＝失敗（存在しない銘柄は列の無い空の表が返る。成功で空と扱うと
+            # 一時的な不調で保存済みの配当・分割が消える）。列があって全部 0 は
+            # 「イベント無し」＝成功で空。
             all_splits: list[tuple[str, float]] = []
             try:
-                all_splits = _parse_yfinance_splits(ticker.splits)
+                if "Stock Splits" not in history:
+                    raise RuntimeError("Stock Splits 列なし")
+                all_splits = _parse_yfinance_splits(
+                    _nonzero_events(history["Stock Splits"])
+                )
                 succeeded.add("splits")
             except Exception as exc:
                 errors.append(f"分割取得失敗: {holding.symbol} ({exc})")
             keep_since = (date.today() - timedelta(days=_SPLIT_KEEP_DAYS)).isoformat()
             recent_splits = [(d, r) for d, r in all_splits if d >= keep_since]
             try:
-                series = ticker.dividends
+                if "Dividends" not in history:
+                    raise RuntimeError("Dividends 列なし")
                 div_ps, div_date, div_ratios = _parse_yfinance_dividends(
-                    series, all_splits
+                    _nonzero_events(history["Dividends"]), all_splits
                 )
                 succeeded.add("dividend")
             except Exception as exc:

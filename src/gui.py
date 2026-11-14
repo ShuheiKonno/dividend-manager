@@ -7,11 +7,14 @@
 from __future__ import annotations
 
 import sys
+import threading
 from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Iterable, Optional
 
-from PySide6.QtCore import Qt, QObject, QThread, Signal, QSortFilterProxyModel, QRect, QUrl
+from PySide6.QtCore import (
+    Qt, QObject, QThread, QTimer, Signal, QSortFilterProxyModel, QRect, QUrl,
+)
 from PySide6.QtGui import (
     QAction,
     QActionGroup,
@@ -337,6 +340,16 @@ def cell_sort_value(
     return value
 
 
+def _trim_trailing_zeros(text: str) -> str:
+    """小数点を含む数字文字列の末尾の 0 と、残った小数点を落とす（`450.00` → `450`）。
+
+    小数点を含まない文字列には触れない（`1,500` を `1,5` にしない。`N/A` もそのまま）。
+    """
+    if "." not in text:
+        return text
+    return text.rstrip("0").rstrip(".")
+
+
 def _format_cell(
     row: dict, key: str, fund_share_unit: str = DEFAULT_FUND_SHARE_UNIT
 ) -> tuple[str, Optional[QColor]]:
@@ -366,11 +379,13 @@ def _cell_text_and_color(
             return splits.done_flag_text(done), QColor(theme.SPLIT_DONE)
         return "", None
     if key == "shares":
-        # 投信の口数は表示単位で見せる（保存値は常に万口単位）。
-        return fmt_number(
+        # 投信の口数は表示単位で見せる（保存値は常に万口単位）。株式はほぼ整数なので
+        # `.00` が並ばないよう末尾の 0 を落とす（並び替えの生値は別。単価・株価など
+        # 桁が揃っていることに意味のある列は 2 桁のまま）。
+        return _trim_trailing_zeros(fmt_number(
             to_display_shares(safe_float(val), row.get("asset_type"), fund_share_unit),
             2,
-        ), None
+        )), None
     if key == "asset_type":
         text = str(val or "")
         return ASSET_TYPE_LABELS.get(text, text), None
@@ -2103,6 +2118,13 @@ class DividendWindow(QMainWindow):
                 ),
             },
         )
+        # 当日の記録が既にあって中身が同じなら書き直さない（起動し直し・再読込のたびに
+        # 履歴全体を書くと、クラウド同期のフォルダではそのつど全体が同期される）。
+        # 既存側は CSV から読み直した値なので、dataclass の == ではなく CSV に書く表現
+        # （to_dict）で比べる。
+        existing = next((r for r in self.history if r.record_date == today), None)
+        if existing is not None and existing.to_dict() == record.to_dict():
+            return None
         history = upsert_record(self.history, record)
         if not self._save_or_notify(lambda: save_history(history)):
             return
@@ -3357,8 +3379,41 @@ def _ensure_app() -> QApplication:
     return app
 
 
+# ウィンドウ表示から先読みを始めるまでの待ち（ms）。起動直後の最初の描画と操作に
+# 重ならないようにする。
+PREWARM_DELAY_MS = 3000
+
+
+def _prewarm_market_data() -> threading.Thread:
+    """yfinance を裏で読み込んでおく（初回 F5 の待ち時間から import ぶんを除く）。
+
+    yfinance は初回の F5 で初めて import される（単独で約 1 秒、冷えた状態では数秒）。
+    ウィンドウを出した後に、デーモンスレッドで読み込んでおく。失敗しても何もしない——
+    F5 のときに同じ import が走り、そこで通常どおりエラーになる。
+
+    **main() だけから呼ぶ**。build_window() / DividendWindow.__init__ へ入れると、
+    テストやスモークのたびに yfinance を読み込み、起動パスに重い import を載せない方針も
+    破る。QThread は使わない（_busy / closeEvent の管理対象を増やさない）。デーモン
+    スレッドなので、読み込み中にアプリを閉じてもプロセスは終了する。先読みと F5 が
+    同時に走っても import ロックが二重読み込みを防ぐので、排他は持たない。
+    """
+
+    def _load() -> None:
+        try:
+            from .market_data import _yf
+
+            _yf()
+        except Exception:  # noqa: BLE001 — 先読みの失敗は表に出さない
+            pass
+
+    thread = threading.Thread(target=_load, name="prewarm-yfinance", daemon=True)
+    thread.start()
+    return thread
+
+
 def main() -> None:
     app = _ensure_app()
     win = build_window()
     win.show()
+    QTimer.singleShot(PREWARM_DELAY_MS, _prewarm_market_data)
     sys.exit(app.exec())
