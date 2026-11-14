@@ -1487,6 +1487,53 @@ def _run_window_checks(w) -> None:
     _check_split_flags(w)
 
 
+def _check_dialog_height() -> None:
+    """編集・新規ダイアログが、中身が必要とする高さで開くこと（支払月が潰れない）。
+
+    Qt は最初に開くとき高さを画面の 2/3 までに抑え、折り返しラベルを含むレイアウトでは
+    minimumSizeHint も低く出る。不足分が支払月のチェックボックス群へ押し付けられ、
+    3 行が重なって読めなくなっていた（入力エラーのラベルが出るとさらに不足する）。
+    実データの銘柄を探さず _holding / _market で作る（空データでも通すため）。
+    """
+    from PySide6.QtWidgets import QLineEdit
+
+    ratios = {6: 0.5, 12: 0.5}  # 自動判定の月が出る（トグル付きの支払月欄になる）
+    cases = {
+        "編集・株式": lambda: EditHoldingDialog(
+            _holding(), market=_market(div_ex_month_ratios=ratios)
+        ),
+        "編集・投信": lambda: EditHoldingDialog(
+            _holding(symbol="JP90C000J569", asset_type="fund")
+        ),
+        "新規": lambda: NewHoldingDialog(_holding(symbol="", name="")),
+    }
+    app = QApplication.instance()
+
+    def _assert_fits(dlg, label: str, when: str) -> None:
+        for group in dlg.findChildren(MonthCheckboxGroup):
+            assert group.height() >= group.minimumSizeHint().height(), (
+                f"{label}（{when}）: 支払月欄が潰れている "
+                f"{group.height()} < {group.minimumSizeHint().height()}"
+            )
+        assert dlg.height() >= dlg.sizeHint().height(), (
+            f"{label}（{when}）: ダイアログの高さが足りない "
+            f"{dlg.height()} < {dlg.sizeHint().height()}"
+        )
+
+    for label, make in cases.items():
+        dlg = make()
+        dlg.show()
+        app.processEvents()
+        _assert_fits(dlg, label, "開いた直後")
+        # 入力エラーのラベルが出ると必要な高さが増える。
+        target = next(e for e in dlg.findChildren(QLineEdit) if e in dlg._validators)
+        target.setText("abc")
+        app.processEvents()
+        assert not dlg._error_label.isHidden(), f"{label}: エラーラベルが出ない"
+        _assert_fits(dlg, label, "エラー表示後")
+        dlg.close()
+
+
 def _run_dialog_checks() -> None:
     # 編集ダイアログ: 即時バリデーション（赤枠プロパティ＋集約エラーラベル）
     dlg = EditHoldingDialog(_holding())
@@ -1504,6 +1551,7 @@ def _run_dialog_checks() -> None:
     assert {nd._asset_type.itemData(i) for i in range(nd._asset_type.count())} == {"stock", "fund"}
     assert {nd._currency.itemData(i) for i in range(nd._currency.count())} == {"JPY", "USD"}
 
+    _check_dialog_height()
     _check_account_combo()
     _check_auto_fields_are_untouched()
     _check_month_checkboxes()

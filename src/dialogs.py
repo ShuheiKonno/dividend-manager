@@ -331,9 +331,30 @@ class _HoldingDialogBase(QDialog):
             if message:
                 self._error_label.setText(message)
                 self._error_label.setVisible(True)
-                return
-        self._error_label.setText("")
-        self._error_label.setVisible(False)
+                break
+        else:
+            self._error_label.setText("")
+            self._error_label.setVisible(False)
+        # 表示の切替・文言の変更（折り返しで行数が変わる）のたびに必要な高さを取り直す。
+        self._fit_height()
+
+    def _fit_height(self) -> None:
+        """折り返しラベルのぶん不足する高さを補う（必要な高さを最小高さにする）。
+
+        Qt は最初に開くとき高さを画面の 2/3 までに抑え、さらに折り返し（setWordWrap）
+        ラベルを含むレイアウトでは minimumSizeHint が実際の必要量より低く出る。
+        不足分は縮められる部品（支払月のチェックボックス群）へ押し付けられ、
+        3 行が重なって読めなくなる。エラーラベルの表示で必要な高さが増えるので、
+        開いたときだけでなく表示の切替のたびに取り直す（縮めない＝入力中に揺れない）。
+        レイアウトが出来上がる前（基底クラスの初期化中）は何もしない。
+        """
+        layout = self.layout()
+        if layout is None:
+            return
+        layout.activate()
+        self.setMinimumHeight(
+            max(self.sizeHint().height(), self.minimumSizeHint().height())
+        )
 
 
 # ---- 編集 / 新規ダイアログ ----
@@ -477,6 +498,7 @@ class EditHoldingDialog(_HoldingDialogBase):
         ]))
         layout.addWidget(self._error_label)
         layout.addWidget(buttons)
+        self._fit_height()
 
     def _on_save(self) -> None:
         try:
@@ -639,6 +661,7 @@ class NewHoldingDialog(_HoldingDialogBase):
         ]))
         layout.addWidget(self._error_label)
         layout.addWidget(buttons)
+        self._fit_height()
 
     def _current_asset_type(self) -> str:
         return str(self._asset_type.currentData())
