@@ -29,7 +29,7 @@ a = Analysis(
     hookspath=[],
     hooksconfig={},
     runtime_hooks=[],
-    # 旧 TUI（legacy_tui.py）専用・テスト専用の依存は GUI に不要
+    # GUI に不要な依存（旧 TUI の名残・テスト専用）を同梱しない
     excludes=["textual", "rich", "pytest", "tkinter"],
     noarchive=False,
 )
