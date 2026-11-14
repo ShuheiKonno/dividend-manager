@@ -1415,6 +1415,15 @@ def _run_checks(data: Path) -> None:
 
 def _run_window_checks(w) -> None:
 
+    # 中身が必要とする最小の高さがウィンドウの最小高さに収まること（収まらないと、
+    # 縮めたウィンドウでチャートの下側が切れ、月別タブの注記が棒に重なる）。
+    # オフスクリーンは実フォントより約 50px 低く出るので、これが緑でもネイティブで
+    # 溢れていることはあり得る——実フォントでの確認は CLAUDE.md の手順（windows
+    # プラットフォーム＋WA_DontShowOnScreen で minimumSizeHint を出力）で行う。
+    assert w.minimumSizeHint().height() <= w.minimumHeight(), (
+        f"最小高さが足りない: 必要 {w.minimumSizeHint().height()} > {w.minimumHeight()}"
+    )
+
     # タブ・メニュー構成
     assert w._tabs.count() == 5, "タブが5つ生成されていない"
     # 並びはグラフ系3枚（評価額 / 配当金 / 月別配当）→ 明細2枚（株価詳細 / 配当優待詳細）。

@@ -39,6 +39,12 @@ from .utils import (
     date_axis_ticks,
 )
 
+# チャートの最小サイズ。ウィンドウの最小高さ（900x600）に収まる値にしてある
+# （実フォントで全体の最小の高さが 597px。170→180 / 160→170 にすると 607px で溢れる）。
+# 大きくすると、縮めたウィンドウでチャートの下側が切れ、月別タブの注記が棒に重なる。
+_CHART_MIN_SIZE = (320, 170)
+_BAR_CHART_MIN_SIZE = (360, 160)
+
 # 株価未取得時などチャートが空のときに中央表示する既定メッセージ
 _EMPTY_MESSAGE = "株価未取得 — F5 で株価・配当を取得してください"
 
@@ -204,7 +210,7 @@ class TreemapWidget(QWidget):
         self._value_key: str = "market_value_jpy"
         self._value_label: str = "評価額"
         self._empty_message: str = _EMPTY_MESSAGE
-        self.setMinimumSize(420, 320)
+        self.setMinimumSize(*_CHART_MIN_SIZE)
         self.setMouseTracking(True)
         self.setAutoFillBackground(True)
 
@@ -381,7 +387,7 @@ class PieChartWidget(QWidget):
         self._value_key: str = "market_value_jpy"
         self._value_label: str = "評価額"
         self._empty_message: str = _EMPTY_MESSAGE
-        self.setMinimumSize(420, 320)
+        self.setMinimumSize(*_CHART_MIN_SIZE)
         self.setMouseTracking(True)
         self.setAutoFillBackground(True)
 
@@ -793,7 +799,7 @@ class LineChartWidget(QWidget):
         self._floor: float = 0.0            # Y 軸下限値
         self._top: float = 1.0              # Y 軸上限値
         self._hover_idx: int | None = None
-        self.setMinimumSize(420, 320)
+        self.setMinimumSize(*_CHART_MIN_SIZE)
         self.setMouseTracking(True)
         self.setAutoFillBackground(True)
 
@@ -1027,7 +1033,7 @@ class BarChartWidget(QWidget):
         self._selected: int | None = None
         self._hover_month: int | None = None
         self._top: float = 1.0
-        self.setMinimumSize(480, 300)
+        self.setMinimumSize(*_BAR_CHART_MIN_SIZE)
         self.setMouseTracking(True)
         self.setAutoFillBackground(True)
 
